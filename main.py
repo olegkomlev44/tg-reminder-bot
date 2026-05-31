@@ -10,7 +10,7 @@ import asyncio
 from PIL import Image, ImageDraw, ImageFont
 
 # ================= НАСТРОЙКИ =================
-TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"  # Замените на свой токен
+TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"
 CHAT_ID = -1003782926765          # ← Замените на ID вашей группы
 ADMIN_IDS = [891298064,715554757]           # ← ID админов (можно несколько через запятую)
 
@@ -29,6 +29,8 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS daily_done
                  (date TEXT, task_type TEXT, user_name TEXT,
                   PRIMARY KEY (date, task_type))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS bot_state
+                 (key TEXT PRIMARY KEY, value TEXT)''')  # для хранения последнего ID сообщения
 
     default_svodki = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Слава", "Ильнар"]
     default_procedurka = ["Илья", "Слава", "Саша", "Игоооорь", "Глеба", "Ильнар"]
@@ -59,6 +61,31 @@ def update_setting(key, value):
     c.execute("REPLACE INTO settings VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
+
+# Сохранение ID последнего сообщения бота (для удаления)
+def save_last_message_id(message_id: int):
+    conn = sqlite3.connect('reminder.db')
+    c = conn.cursor()
+    c.execute("REPLACE INTO bot_state VALUES ('last_msg', ?)", (str(message_id),))
+    conn.commit()
+    conn.close()
+
+def get_last_message_id():
+    conn = sqlite3.connect('reminder.db')
+    c = conn.cursor()
+    c.execute("SELECT value FROM bot_state WHERE key='last_msg'")
+    row = c.fetchone()
+    conn.close()
+    return int(row[0]) if row else None
+
+async def delete_previous_message(app, chat_id: int):
+    """Удаляет предыдущее сообщение бота, если оно есть"""
+    prev_id = get_last_message_id()
+    if prev_id:
+        try:
+            await app.bot.delete_message(chat_id=chat_id, message_id=prev_id)
+        except Exception:
+            pass  # если сообщение уже удалено или не найдено
 
 # ================= ЛОГИКА УСТАНОВКИ КОНКРЕТНОГО ЧЕЛОВЕКА =================
 def set_current_person(list_key: str, start_date_key: str, person_name: str):
@@ -106,18 +133,11 @@ def get_text_message():
 
 # ================= ГЕНЕРАЦИЯ ДЕМОТИВАТОРА =================
 def generate_demotivator(svodki_name: str, procedurka_name: str, date_str: str) -> BytesIO:
-    """Создаёт картинку-демотиватор с указанием ответственных."""
-    # Размеры картинки
     width, height = 800, 600
-    # Создаём белую подложку
     img = Image.new('RGB', (width, height), color='white')
     draw = ImageDraw.Draw(img)
-    
-    # Рисуем чёрную рамку (демотиватор)
     border = 20
     draw.rectangle([(border, border), (width - border, height - border)], outline='black', width=10)
-    
-    # Пытаемся загрузить шрифты, если нет — используем дефолтный
     try:
         font_title = ImageFont.truetype("arial.ttf", 40)
         font_name = ImageFont.truetype("arial.ttf", 60)
@@ -126,32 +146,22 @@ def generate_demotivator(svodki_name: str, procedurka_name: str, date_str: str) 
         font_title = ImageFont.load_default()
         font_name = ImageFont.load_default()
         font_date = ImageFont.load_default()
-    
-    # Верхний текст (заголовок)
     title = "НАПОМИНАНИЕ НА СЕГОДНЯ"
-    # Центрируем заголовок
     bbox = draw.textbbox((0,0), title, font=font_title)
     title_w = bbox[2] - bbox[0]
     draw.text(((width - title_w)//2, 60), title, fill='black', font=font_title)
-    
-    # Имена
     svodki_text = f"📦 Относить сводки: {svodki_name}"
     proc_text = f"🧹 Уборка процедурки: {procedurka_name}"
-    # Центрируем каждую строку
     bbox1 = draw.textbbox((0,0), svodki_text, font=font_name)
     w1 = bbox1[2] - bbox1[0]
     bbox2 = draw.textbbox((0,0), proc_text, font=font_name)
     w2 = bbox2[2] - bbox2[0]
     draw.text(((width - w1)//2, 200), svodki_text, fill='black', font=font_name)
     draw.text(((width - w2)//2, 320), proc_text, fill='black', font=font_name)
-    
-    # Дата снизу
     date_text = f"📅 {date_str}"
     bbox_date = draw.textbbox((0,0), date_text, font=font_date)
     w_date = bbox_date[2] - bbox_date[0]
     draw.text(((width - w_date)//2, height - 100), date_text, fill='gray', font=font_date)
-    
-    # Сохраняем в BytesIO
     bio = BytesIO()
     bio.name = 'demotivator.png'
     img.save(bio, 'PNG')
@@ -239,7 +249,6 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# Пагинация для списков
 async def send_list_page(update_or_query, context, list_type, page=0):
     svodki = get_setting('svodki')
     procedurka = get_setting('procedurka')
@@ -273,36 +282,49 @@ async def send_list_page(update_or_query, context, list_type, page=0):
     keyboard.append([InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     if isinstance(update_or_query, Update):
-        await update_or_query.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        # Команда от пользователя — удаляем старое сообщение бота перед отправкой
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await update_or_query.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        save_last_message_id(sent.message_id)
     else:
+        # Это callback_query — редактируем существующее сообщение
         await update_or_query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
 
 # ================= ОБРАБОТЧИКИ =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Бот готов!\nВыберите действие:", reply_markup=main_menu())
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_text("👋 Бот готов!\nВыберите действие:", reply_markup=main_menu())
+    save_last_message_id(sent.message_id)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     if data == "today":
-        # Отправляем демотиватор вместо текста
         svodki_name, proc_name = get_today_info()
         today_str = datetime.now().strftime('%d.%m.%Y')
         img_bio = generate_demotivator(svodki_name, proc_name, today_str)
-        await query.message.reply_photo(photo=img_bio, caption=get_text_message(), parse_mode='HTML', reply_markup=main_menu())
-        await query.delete_message()  # удаляем предыдущее сообщение с кнопкой
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await query.message.reply_photo(photo=img_bio, caption=get_text_message(), parse_mode='HTML', reply_markup=main_menu())
+        save_last_message_id(sent.message_id)
+        await query.delete_message()
     elif data == "quick_today":
         svodki_name, proc_name = get_today_info()
         text = f"📅 Сегодня:\n📦 Сводки: {svodki_name}\n🧹 Уборка: {proc_name}"
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=main_menu())
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await query.message.reply_text(text, parse_mode='HTML', reply_markup=main_menu())
+        save_last_message_id(sent.message_id)
+        await query.delete_message()
     elif data == "list":
         keyboard = [
             [InlineKeyboardButton("📦 Сводки", callback_data="list_svodki_0")],
             [InlineKeyboardButton("🧹 Уборка", callback_data="list_procedurka_0")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
         ]
-        await query.edit_message_text("Выберите список:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await query.message.reply_text("Выберите список:", reply_markup=InlineKeyboardMarkup(keyboard))
+        save_last_message_id(sent.message_id)
+        await query.delete_message()
     elif data.startswith("list_"):
         parts = data.split('_')
         if len(parts) == 3:
@@ -325,7 +347,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += "🧹 Уборка:\n"
                 for user, cnt in sorted(procedurka_stats.items(), key=lambda x: x[1], reverse=True):
                     text += f"  {user}: {cnt} раз\n"
-        await query.edit_message_text(text, parse_mode='HTML', reply_markup=main_menu())
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await query.message.reply_text(text, parse_mode='HTML', reply_markup=main_menu())
+        save_last_message_id(sent.message_id)
+        await query.delete_message()
     elif data == "toggle_shave_menu":
         if update.effective_user.id not in ADMIN_IDS:
             await query.edit_message_text("⛔️ Только администраторы могут изменить эту настройку.", reply_markup=main_menu())
@@ -334,7 +359,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_value = '0' if current == '1' else '1'
         update_setting('shave_enabled', new_value)
         status_text = "включено" if new_value == '1' else "выключено"
-        await query.edit_message_text(f"🪒 Напоминание о бритье {status_text}.", reply_markup=main_menu())
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await query.message.reply_text(f"🪒 Напоминание о бритье {status_text}.", reply_markup=main_menu())
+        save_last_message_id(sent.message_id)
+        await query.delete_message()
     elif data in ["edit_svodki", "edit_procedurka", "set_current_svodki", "set_current_procedurka"]:
         if data == "edit_svodki":
             msg = "Отправьте команду:\n`/set_svodki Саша, Олег, Максим, ...`"
@@ -344,9 +372,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "Отправьте команду:\n`/set_current_svodki Максим`"
         else:
             msg = "Отправьте команду:\n`/set_current_procedurka Игоооорь`"
-        await query.edit_message_text(msg, parse_mode='Markdown')
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await query.message.reply_text(msg, parse_mode='Markdown')
+        save_last_message_id(sent.message_id)
+        await query.delete_message()
     elif data == "back_to_menu":
-        await query.edit_message_text("Главное меню:", reply_markup=main_menu())
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await query.message.reply_text("Главное меню:", reply_markup=main_menu())
+        save_last_message_id(sent.message_id)
+        await query.delete_message()
 
 async def task_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -359,8 +393,23 @@ async def task_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user_name = svodki_name if task_type == "svodki" else proc_name
         if mark_done(today_str, task_type, user_name):
             await query.edit_message_text(f"✅ Спасибо, {user_name}! Выполнение отмечено.")
+            # Автоматически удалим это сообщение через 10 секунд
+            async def delete_later():
+                await asyncio.sleep(10)
+                try:
+                    await query.message.delete()
+                except:
+                    pass
+            asyncio.create_task(delete_later())
         else:
             await query.edit_message_text(f"⚠️ За сегодня уже отмечено выполнение по {task_type}.")
+            async def delete_later():
+                await asyncio.sleep(5)
+                try:
+                    await query.message.delete()
+                except:
+                    pass
+            asyncio.create_task(delete_later())
 
 # ================= КОМАНДЫ =================
 async def set_current_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -372,7 +421,9 @@ async def set_current_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     name = ' '.join(context.args).strip()
     success, msg = set_current_person('svodki', 'svodki_start_date', name)
-    await update.message.reply_text(msg, parse_mode='HTML')
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_text(msg, parse_mode='HTML')
+    save_last_message_id(sent.message_id)
 
 async def set_current_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -383,7 +434,9 @@ async def set_current_procedurka(update: Update, context: ContextTypes.DEFAULT_T
         return
     name = ' '.join(context.args).strip()
     success, msg = set_current_person('procedurka', 'procedurka_start_date', name)
-    await update.message.reply_text(msg, parse_mode='HTML')
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_text(msg, parse_mode='HTML')
+    save_last_message_id(sent.message_id)
 
 async def set_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -400,7 +453,9 @@ async def set_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_setting('svodki', names)
     today = datetime.now().date()
     update_setting('svodki_start_date', today.isoformat())
-    await update.message.reply_text(f"✅ Список сводок обновлён: {', '.join(names)}")
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_text(f"✅ Список сводок обновлён: {', '.join(names)}")
+    save_last_message_id(sent.message_id)
 
 async def set_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -417,13 +472,17 @@ async def set_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_setting('procedurka', names)
     today = datetime.now().date()
     update_setting('procedurka_start_date', today.isoformat())
-    await update.message.reply_text(f"✅ Список уборки обновлён: {', '.join(names)}")
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_text(f"✅ Список уборки обновлён: {', '.join(names)}")
+    save_last_message_id(sent.message_id)
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     svodki_name, proc_name = get_today_info()
     today_str = datetime.now().strftime('%d.%m.%Y')
     img_bio = generate_demotivator(svodki_name, proc_name, today_str)
-    await update.message.reply_photo(photo=img_bio, caption=get_text_message(), parse_mode='HTML', reply_markup=main_menu())
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_photo(photo=img_bio, caption=get_text_message(), parse_mode='HTML', reply_markup=main_menu())
+    save_last_message_id(sent.message_id)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now()
@@ -441,7 +500,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += "🧹 Уборка:\n"
             for user, cnt in sorted(procedurka_stats.items(), key=lambda x: x[1], reverse=True):
                 text += f"  {user}: {cnt} раз\n"
-    await update.message.reply_text(text, parse_mode='HTML')
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_text(text, parse_mode='HTML')
+    save_last_message_id(sent.message_id)
 
 async def toggle_shave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -451,7 +512,9 @@ async def toggle_shave_command(update: Update, context: ContextTypes.DEFAULT_TYP
     new_value = '0' if current == '1' else '1'
     update_setting('shave_enabled', new_value)
     status_text = "включено" if new_value == '1' else "выключено"
-    await update.message.reply_text(f"🪒 Напоминание о бритье {status_text}.")
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_text(f"🪒 Напоминание о бритье {status_text}.")
+    save_last_message_id(sent.message_id)
 
 # ================= ТАЙМЕРЫ НА ВЫПОЛНЕНИЕ =================
 async def ask_for_task_completion(app, task_type: str, delay_minutes: int = 0):
@@ -466,15 +529,26 @@ async def ask_for_task_completion(app, task_type: str, delay_minutes: int = 0):
         text = f"⏰ Напоминание: {user}, вы уже убрали процедурку? Нажмите кнопку ниже."
         callback_data = "done_procedurka"
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Выполнено", callback_data=callback_data)]])
-    await app.bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=keyboard)
+    # Для опроса не удаляем предыдущее сообщение, чтобы не потерять важное
+    sent = await app.bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=keyboard)
+    # Запланируем удаление этого сообщения через 2 часа, чтобы не висело
+    async def delete_after():
+        await asyncio.sleep(7200)
+        try:
+            await sent.delete()
+        except:
+            pass
+    asyncio.create_task(delete_after())
 
 async def daily_reminder_and_timers(app):
-    # Отправляем демотиватор с подписью
     svodki_name, proc_name = get_today_info()
     today_str = datetime.now().strftime('%d.%m.%Y')
     img_bio = generate_demotivator(svodki_name, proc_name, today_str)
-    await app.bot.send_photo(chat_id=CHAT_ID, photo=img_bio, caption=get_text_message(), parse_mode='HTML')
-    # Таймеры для выполнения
+    # Удаляем предыдущее сообщение бота и отправляем новое напоминание
+    await delete_previous_message(app, CHAT_ID)
+    sent = await app.bot.send_photo(chat_id=CHAT_ID, photo=img_bio, caption=get_text_message(), parse_mode='HTML')
+    save_last_message_id(sent.message_id)
+    # Таймеры
     now = datetime.now()
     target_23 = datetime(now.year, now.month, now.day, 23, 0, 0)
     if now >= target_23:
@@ -507,7 +581,7 @@ def main():
     scheduler.add_job(lambda: asyncio.create_task(send_monthly_report(app)), "cron", day=1, hour=10, minute=0)
     scheduler.start()
 
-    print("✅ Бот запущен. Генерация демотиваторов включена.")
+    print("✅ Бот запущен. Добавлено удаление старых сообщений.")
     app.run_polling()
 
 if __name__ == "__main__":
