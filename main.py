@@ -40,7 +40,7 @@ def init_db():
                  (key TEXT PRIMARY KEY, value TEXT)''')
 
     default_svodki = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Слава", "Ильнар"]
-    default_procedurka = ["Илья", "Слава", "Саша", "Игоооорь", "Глеба", "Ильнар"]
+    default_procedurka = ["Илья", "Слава", "Саша", "Игорь", "Глеба", "Ильнар"]
 
     c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki', ?)", (json.dumps(default_svodki),))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka', ?)", (json.dumps(default_procedurka),))
