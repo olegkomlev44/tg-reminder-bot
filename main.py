@@ -8,8 +8,8 @@ import logging
 
 TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"
 
-CHAT_ID = -1003782926765          # ← Замени!
-ADMIN_IDS = [891298064]           # ← Добавь свой ID
+CHAT_ID = -1003782926765          # ← Замени на реальный!
+ADMIN_IDS = [891298064]           # ← Добавь свой Telegram ID
 
 # ================= БАЗА ДАННЫХ =================
 def init_db():
@@ -46,7 +46,7 @@ def update_setting(key, value):
     conn.commit()
     conn.close()
 
-# ================= СООБЩЕНИЕ =================
+# ================= ОСНОВНЫЕ ФУНКЦИИ =================
 def get_message():
     today = datetime.now().date()
     start_date = date.fromisoformat(get_setting('start_date'))
@@ -73,6 +73,26 @@ def get_message():
 📅 {today.strftime('%d.%m.%Y')} | День {days_passed+1}
 """
 
+def set_current_person(list_key: str, person_name: str):
+    """Сдвигает очередь так, чтобы указанный человек был сегодня"""
+    people = get_setting(list_key)
+    if person_name not in people:
+        return False, f"❌ Человек '{person_name}' не найден в списке."
+    
+    current_start = date.fromisoformat(get_setting('start_date'))
+    today = datetime.now().date()
+    current_days = (today - current_start).days
+    
+    # Находим текущий индекс человека
+    current_index = people.index(person_name)
+    
+    # Вычисляем нужное смещение
+    target_days = current_days - current_index
+    new_start_date = today - timedelta(days=target_days)
+    
+    update_setting('start_date', new_start_date.isoformat())
+    return True, f"✅ {person_name} теперь назначен на сегодня по {list_key}"
+
 # ================= КЛАВИАТУРЫ =================
 def main_menu():
     keyboard = [
@@ -80,13 +100,14 @@ def main_menu():
         [InlineKeyboardButton("📋 Показать списки", callback_data="list")],
         [InlineKeyboardButton("✏️ Изменить сводки", callback_data="edit_svodki")],
         [InlineKeyboardButton("🧹 Изменить уборку", callback_data="edit_procedurka")],
-        [InlineKeyboardButton("📆 Сдвинуть очередь", callback_data="offset")],
+        [InlineKeyboardButton("🎯 Сдвинуть сводки на человека", callback_data="set_current_svodki")],
+        [InlineKeyboardButton("🎯 Сдвинуть уборку на человека", callback_data="set_current_procedurka")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 # ================= ОБРАБОТЧИКИ =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Бот-напоминалка готов!\nВыбери действие:", reply_markup=main_menu())
+    await update.message.reply_text("👋 Бот готов!\nВыбери действие в меню:", reply_markup=main_menu())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -94,37 +115,56 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "today":
         await query.edit_message_text(get_message(), parse_mode='HTML', reply_markup=main_menu())
-    
+
     elif query.data == "list":
         svodki = get_setting('svodki')
         procedurka = get_setting('procedurka')
-        start_date = get_setting('start_date')
-        
         text = f"""<b>Текущие списки:</b>
 
-📦 <b>Сводки</b> ({len(svodki)} чел.):
+📦 Сводки:
 {chr(10).join([f"{i+1}. {name}" for i, name in enumerate(svodki)])}
 
-🧹 <b>Уборка</b> ({len(procedurka)} чел.):
-{chr(10).join([f"{i+1}. {name}" for i, name in enumerate(procedurka)])}
-
-📅 Начало отсчёта: {start_date}"""
+🧹 Уборка:
+{chr(10).join([f"{i+1}. {name}" for i, name in enumerate(procedurka)])}"""
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=main_menu())
 
     elif query.data == "edit_svodki":
-        await query.edit_message_text("Отправь команду:\n`/set_svodki Саша, Олег, Максим, ...`", parse_mode='Markdown')
+        await query.edit_message_text("Отправь:\n`/set_svodki Саша, Олег, Максим, ...`", parse_mode='MarkdownV2')
     
     elif query.data == "edit_procedurka":
-        await query.edit_message_text("Отправь команду:\n`/set_procedurka Илья, Слава, Саша, ...`", parse_mode='Markdown')
+        await query.edit_message_text("Отправь:\n`/set_procedurka Илья, Слава, Саша, ...`", parse_mode='MarkdownV2')
+
+    elif query.data == "set_current_svodki":
+        await query.edit_message_text("Отправь команду:\n`/set_current_svodki Максим`", parse_mode='Markdown')
     
-    elif query.data == "offset":
-        await query.edit_message_text("Отправь:\n`/set_offset 3` — чтобы сдвинуть очередь на 3 дня", parse_mode='Markdown')
+    elif query.data == "set_current_procedurka":
+        await query.edit_message_text("Отправь команду:\n`/set_current_procedurka Слава`", parse_mode='Markdown')
+
+# ================= КОМАНДЫ =================
+async def set_current_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔️ Доступно только администраторам.")
+        return
+    if not context.args:
+        await update.message.reply_text("Пример: `/set_current_svodki Максим`")
+        return
+    name = ' '.join(context.args).strip()
+    success, msg = set_current_person('svodki', name)
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+async def set_current_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔️ Доступно только администраторам.")
+        return
+    if not context.args:
+        await update.message.reply_text("Пример: `/set_current_procedurka Слава`")
+        return
+    name = ' '.join(context.args).strip()
+    success, msg = set_current_person('procedurka', name)
+    await update.message.reply_text(msg, parse_mode='HTML')
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_message(), parse_mode='HTML', reply_markup=main_menu())
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Нажми кнопку «Меню» ниже или используй команды", reply_markup=main_menu())
 
 # ================= ЗАПУСК =================
 def main():
@@ -135,10 +175,11 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today_command))
-    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("set_current_svodki", set_current_svodki))
+    app.add_handler(CommandHandler("set_current_procedurka", set_current_procedurka))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Планировщик на 18:00
+    # Планировщик
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(
         lambda: app.bot.send_message(chat_id=CHAT_ID, text=get_message(), parse_mode='HTML'),
@@ -146,7 +187,7 @@ def main():
     )
     scheduler.start()
 
-    print("✅ Бот с кнопками запущен!")
+    print("✅ Бот с функцией выбора человека запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
