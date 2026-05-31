@@ -1,25 +1,23 @@
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import sqlite3
 import json
 import logging
 
 TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"
 
-# ================= НАСТРОЙКИ =================
-CHAT_ID = -1001234567890          # ← Замени на реальный ID группы!
-ADMIN_IDS = [123456789]           # ← Добавь сюда свои Telegram ID (через @userinfobot)
+CHAT_ID = -1001234567890          # ← Замени!
+ADMIN_IDS = [123456789]           # ← Добавь свой ID
 
-# Инициализация БД
+# ================= БАЗА ДАННЫХ =================
 def init_db():
     conn = sqlite3.connect('reminder.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS settings
                  (key TEXT PRIMARY KEY, value TEXT)''')
     
-    # Значения по умолчанию
     default_svodki = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Слава", "Ильнар"]
     default_procedurka = ["Илья", "Слава", "Саша", "Игоооорь", "Глеба", "Ильнар"]
     
@@ -35,7 +33,9 @@ def get_setting(key):
     c.execute("SELECT value FROM settings WHERE key=?", (key,))
     result = c.fetchone()
     conn.close()
-    return json.loads(result[0]) if key in ['svodki', 'procedurka'] else result[0] if result else None
+    if key in ['svodki', 'procedurka']:
+        return json.loads(result[0]) if result else []
+    return result[0] if result else None
 
 def update_setting(key, value):
     conn = sqlite3.connect('reminder.db')
@@ -46,7 +46,7 @@ def update_setting(key, value):
     conn.commit()
     conn.close()
 
-# Получить сообщение
+# ================= СООБЩЕНИЕ =================
 def get_message():
     today = datetime.now().date()
     start_date = date.fromisoformat(get_setting('start_date'))
@@ -70,94 +70,61 @@ def get_message():
 🎖 {proc_name}
 
 ━━━━━━━━━━━━━━━
-📅 Сегодня: {today.strftime('%d.%m.%Y')}
-    """
+📅 {today.strftime('%d.%m.%Y')} | День {days_passed+1}
+"""
 
-# ================= КОМАНДЫ =================
+# ================= КЛАВИАТУРЫ =================
+def main_menu():
+    keyboard = [
+        [InlineKeyboardButton("📅 Сегодня", callback_data="today")],
+        [InlineKeyboardButton("📋 Показать списки", callback_data="list")],
+        [InlineKeyboardButton("✏️ Изменить сводки", callback_data="edit_svodki")],
+        [InlineKeyboardButton("🧹 Изменить уборку", callback_data="edit_procedurka")],
+        [InlineKeyboardButton("📆 Сдвинуть очередь", callback_data="offset")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# ================= ОБРАБОТЧИКИ =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот-напоминалка запущен!\n\nНапиши /help для списка команд.")
+    await update.message.reply_text("👋 Бот-напоминалка готов!\nВыбери действие:", reply_markup=main_menu())
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = """
-📋 <b>Доступные команды:</b>
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-/today — показать сегодняшнее назначение
-/list — показать текущие списки
-/set_svodki имя1, имя2, имя3... — изменить список сводок
-/set_procedurka имя1, имя2... — изменить список уборки
-/set_start_date ГГГГ-ММ-ДД — изменить дату начала отсчёта
-/set_offset N — сдвинуть очередь на N дней (например /set_offset 3)
-
-/help — это сообщение
-    """
-    await update.message.reply_text(text, parse_mode='HTML')
-
-async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(get_message(), parse_mode='HTML')
-
-async def show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    svodki = get_setting('svodki')
-    procedurka = get_setting('procedurka')
-    start_date = get_setting('start_date')
+    if query.data == "today":
+        await query.edit_message_text(get_message(), parse_mode='HTML', reply_markup=main_menu())
     
-    text = f"""<b>Текущие настройки:</b>
+    elif query.data == "list":
+        svodki = get_setting('svodki')
+        procedurka = get_setting('procedurka')
+        start_date = get_setting('start_date')
+        
+        text = f"""<b>Текущие списки:</b>
 
-📦 Сводки ({len(svodki)} чел.):
+📦 <b>Сводки</b> ({len(svodki)} чел.):
 {chr(10).join([f"{i+1}. {name}" for i, name in enumerate(svodki)])}
 
-🧹 Уборка ({len(procedurka)} чел.):
+🧹 <b>Уборка</b> ({len(procedurka)} чел.):
 {chr(10).join([f"{i+1}. {name}" for i, name in enumerate(procedurka)])}
 
-📅 Дата начала отсчёта: {start_date}"""
-    await update.message.reply_text(text, parse_mode='HTML')
+📅 Начало отсчёта: {start_date}"""
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=main_menu())
 
-# ================= РЕДАКТИРОВАНИЕ =================
-async def set_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔️ Только администраторы могут менять списки.")
-        return
-    if not context.args:
-        await update.message.reply_text("Пример: /set_svodki Саша, Олег, Максим")
-        return
-    names = [name.strip() for name in ' '.join(context.args).split(',')]
-    update_setting('svodki', names)
-    await update.message.reply_text(f"✅ Список сводок обновлён ({len(names)} человек)")
+    elif query.data == "edit_svodki":
+        await query.edit_message_text("Отправь команду:\n`/set_svodki Саша, Олег, Максим, ...`", parse_mode='Markdown')
+    
+    elif query.data == "edit_procedurka":
+        await query.edit_message_text("Отправь команду:\n`/set_procedurka Илья, Слава, Саша, ...`", parse_mode='Markdown')
+    
+    elif query.data == "offset":
+        await query.edit_message_text("Отправь:\n`/set_offset 3` — чтобы сдвинуть очередь на 3 дня", parse_mode='Markdown')
 
-async def set_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔️ Только администраторы могут менять списки.")
-        return
-    if not context.args:
-        await update.message.reply_text("Пример: /set_procedurka Илья, Слава, Саша")
-        return
-    names = [name.strip() for name in ' '.join(context.args).split(',')]
-    update_setting('procedurka', names)
-    await update.message.reply_text(f"✅ Список уборки обновлён ({len(names)} человек)")
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(get_message(), parse_mode='HTML', reply_markup=main_menu())
 
-async def set_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔️ Только администраторы.")
-        return
-    try:
-        date_str = context.args[0]
-        datetime.strptime(date_str, "%Y-%m-%d")
-        update_setting('start_date', date_str)
-        await update.message.reply_text(f"✅ Дата начала отсчёта изменена на {date_str}")
-    except:
-        await update.message.reply_text("❌ Неверный формат! Используй ГГГГ-ММ-ДД\nПример: /set_start_date 2026-06-01")
-
-async def set_offset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔️ Только администраторы.")
-        return
-    try:
-        offset = int(context.args[0])
-        start_date = date.fromisoformat(get_setting('start_date'))
-        new_date = start_date - timedelta(days=offset)
-        update_setting('start_date', new_date.isoformat())
-        await update.message.reply_text(f"✅ Очередь сдвинута на {offset} дней назад.")
-    except:
-        await update.message.reply_text("Пример: /set_offset 2")
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Нажми кнопку «Меню» ниже или используй команды", reply_markup=main_menu())
 
 # ================= ЗАПУСК =================
 def main():
@@ -167,15 +134,11 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("today", today_command))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("today", today))
-    app.add_handler(CommandHandler("list", show_list))
-    app.add_handler(CommandHandler("set_svodki", set_svodki))
-    app.add_handler(CommandHandler("set_procedurka", set_procedurka))
-    app.add_handler(CommandHandler("set_start_date", set_start_date))
-    app.add_handler(CommandHandler("set_offset", set_offset))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Планировщик
+    # Планировщик на 18:00
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(
         lambda: app.bot.send_message(chat_id=CHAT_ID, text=get_message(), parse_mode='HTML'),
@@ -183,7 +146,7 @@ def main():
     )
     scheduler.start()
 
-    print("✅ Бот с базой данных успешно запущен!")
+    print("✅ Бот с кнопками запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
