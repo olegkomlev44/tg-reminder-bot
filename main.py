@@ -23,7 +23,8 @@ def init_db():
     
     c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki', ?)", (json.dumps(default_svodki),))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka', ?)", (json.dumps(default_procedurka),))
-    c.execute("INSERT OR IGNORE INTO settings VALUES ('start_date', ?)", ("2026-06-01",))
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('start_date_svodki', ?)", ("2026-06-01",))
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('start_date_procedurka', ?)", ("2026-06-01",))
     conn.commit()
     conn.close()
 
@@ -47,41 +48,85 @@ def update_setting(key, value):
     conn.close()
 
 # ================= ИСПРАВЛЕННАЯ ФУНКЦИЯ =================
-def set_current_person(list_key: str, person_name: str):
-    """Точно ставит выбранного человека на СЕГОДНЯ"""
-    people = get_setting(list_key)
-    if not people:
-        return False, "❌ Список пустой."
-    if person_name not in people:
-        return False, f"❌ Человек '{person_name}' не найден в списке."
-    
-    index = people.index(person_name)           # Позиция человека в списке
-    today = datetime.now().date()
-    
-    # Делаем так, чтобы сегодня был именно этот индекс
-    # new_start_date = today - index дней
-    new_start_date = today - timedelta(days=index)
-    
-    update_setting('start_date', new_start_date.isoformat())
-    
-    # Проверка
-    days_passed = (today - new_start_date).days
-    check_index = days_passed % len(people)
-    
-    return True, f"✅ <b>{person_name}</b> поставлен на сегодня!\nПозиция в очереди: {index+1}/{len(people)}"
+def set_current_svodki_person(person_name: str):
+    people = get_setting('svodki')
 
+    if not people:
+        return False, "❌ Список пуст."
+
+    if person_name not in people:
+        return False, f"❌ Человек '{person_name}' не найден."
+
+    index = people.index(person_name)
+
+    today = date.today()
+
+    new_start_date = today - timedelta(days=index)
+
+    update_setting(
+        'start_date_svodki',
+        new_start_date.isoformat()
+    )
+
+    return (
+        True,
+        f"✅ {person_name} поставлен на сегодня!\n"
+        f"Позиция в очереди: {index+1}/{len(people)}"
+    )
+
+
+def set_current_procedurka_person(person_name: str):
+    people = get_setting('procedurka')
+
+    if not people:
+        return False, "❌ Список пуст."
+
+    if person_name not in people:
+        return False, f"❌ Человек '{person_name}' не найден."
+
+    index = people.index(person_name)
+
+    today = date.today()
+
+    # процедурка меняется раз в 2 дня
+    new_start_date = today - timedelta(days=index * 2)
+
+    update_setting(
+        'start_date_procedurka',
+        new_start_date.isoformat()
+    )
+
+    return (
+        True,
+        f"✅ {person_name} поставлен на сегодня!\n"
+        f"Позиция в очереди: {index+1}/{len(people)}"
+    )        
 # ================= СООБЩЕНИЕ =================
 def get_message():
-    today = datetime.now().date()
-    start_date = date.fromisoformat(get_setting('start_date'))
-    days_passed = (today - start_date).days
-    
+    today = date.today()
+
     svodki = get_setting('svodki')
     procedurka = get_setting('procedurka')
-    
-    svodki_name = svodki[days_passed % len(svodki)]
-    proc_name = procedurka[(days_passed // 2) % len(procedurka)]
-    
+
+    start_svodki = date.fromisoformat(
+        get_setting('start_date_svodki')
+    )
+
+    start_proc = date.fromisoformat(
+        get_setting('start_date_procedurka')
+    )
+
+    days_svodki = (today - start_svodki).days
+    days_proc = (today - start_proc).days
+
+    svodki_name = svodki[
+        days_svodki % len(svodki)
+    ]
+
+    proc_name = procedurka[
+        (days_proc // 2) % len(procedurka)
+    ]
+
     return f"""
 🚨 <b>НАПОМИНАНИЕ НА СЕГОДНЯ</b> 🚨
 
@@ -94,9 +139,8 @@ def get_message():
 🎖 {proc_name}
 
 ━━━━━━━━━━━━━━━
-📅 {today.strftime('%d.%m.%Y')} | День {days_passed+1}
+📅 {today.strftime('%d.%m.%Y')}
 """
-
 # ================= КЛАВИАТУРЫ =================
 def main_menu():
     keyboard = [
@@ -152,7 +196,7 @@ async def set_current_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Пример: `/set_current_svodki Максим`")
         return
     name = ' '.join(context.args).strip()
-    success, msg = set_current_person('svodki', name)
+    success, msg = set_current_svodki_person(name)
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def set_current_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,7 +207,7 @@ async def set_current_procedurka(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Пример: `/set_current_procedurka Слава`")
         return
     name = ' '.join(context.args).strip()
-    success, msg = set_current_person('procedurka', name)
+    success, msg = set_current_procedurka_person(name)
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
