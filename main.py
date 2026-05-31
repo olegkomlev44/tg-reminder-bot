@@ -6,10 +6,10 @@ import sqlite3
 import json
 import logging
 
-TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"
-
-CHAT_ID = -1003782926765          # ← Замени!
-ADMIN_IDS = [891298064]           # ← Твой ID
+# ================= НАСТРОЙКИ =================
+TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"  # Замените на свой токен
+CHAT_ID = -1003782926765          # ← Замените на ID вашей группы
+ADMIN_IDS = [891298064]           # ← Ваш Telegram ID
 
 # ================= БАЗА ДАННЫХ =================
 def init_db():
@@ -17,14 +17,14 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS settings
                  (key TEXT PRIMARY KEY, value TEXT)''')
-    
+
     default_svodki = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Слава", "Ильнар"]
     default_procedurka = ["Илья", "Слава", "Саша", "Игоооорь", "Глеба", "Ильнар"]
-    
+
     c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki', ?)", (json.dumps(default_svodki),))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka', ?)", (json.dumps(default_procedurka),))
-    c.execute("INSERT OR IGNORE INTO settings VALUES ('start_date_svodki', ?)", ("2026-06-01",))
-    c.execute("INSERT OR IGNORE INTO settings VALUES ('start_date_procedurka', ?)", ("2026-06-01",))
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki_start_date', ?)", ("2026-06-01",))
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka_start_date', ?)", ("2026-06-01",))
     conn.commit()
     conn.close()
 
@@ -47,85 +47,42 @@ def update_setting(key, value):
     conn.commit()
     conn.close()
 
-# ================= ИСПРАВЛЕННАЯ ФУНКЦИЯ =================
-def set_current_svodki_person(person_name: str):
-    people = get_setting('svodki')
-
+# ================= ЛОГИКА УСТАНОВКИ КОНКРЕТНОГО ЧЕЛОВЕКА =================
+def set_current_person(list_key: str, start_date_key: str, person_name: str):
+    """Ставит выбранного человека на сегодня для конкретного списка"""
+    people = get_setting(list_key)
     if not people:
-        return False, "❌ Список пуст."
-
+        return False, "❌ Список пустой."
     if person_name not in people:
-        return False, f"❌ Человек '{person_name}' не найден."
+        return False, f"❌ Человек '{person_name}' не найден в списке."
 
-    index = people.index(person_name)
-
-    today = date.today()
-
+    index = people.index(person_name)           # позиция в списке (0-based)
+    today = datetime.now().date()
+    # Новый start_date = сегодня минус index дней
     new_start_date = today - timedelta(days=index)
 
-    update_setting(
-        'start_date_svodki',
-        new_start_date.isoformat()
-    )
+    update_setting(start_date_key, new_start_date.isoformat())
 
-    return (
-        True,
-        f"✅ {person_name} поставлен на сегодня!\n"
-        f"Позиция в очереди: {index+1}/{len(people)}"
-    )
+    # Проверка (опционально)
+    days_passed = (today - new_start_date).days
+    check_index = days_passed % len(people)
+    return True, f"✅ <b>{person_name}</b> поставлен на сегодня!\nПозиция в очереди: {index+1}/{len(people)}"
 
-
-def set_current_procedurka_person(person_name: str):
-    people = get_setting('procedurka')
-
-    if not people:
-        return False, "❌ Список пуст."
-
-    if person_name not in people:
-        return False, f"❌ Человек '{person_name}' не найден."
-
-    index = people.index(person_name)
-
-    today = date.today()
-
-    # процедурка меняется раз в 2 дня
-    new_start_date = today - timedelta(days=index * 2)
-
-    update_setting(
-        'start_date_procedurka',
-        new_start_date.isoformat()
-    )
-
-    return (
-        True,
-        f"✅ {person_name} поставлен на сегодня!\n"
-        f"Позиция в очереди: {index+1}/{len(people)}"
-    )        
-# ================= СООБЩЕНИЕ =================
+# ================= ФОРМИРОВАНИЕ СООБЩЕНИЯ /today =================
 def get_message():
-    today = date.today()
+    today = datetime.now().date()
+
+    svodki_start = date.fromisoformat(get_setting('svodki_start_date'))
+    procedurka_start = date.fromisoformat(get_setting('procedurka_start_date'))
+
+    days_svodki = (today - svodki_start).days
+    days_procedurka = (today - procedurka_start).days
 
     svodki = get_setting('svodki')
     procedurka = get_setting('procedurka')
 
-    start_svodki = date.fromisoformat(
-        get_setting('start_date_svodki')
-    )
-
-    start_proc = date.fromisoformat(
-        get_setting('start_date_procedurka')
-    )
-
-    days_svodki = (today - start_svodki).days
-    days_proc = (today - start_proc).days
-
-    svodki_name = svodki[
-        days_svodki % len(svodki)
-    ]
-
-    proc_name = procedurka[
-        (days_proc // 2) % len(procedurka)
-    ]
+    svodki_name = svodki[days_svodki % len(svodki)]
+    proc_name = procedurka[days_procedurka % len(procedurka)]   # больше нет //2
 
     return f"""
 🚨 <b>НАПОМИНАНИЕ НА СЕГОДНЯ</b> 🚨
@@ -141,6 +98,7 @@ def get_message():
 ━━━━━━━━━━━━━━━
 📅 {today.strftime('%d.%m.%Y')}
 """
+
 # ================= КЛАВИАТУРЫ =================
 def main_menu():
     keyboard = [
@@ -155,7 +113,7 @@ def main_menu():
 
 # ================= ОБРАБОТЧИКИ =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Бот готов!\nВыбери действие:", reply_markup=main_menu())
+    await update.message.reply_text("👋 Бот готов!\nВыберите действие:", reply_markup=main_menu())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -178,13 +136,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data in ["edit_svodki", "edit_procedurka", "set_current_svodki", "set_current_procedurka"]:
         if query.data == "edit_svodki":
-            msg = "Отправь:\n`/set_svodki Саша, Олег, Максим, ...`"
+            msg = "Отправьте команду:\n`/set_svodki Саша, Олег, Максим, ...`"
         elif query.data == "edit_procedurka":
-            msg = "Отправь:\n`/set_procedurka Илья, Слава, Саша, ...`"
+            msg = "Отправьте команду:\n`/set_procedurka Илья, Слава, Саша, ...`"
         elif query.data == "set_current_svodki":
-            msg = "Отправь:\n`/set_current_svodki Максим`"
-        else:
-            msg = "Отправь:\n`/set_current_procedurka Слава`"
+            msg = "Отправьте команду:\n`/set_current_svodki Максим`"
+        else:  # set_current_procedurka
+            msg = "Отправьте команду:\n`/set_current_procedurka Игоооорь`"
         await query.edit_message_text(msg, parse_mode='Markdown')
 
 # ================= КОМАНДЫ =================
@@ -193,10 +151,10 @@ async def set_current_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⛔️ Только администраторам.")
         return
     if not context.args:
-        await update.message.reply_text("Пример: `/set_current_svodki Максим`")
+        await update.message.reply_text("Пример: /set_current_svodki Максим")
         return
     name = ' '.join(context.args).strip()
-    success, msg = set_current_svodki_person(name)
+    success, msg = set_current_person('svodki', 'svodki_start_date', name)
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def set_current_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,26 +162,65 @@ async def set_current_procedurka(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("⛔️ Только администраторам.")
         return
     if not context.args:
-        await update.message.reply_text("Пример: `/set_current_procedurka Слава`")
+        await update.message.reply_text("Пример: /set_current_procedurka Игоооорь")
         return
     name = ' '.join(context.args).strip()
-    success, msg = set_current_procedurka_person(name)
+    success, msg = set_current_person('procedurka', 'procedurka_start_date', name)
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_message(), parse_mode='HTML', reply_markup=main_menu())
 
+# Опциональные команды для редактирования списков (если хотите)
+async def set_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔️ Только администраторам.")
+        return
+    if not context.args:
+        await update.message.reply_text("Пример: /set_svodki Саша, Олег, Максим, Игорь")
+        return
+    text = ' '.join(context.args)
+    names = [name.strip() for name in text.split(',') if name.strip()]
+    if not names:
+        await update.message.reply_text("Список не может быть пустым.")
+        return
+    update_setting('svodki', names)
+    # Сбросим start_date для сводок, чтобы сегодняшний день соответствовал первому в списке
+    today = datetime.now().date()
+    update_setting('svodki_start_date', today.isoformat())
+    await update.message.reply_text(f"✅ Список сводок обновлён: {', '.join(names)}")
+
+async def set_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔️ Только администраторам.")
+        return
+    if not context.args:
+        await update.message.reply_text("Пример: /set_procedurka Илья, Слава, Саша, ...")
+        return
+    text = ' '.join(context.args)
+    names = [name.strip() for name in text.split(',') if name.strip()]
+    if not names:
+        await update.message.reply_text("Список не может быть пустым.")
+        return
+    update_setting('procedurka', names)
+    # Сбросим start_date для уборки
+    today = datetime.now().date()
+    update_setting('procedurka_start_date', today.isoformat())
+    await update.message.reply_text(f"✅ Список уборки обновлён: {', '.join(names)}")
+
 # ================= ЗАПУСК =================
 def main():
     init_db()
     logging.basicConfig(level=logging.INFO)
-    
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today_command))
     app.add_handler(CommandHandler("set_current_svodki", set_current_svodki))
     app.add_handler(CommandHandler("set_current_procedurka", set_current_procedurka))
+    app.add_handler(CommandHandler("set_svodki", set_svodki))          # опционально
+    app.add_handler(CommandHandler("set_procedurka", set_procedurka))  # опционально
     app.add_handler(CallbackQueryHandler(button_handler))
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
@@ -233,7 +230,7 @@ def main():
     )
     scheduler.start()
 
-    print("✅ Бот запущен (исправленная логика сдвига)")
+    print("✅ Бот запущен (исправленная логика: независимые очереди и установка конкретного человека)")
     app.run_polling()
 
 if __name__ == "__main__":
