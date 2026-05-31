@@ -16,17 +16,14 @@ ADMIN_IDS = [123456789]           # ← Ваш Telegram ID
 def init_db():
     conn = sqlite3.connect('reminder.db')
     c = conn.cursor()
-    # Таблица настроек
     c.execute('''CREATE TABLE IF NOT EXISTS settings
                  (key TEXT PRIMARY KEY, value TEXT)''')
-    # Таблица статистики
     c.execute('''CREATE TABLE IF NOT EXISTS stats
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_name TEXT,
                   task_type TEXT,
                   date TEXT,
                   completed INTEGER)''')
-    # Таблица для отметок о выполнении (чтобы не дублировать за день)
     c.execute('''CREATE TABLE IF NOT EXISTS daily_done
                  (date TEXT, task_type TEXT, user_name TEXT,
                   PRIMARY KEY (date, task_type))''')
@@ -38,6 +35,7 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka', ?)", (json.dumps(default_procedurka),))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki_start_date', ?)", ("2026-06-01",))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka_start_date', ?)", ("2026-06-01",))
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('shave_enabled', ?)", ("1",))  # 1 - вкл, 0 - выкл
     conn.commit()
     conn.close()
 
@@ -108,12 +106,10 @@ def get_message():
 def mark_done(date_str: str, task_type: str, user_name: str):
     conn = sqlite3.connect('reminder.db')
     c = conn.cursor()
-    # Проверяем, не отмечали ли уже сегодня
     c.execute("SELECT 1 FROM daily_done WHERE date=? AND task_type=?", (date_str, task_type))
     if c.fetchone():
         conn.close()
         return False
-    # Записываем в статистику
     c.execute("INSERT INTO stats (user_name, task_type, date, completed) VALUES (?, ?, ?, 1)",
               (user_name, task_type, date_str))
     c.execute("INSERT INTO daily_done (date, task_type, user_name) VALUES (?, ?, ?)",
@@ -143,7 +139,6 @@ async def send_monthly_report(app):
     today = datetime.now()
     if today.day != 1:
         return
-    # Отправляем отчёт за прошлый месяц
     last_month = today.replace(day=1) - timedelta(days=1)
     year, month = last_month.year, last_month.month
     svodki_stats, procedurka_stats = get_monthly_stats(year, month)
@@ -165,8 +160,16 @@ async def send_monthly_report(app):
             report += f"  {user}: {cnt} раз{medal}\n"
     await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode='HTML')
 
+# ================= НАПОМИНАНИЕ "ПОБРИТЬСЯ" =================
+async def send_shave_reminder(app):
+    enabled = get_setting('shave_enabled')
+    if enabled == '1':
+        await app.bot.send_message(chat_id=CHAT_ID, text="🧔‍♂️ <b>Напоминание:</b> всем побриться! Будьте опрятными.", parse_mode='HTML')
+
 # ================= КЛАВИАТУРЫ =================
 def main_menu():
+    shave_status = get_setting('shave_enabled')
+    status_text = "🪒 Вкл" if shave_status == '1' else "🪒 Выкл"
     keyboard = [
         [InlineKeyboardButton("📅 Сегодня", callback_data="today"),
          InlineKeyboardButton("❓ Кто сегодня?", callback_data="quick_today")],
@@ -176,19 +179,11 @@ def main_menu():
         [InlineKeyboardButton("🎯 Сводки → на человека", callback_data="set_current_svodki")],
         [InlineKeyboardButton("🎯 Уборка → на человека", callback_data="set_current_procedurka")],
         [InlineKeyboardButton("📊 Статистика за месяц", callback_data="stats")],
+        [InlineKeyboardButton(f"{status_text} (напом. о бритье)", callback_data="toggle_shave_menu")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 # Пагинация для списков
-list_cache = {}  # временное хранилище: user_id -> (список, тип, страница)
-
-def get_list_page(list_data, page, per_page=7):
-    start = page * per_page
-    end = start + per_page
-    page_items = list_data[start:end]
-    total_pages = (len(list_data) + per_page - 1) // per_page
-    return page_items, total_pages
-
 async def send_list_page(update_or_query, context, list_type, page=0):
     svodki = get_setting('svodki')
     procedurka = get_setting('procedurka')
@@ -205,7 +200,6 @@ async def send_list_page(update_or_query, context, list_type, page=0):
     total_pages = (len(data) + per_page - 1) // per_page
     text = f"{title} (страница {page+1}/{total_pages})\n\n"
     for i, name in enumerate(page_items, start=start+1):
-        # подсветка текущего
         if list_type == 'svodki' and name == today_svodki:
             text += f"🟢 {i}. <b>{name}</b> (сегодня)\n"
         elif list_type == 'procedurka' and name == today_proc:
@@ -242,7 +236,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"📅 Сегодня:\n📦 Сводки: {svodki_name}\n🧹 Уборка: {proc_name}"
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=main_menu())
     elif data == "list":
-        # Выбор типа списка
         keyboard = [
             [InlineKeyboardButton("📦 Сводки", callback_data="list_svodki_0")],
             [InlineKeyboardButton("🧹 Уборка", callback_data="list_procedurka_0")],
@@ -272,6 +265,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for user, cnt in sorted(procedurka_stats.items(), key=lambda x: x[1], reverse=True):
                     text += f"  {user}: {cnt} раз\n"
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=main_menu())
+    elif data == "toggle_shave_menu":
+        # Переключение статуса напоминалки о бритье
+        if update.effective_user.id not in ADMIN_IDS:
+            await query.edit_message_text("⛔️ Только администраторы могут изменить эту настройку.", reply_markup=main_menu())
+            return
+        current = get_setting('shave_enabled')
+        new_value = '0' if current == '1' else '1'
+        update_setting('shave_enabled', new_value)
+        status_text = "включено" if new_value == '1' else "выключено"
+        await query.edit_message_text(f"🪒 Напоминание о бритье {status_text}.", reply_markup=main_menu())
     elif data in ["edit_svodki", "edit_procedurka", "set_current_svodki", "set_current_procedurka"]:
         if data == "edit_svodki":
             msg = "Отправьте команду:\n`/set_svodki Саша, Олег, Максим, ...`"
@@ -290,16 +293,13 @@ async def task_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     data = query.data
-    # Формат: "done_tasktype"
     if data.startswith("done_"):
-        task_type = data.split("_")[1]  # svodki или procedurka
+        task_type = data.split("_")[1]
         today_str = datetime.now().date().isoformat()
-        # Получаем имя человека, который должен был выполнить
         svodki_name, proc_name = get_today_info()
         user_name = svodki_name if task_type == "svodki" else proc_name
         if mark_done(today_str, task_type, user_name):
             await query.edit_message_text(f"✅ Спасибо, {user_name}! Выполнение отмечено.")
-            # Можно также удалить клавиатуру у исходного сообщения, но для простоты оставим
         else:
             await query.edit_message_text(f"⚠️ За сегодня уже отмечено выполнение по {task_type}.")
 
@@ -381,9 +381,19 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"  {user}: {cnt} раз\n"
     await update.message.reply_text(text, parse_mode='HTML')
 
+async def toggle_shave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /toggle_shave для админов"""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔️ Только администраторам.")
+        return
+    current = get_setting('shave_enabled')
+    new_value = '0' if current == '1' else '1'
+    update_setting('shave_enabled', new_value)
+    status_text = "включено" if new_value == '1' else "выключено"
+    await update.message.reply_text(f"🪒 Напоминание о бритье {status_text}.")
+
 # ================= ТАЙМЕРЫ НА ВЫПОЛНЕНИЕ =================
 async def ask_for_task_completion(app, task_type: str, delay_minutes: int = 0):
-    """Отправить сообщение с кнопкой выполнения через заданное время"""
     await asyncio.sleep(delay_minutes * 60)
     svodki_name, proc_name = get_today_info()
     if task_type == "svodki":
@@ -397,20 +407,14 @@ async def ask_for_task_completion(app, task_type: str, delay_minutes: int = 0):
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Выполнено", callback_data=callback_data)]])
     await app.bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=keyboard)
 
-# ================= ПЛАНИРОВЩИК =================
 async def daily_reminder_and_timers(app):
-    """Отправляет дневное напоминание и планирует два таймера"""
     await app.bot.send_message(chat_id=CHAT_ID, text=get_message(), parse_mode='HTML')
-    # Запускаем асинхронные задачи: через 1 час спросить про сводки, в 23:00 про уборку
     now = datetime.now()
-    # Время до 23:00 сегодня
     target_23 = datetime(now.year, now.month, now.day, 23, 0, 0)
     if now >= target_23:
         target_23 += timedelta(days=1)
     delay_until_23 = (target_23 - now).total_seconds() / 60
-    # Через 60 минут спросить про сводки
     asyncio.create_task(ask_for_task_completion(app, "svodki", delay_minutes=60))
-    # В 23:00 спросить про уборку
     asyncio.create_task(ask_for_task_completion(app, "procedurka", delay_minutes=delay_until_23))
 
 # ================= ЗАПУСК =================
@@ -423,15 +427,21 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("toggle_shave", toggle_shave_command))
     app.add_handler(CommandHandler("set_current_svodki", set_current_svodki))
     app.add_handler(CommandHandler("set_current_procedurka", set_current_procedurka))
     app.add_handler(CommandHandler("set_svodki", set_svodki))
     app.add_handler(CommandHandler("set_procedurka", set_procedurka))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(?!done_).*"))  # все кроме done_
+    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(?!done_).*"))
     app.add_handler(CallbackQueryHandler(task_done_callback, pattern="^done_"))
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    # Ежедневное напоминание в 18:00
+    # Ежедневное напоминание о бритья в 17:00
+    scheduler.add_job(
+        lambda: asyncio.create_task(send_shave_reminder(app)),
+        "cron", hour=17, minute=0
+    )
+    # Основное напоминание в 18:00
     scheduler.add_job(
         lambda: asyncio.create_task(daily_reminder_and_timers(app)),
         "cron", hour=18, minute=0
@@ -443,7 +453,7 @@ def main():
     )
     scheduler.start()
 
-    print("✅ Бот запущен со всеми улучшениями (пагинация, подсветка, статистика, таймеры выполнения)")
+    print("✅ Бот запущен. Добавлено ежедневное напоминание о бритье в 17:00 (можно отключить /toggle_shave).")
     app.run_polling()
 
 if __name__ == "__main__":
