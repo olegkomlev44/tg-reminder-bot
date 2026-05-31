@@ -8,8 +8,8 @@ import logging
 
 TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"
 
-CHAT_ID = -1001234567890          # ← Замени!
-ADMIN_IDS = [123456789]           # ← Добавь свой ID
+CHAT_ID = -1003782926765          # ← Замени!
+ADMIN_IDS = [891298064]           # ← Добавь свой ID
 
 # ================= БАЗА ДАННЫХ =================
 def init_db():
