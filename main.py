@@ -2,15 +2,17 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, date, timedelta
+from io import BytesIO
 import sqlite3
 import json
 import logging
 import asyncio
+from PIL import Image, ImageDraw, ImageFont
 
 # ================= НАСТРОЙКИ =================
 TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"  # Замените на свой токен
-CHAT_ID = -1003782926765         # ← Замените на ID вашей группы
-ADMIN_IDS = [891298064,715554757]           # ← Ваш Telegram ID
+CHAT_ID = -1003782926765          # ← Замените на ID вашей группы
+ADMIN_IDS = [891298064,715554757]           # ← ID админов (можно несколько через запятую)
 
 # ================= БАЗА ДАННЫХ =================
 def init_db():
@@ -35,7 +37,7 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka', ?)", (json.dumps(default_procedurka),))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki_start_date', ?)", ("2026-06-01",))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka_start_date', ?)", ("2026-06-01",))
-    c.execute("INSERT OR IGNORE INTO settings VALUES ('shave_enabled', ?)", ("1",))  # 1 - вкл, 0 - выкл
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('shave_enabled', ?)", ("1",))
     conn.commit()
     conn.close()
 
@@ -84,7 +86,7 @@ def get_today_info():
     proc_name = procedurka[days_procedurka % len(procedurka)]
     return svodki_name, proc_name
 
-def get_message():
+def get_text_message():
     svodki_name, proc_name = get_today_info()
     today = datetime.now().date()
     return f"""
@@ -101,6 +103,60 @@ def get_message():
 ━━━━━━━━━━━━━━━
 📅 {today.strftime('%d.%m.%Y')}
 """
+
+# ================= ГЕНЕРАЦИЯ ДЕМОТИВАТОРА =================
+def generate_demotivator(svodki_name: str, procedurka_name: str, date_str: str) -> BytesIO:
+    """Создаёт картинку-демотиватор с указанием ответственных."""
+    # Размеры картинки
+    width, height = 800, 600
+    # Создаём белую подложку
+    img = Image.new('RGB', (width, height), color='white')
+    draw = ImageDraw.Draw(img)
+    
+    # Рисуем чёрную рамку (демотиватор)
+    border = 20
+    draw.rectangle([(border, border), (width - border, height - border)], outline='black', width=10)
+    
+    # Пытаемся загрузить шрифты, если нет — используем дефолтный
+    try:
+        font_title = ImageFont.truetype("arial.ttf", 40)
+        font_name = ImageFont.truetype("arial.ttf", 60)
+        font_date = ImageFont.truetype("arial.ttf", 30)
+    except:
+        font_title = ImageFont.load_default()
+        font_name = ImageFont.load_default()
+        font_date = ImageFont.load_default()
+    
+    # Верхний текст (заголовок)
+    title = "НАПОМИНАНИЕ НА СЕГОДНЯ"
+    # Центрируем заголовок
+    bbox = draw.textbbox((0,0), title, font=font_title)
+    title_w = bbox[2] - bbox[0]
+    draw.text(((width - title_w)//2, 60), title, fill='black', font=font_title)
+    
+    # Имена
+    svodki_text = f"📦 Относить сводки: {svodki_name}"
+    proc_text = f"🧹 Уборка процедурки: {procedurka_name}"
+    # Центрируем каждую строку
+    bbox1 = draw.textbbox((0,0), svodki_text, font=font_name)
+    w1 = bbox1[2] - bbox1[0]
+    bbox2 = draw.textbbox((0,0), proc_text, font=font_name)
+    w2 = bbox2[2] - bbox2[0]
+    draw.text(((width - w1)//2, 200), svodki_text, fill='black', font=font_name)
+    draw.text(((width - w2)//2, 320), proc_text, fill='black', font=font_name)
+    
+    # Дата снизу
+    date_text = f"📅 {date_str}"
+    bbox_date = draw.textbbox((0,0), date_text, font=font_date)
+    w_date = bbox_date[2] - bbox_date[0]
+    draw.text(((width - w_date)//2, height - 100), date_text, fill='gray', font=font_date)
+    
+    # Сохраняем в BytesIO
+    bio = BytesIO()
+    bio.name = 'demotivator.png'
+    img.save(bio, 'PNG')
+    bio.seek(0)
+    return bio
 
 # ================= СТАТИСТИКА =================
 def mark_done(date_str: str, task_type: str, user_name: str):
@@ -230,7 +286,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     if data == "today":
-        await query.edit_message_text(get_message(), parse_mode='HTML', reply_markup=main_menu())
+        # Отправляем демотиватор вместо текста
+        svodki_name, proc_name = get_today_info()
+        today_str = datetime.now().strftime('%d.%m.%Y')
+        img_bio = generate_demotivator(svodki_name, proc_name, today_str)
+        await query.message.reply_photo(photo=img_bio, caption=get_text_message(), parse_mode='HTML', reply_markup=main_menu())
+        await query.delete_message()  # удаляем предыдущее сообщение с кнопкой
     elif data == "quick_today":
         svodki_name, proc_name = get_today_info()
         text = f"📅 Сегодня:\n📦 Сводки: {svodki_name}\n🧹 Уборка: {proc_name}"
@@ -266,7 +327,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text += f"  {user}: {cnt} раз\n"
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=main_menu())
     elif data == "toggle_shave_menu":
-        # Переключение статуса напоминалки о бритье
         if update.effective_user.id not in ADMIN_IDS:
             await query.edit_message_text("⛔️ Только администраторы могут изменить эту настройку.", reply_markup=main_menu())
             return
@@ -288,7 +348,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back_to_menu":
         await query.edit_message_text("Главное меню:", reply_markup=main_menu())
 
-# Обработка кнопок выполнения задач
 async def task_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -361,7 +420,10 @@ async def set_procedurka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Список уборки обновлён: {', '.join(names)}")
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(get_message(), parse_mode='HTML', reply_markup=main_menu())
+    svodki_name, proc_name = get_today_info()
+    today_str = datetime.now().strftime('%d.%m.%Y')
+    img_bio = generate_demotivator(svodki_name, proc_name, today_str)
+    await update.message.reply_photo(photo=img_bio, caption=get_text_message(), parse_mode='HTML', reply_markup=main_menu())
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now()
@@ -382,7 +444,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='HTML')
 
 async def toggle_shave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /toggle_shave для админов"""
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔️ Только администраторам.")
         return
@@ -408,7 +469,12 @@ async def ask_for_task_completion(app, task_type: str, delay_minutes: int = 0):
     await app.bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=keyboard)
 
 async def daily_reminder_and_timers(app):
-    await app.bot.send_message(chat_id=CHAT_ID, text=get_message(), parse_mode='HTML')
+    # Отправляем демотиватор с подписью
+    svodki_name, proc_name = get_today_info()
+    today_str = datetime.now().strftime('%d.%m.%Y')
+    img_bio = generate_demotivator(svodki_name, proc_name, today_str)
+    await app.bot.send_photo(chat_id=CHAT_ID, photo=img_bio, caption=get_text_message(), parse_mode='HTML')
+    # Таймеры для выполнения
     now = datetime.now()
     target_23 = datetime(now.year, now.month, now.day, 23, 0, 0)
     if now >= target_23:
@@ -436,24 +502,12 @@ def main():
     app.add_handler(CallbackQueryHandler(task_done_callback, pattern="^done_"))
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    # Ежедневное напоминание о бритья в 17:00
-    scheduler.add_job(
-        lambda: asyncio.create_task(send_shave_reminder(app)),
-        "cron", hour=17, minute=0
-    )
-    # Основное напоминание в 18:00
-    scheduler.add_job(
-        lambda: asyncio.create_task(daily_reminder_and_timers(app)),
-        "cron", hour=18, minute=0
-    )
-    # Ежемесячный отчёт 1-го числа в 10:00
-    scheduler.add_job(
-        lambda: asyncio.create_task(send_monthly_report(app)),
-        "cron", day=1, hour=10, minute=0
-    )
+    scheduler.add_job(lambda: asyncio.create_task(send_shave_reminder(app)), "cron", hour=17, minute=0)
+    scheduler.add_job(lambda: asyncio.create_task(daily_reminder_and_timers(app)), "cron", hour=18, minute=0)
+    scheduler.add_job(lambda: asyncio.create_task(send_monthly_report(app)), "cron", day=1, hour=10, minute=0)
     scheduler.start()
 
-    print("✅ Бот запущен. Добавлено ежедневное напоминание о бритье в 17:00 (можно отключить /toggle_shave).")
+    print("✅ Бот запущен. Генерация демотиваторов включена.")
     app.run_polling()
 
 if __name__ == "__main__":
