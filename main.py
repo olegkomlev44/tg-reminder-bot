@@ -11,14 +11,13 @@ from PIL import Image, ImageDraw, ImageFont
 import pytz
 
 # ================= НАСТРОЙКИ =================
-TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"  # Замените на свой токен
+TOKEN = "8874089866:AAEoGd63Dm2DC6YNSQ29oO2zcUlVNI5zY1Y"
 CHAT_ID = -1003782926765          # ← Замените на ID вашей группы
 ADMIN_IDS = [891298064,715554757]           # ← ID админов (можно несколько через запятую)
 
 MSK = pytz.timezone('Europe/Moscow')
 
 def now_msk():
-    """Возвращает текущее datetime с московским временем"""
     return datetime.now(MSK)
 
 # ================= БАЗА ДАННЫХ =================
@@ -38,15 +37,24 @@ def init_db():
                   PRIMARY KEY (date, task_type))''')
     c.execute('''CREATE TABLE IF NOT EXISTS bot_state
                  (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS reminders
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  chat_id INTEGER,
+                  message_id INTEGER,
+                  task_type TEXT,
+                  date TEXT)''')
 
     default_svodki = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Слава", "Ильнар"]
-    default_procedurka = ["Илья", "Слава", "Саша", "Игорь", "Глеба", "Ильнар"]
+    default_procedurka = ["Илья", "Слава", "Саша", "Игоооорь", "Глеба", "Ильнар"]
 
     c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki', ?)", (json.dumps(default_svodki),))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka', ?)", (json.dumps(default_procedurka),))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki_start_date', ?)", ("2026-06-01",))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka_start_date', ?)", ("2026-06-01",))
     c.execute("INSERT OR IGNORE INTO settings VALUES ('shave_enabled', ?)", ("1",))
+    # Настройка времени напоминаний (по умолчанию: сводки в 18:00, уборка в 23:00)
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('svodki_remind_hour', ?)", ("20",))
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('procedurka_remind_hour', ?)", ("23",))
     conn.commit()
     conn.close()
 
@@ -84,13 +92,34 @@ def get_last_message_id():
     conn.close()
     return int(row[0]) if row else None
 
-async def delete_previous_message(app, chat_id: int):
+# FIX: принимает bot, а не app
+async def delete_previous_message(bot, chat_id: int):
     prev_id = get_last_message_id()
     if prev_id:
         try:
-            await app.bot.delete_message(chat_id=chat_id, message_id=prev_id)
+            await bot.delete_message(chat_id=chat_id, message_id=prev_id)
         except Exception:
             pass
+        finally:
+            save_last_message_id(0)
+
+def save_reminder_message(chat_id: int, message_id: int, task_type: str, date_str: str):
+    conn = sqlite3.connect('reminder.db')
+    c = conn.cursor()
+    # Удаляем старый reminder того же типа за тот же день
+    c.execute("DELETE FROM reminders WHERE task_type=? AND date=?", (task_type, date_str))
+    c.execute("INSERT INTO reminders (chat_id, message_id, task_type, date) VALUES (?, ?, ?, ?)",
+              (chat_id, message_id, task_type, date_str))
+    conn.commit()
+    conn.close()
+
+def get_reminder_message(task_type: str, date_str: str):
+    conn = sqlite3.connect('reminder.db')
+    c = conn.cursor()
+    c.execute("SELECT message_id FROM reminders WHERE task_type=? AND date=?", (task_type, date_str))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 # ================= ЛОГИКА УСТАНОВКИ КОНКРЕТНОГО ЧЕЛОВЕКА =================
 def set_current_person(list_key: str, start_date_key: str, person_name: str):
@@ -118,55 +147,126 @@ def get_today_info():
     proc_name = procedurka[days_procedurka % len(procedurka)]
     return svodki_name, proc_name
 
+def is_task_done(task_type: str) -> bool:
+    today_str = now_msk().date().isoformat()
+    conn = sqlite3.connect('reminder.db')
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM daily_done WHERE date=? AND task_type=?", (today_str, task_type))
+    result = c.fetchone() is not None
+    conn.close()
+    return result
+
 def get_text_message():
     svodki_name, proc_name = get_today_info()
     today = now_msk().date()
-    return f"""
-🚨 <b>НАПОМИНАНИЕ НА СЕГОДНЯ</b> 🚨
+    svodki_done = "✅" if is_task_done("svodki") else "⏳"
+    proc_done = "✅" if is_task_done("procedurka") else "⏳"
+    return (
+        f"🚨 <b>НАПОМИНАНИЕ НА СЕГОДНЯ</b> 🚨\n\n"
+        f"📦 <b>Относить сводки</b> {svodki_done}\n"
+        f"🎖 {svodki_name}\n\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"🧹 <b>Уборка процедурки</b> {proc_done}\n"
+        f"🎖 {proc_name}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📅 {today.strftime('%d.%m.%Y')}"
+    )
 
-📦 <b>Относить сводки</b>
-🎖 {svodki_name}
-
-━━━━━━━━━━━━━━━
-
-🧹 <b>Уборка процедурки</b>
-🎖 {proc_name}
-
-━━━━━━━━━━━━━━━
-📅 {today.strftime('%d.%m.%Y')}
-"""
-
-# ================= ГЕНЕРАЦИЯ ДЕМОТИВАТОРА =================
+# ================= ГЕНЕРАЦИЯ ДЕМОТИВАТОРА (улучшенный) =================
 def generate_demotivator(svodki_name: str, procedurka_name: str, date_str: str) -> BytesIO:
-    width, height = 800, 600
-    img = Image.new('RGB', (width, height), color='white')
+    W, H = 900, 650
+    # Тёмный фон с градиентом
+    img = Image.new('RGB', (W, H), color='#0a0a0a')
     draw = ImageDraw.Draw(img)
-    border = 20
-    draw.rectangle([(border, border), (width - border, height - border)], outline='black', width=10)
-    try:
-        font_title = ImageFont.truetype("arial.ttf", 40)
-        font_name = ImageFont.truetype("arial.ttf", 60)
-        font_date = ImageFont.truetype("arial.ttf", 30)
-    except:
-        font_title = ImageFont.load_default()
-        font_name = ImageFont.load_default()
-        font_date = ImageFont.load_default()
-    title = "НАПОМИНАНИЕ НА СЕГОДНЯ"
-    bbox = draw.textbbox((0,0), title, font=font_title)
-    title_w = bbox[2] - bbox[0]
-    draw.text(((width - title_w)//2, 60), title, fill='black', font=font_title)
-    svodki_text = f"📦 Относить сводки: {svodki_name}"
-    proc_text = f"🧹 Уборка процедурки: {procedurka_name}"
-    bbox1 = draw.textbbox((0,0), svodki_text, font=font_name)
-    w1 = bbox1[2] - bbox1[0]
-    bbox2 = draw.textbbox((0,0), proc_text, font=font_name)
-    w2 = bbox2[2] - bbox2[0]
-    draw.text(((width - w1)//2, 200), svodki_text, fill='black', font=font_name)
-    draw.text(((width - w2)//2, 320), proc_text, fill='black', font=font_name)
-    date_text = f"📅 {date_str}"
-    bbox_date = draw.textbbox((0,0), date_text, font=font_date)
-    w_date = bbox_date[2] - bbox_date[0]
-    draw.text(((width - w_date)//2, height - 100), date_text, fill='gray', font=font_date)
+
+    # Фоновый градиент (имитация через полосы)
+    for y in range(H):
+        ratio = y / H
+        r = int(10 + ratio * 20)
+        g = int(10 + ratio * 15)
+        b = int(10 + ratio * 35)
+        draw.line([(0, y), (W, y)], fill=(r, g, b))
+
+    # Внешняя рамка (двойная)
+    draw.rectangle([(12, 12), (W-12, H-12)], outline='#c8a96e', width=3)
+    draw.rectangle([(18, 18), (W-18, H-18)], outline='#8a6a2e', width=1)
+
+    # Декоративные угловые элементы
+    corner_size = 30
+    corners = [(20, 20), (W-20-corner_size, 20), (20, H-20-corner_size), (W-20-corner_size, H-20-corner_size)]
+    for cx, cy in corners:
+        draw.rectangle([(cx, cy), (cx+corner_size, cy+corner_size)], outline='#c8a96e', width=2)
+
+    # Загрузка шрифтов (fallback на дефолтный)
+    def load_font(size):
+        for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                           "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                           "arial.ttf", "Arial.ttf"]:
+            try:
+                return ImageFont.truetype(font_path, size)
+            except:
+                continue
+        return ImageFont.load_default()
+
+    font_header = load_font(22)
+    font_title = load_font(32)
+    font_emoji_label = load_font(18)
+    font_name = load_font(54)
+    font_date = load_font(20)
+    font_small = load_font(16)
+
+    def centered_text(text, y, font, color):
+        bbox = draw.textbbox((0, 0), text, font=font)
+        w = bbox[2] - bbox[0]
+        draw.text(((W - w) // 2, y), text, fill=color, font=font)
+
+    def shadow_text(text, y, font, color, shadow_color='#000000'):
+        bbox = draw.textbbox((0, 0), text, font=font)
+        w = bbox[2] - bbox[0]
+        x = (W - w) // 2
+        # Тень
+        draw.text((x+2, y+2), text, fill=shadow_color, font=font)
+        draw.text((x, y), text, fill=color, font=font)
+
+    # Заголовок блока
+    centered_text("⚡ ПРИКАЗ ДНЯ ⚡", 38, font_header, '#c8a96e')
+
+    # Разделитель
+    draw.line([(60, 72), (W-60, 72)], fill='#c8a96e', width=1)
+    draw.line([(60, 75), (W-60, 75)], fill='#8a6a2e', width=1)
+
+    # Блок СВОДКИ
+    # Подзаголовок
+    centered_text("📦  ОТНОСИТЬ СВОДКИ", 95, font_emoji_label, '#aaaaaa')
+    # Имя с золотым свечением
+    shadow_text(svodki_name, 125, font_name, '#f5d78e', '#3a2800')
+    # Подчёркивание имени
+    bbox = draw.textbbox((0, 0), svodki_name, font=font_name)
+    name_w = bbox[2] - bbox[0]
+    line_x = (W - name_w) // 2
+    draw.line([(line_x, 125+bbox[3]+4), (line_x+name_w, 125+bbox[3]+4)], fill='#c8a96e', width=2)
+
+    # Разделитель между блоками
+    mid_y = 280
+    draw.line([(80, mid_y), (W-80, mid_y)], fill='#333333', width=1)
+    centered_text("✦", mid_y - 8, font_small, '#c8a96e')
+
+    # Блок УБОРКА
+    centered_text("🧹  УБОРКА ПРОЦЕДУРКИ", mid_y + 20, font_emoji_label, '#aaaaaa')
+    shadow_text(procedurka_name, mid_y + 48, font_name, '#f5d78e', '#3a2800')
+    bbox2 = draw.textbbox((0, 0), procedurka_name, font=font_name)
+    name_w2 = bbox2[2] - bbox2[0]
+    line_x2 = (W - name_w2) // 2
+    draw.line([(line_x2, mid_y+48+bbox2[3]+4), (line_x2+name_w2, mid_y+48+bbox2[3]+4)], fill='#c8a96e', width=2)
+
+    # Нижний разделитель
+    draw.line([(60, H-80), (W-60, H-80)], fill='#c8a96e', width=1)
+    draw.line([(60, H-77), (W-60, H-77)], fill='#8a6a2e', width=1)
+
+    # Дата и слоган
+    centered_text(f"📅  {date_str}", H-62, font_date, '#888888')
+    centered_text("Каждый день — новый герой", H-38, font_small, '#555555')
+
     bio = BytesIO()
     bio.name = 'demotivator.png'
     img.save(bio, 'PNG')
@@ -250,9 +350,50 @@ def main_menu():
         [InlineKeyboardButton("🎯 Сводки → на человека", callback_data="set_current_svodki")],
         [InlineKeyboardButton("🎯 Уборка → на человека", callback_data="set_current_procedurka")],
         [InlineKeyboardButton("📊 Статистика за месяц", callback_data="stats")],
+        [InlineKeyboardButton("⏰ Время напоминаний", callback_data="remind_times")],
         [InlineKeyboardButton(f"{status_text} (напом. о бритье)", callback_data="toggle_shave_menu")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
+# ================= ОБРАБОТЧИК КНОПКИ "ВЫПОЛНЕНО" =================
+# FIX: вынесен отдельно и регистрируется ПЕРВЫМ
+async def task_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if not data.startswith("done_"):
+        return
+
+    task_type = data.split("_")[1]
+    today_str = now_msk().date().isoformat()
+    svodki_name, proc_name = get_today_info()
+    user_name = svodki_name if task_type == "svodki" else proc_name
+
+    if mark_done(today_str, task_type, user_name):
+        task_label = "сводки" if task_type == "svodki" else "уборку процедурки"
+        await query.edit_message_text(
+            f"✅ <b>Отлично, {user_name}!</b>\n\n"
+            f"Выполнение отмечено: {task_label}\n"
+            f"📅 {now_msk().strftime('%d.%m.%Y %H:%M')}",
+            parse_mode='HTML'
+        )
+    else:
+        task_label = "сводки" if task_type == "svodki" else "уборку"
+        await query.edit_message_text(
+            f"⚠️ <b>Уже отмечено!</b>\n\n"
+            f"За сегодня выполнение по «{task_label}» уже зафиксировано.",
+            parse_mode='HTML'
+        )
+
+    # Удаляем сообщение через 8 секунд
+    async def delete_later():
+        await asyncio.sleep(8)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+    asyncio.create_task(delete_later())
 
 async def send_list_page(update_or_query, context, list_type, page=0):
     svodki = get_setting('svodki')
@@ -293,31 +434,44 @@ async def send_list_page(update_or_query, context, list_type, page=0):
     else:
         await update_or_query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
 
-# ================= ОБРАБОТЧИКИ =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_previous_message(context.bot, CHAT_ID)
-    sent = await update.message.reply_text("👋 Бот готов!\nВыберите действие:", reply_markup=main_menu())
-    save_last_message_id(sent.message_id)
-
+# ================= ОСНОВНОЙ ОБРАБОТЧИК КНОПОК =================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
     if data == "today":
         svodki_name, proc_name = get_today_info()
         today_str = now_msk().strftime('%d.%m.%Y')
         img_bio = generate_demotivator(svodki_name, proc_name, today_str)
         await delete_previous_message(context.bot, CHAT_ID)
-        sent = await query.message.reply_photo(photo=img_bio, caption=get_text_message(), parse_mode='HTML', reply_markup=main_menu())
+        sent = await query.message.reply_photo(
+            photo=img_bio, caption=get_text_message(),
+            parse_mode='HTML', reply_markup=main_menu()
+        )
         save_last_message_id(sent.message_id)
-        await query.delete_message()
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
     elif data == "quick_today":
         svodki_name, proc_name = get_today_info()
-        text = f"📅 Сегодня:\n📦 Сводки: {svodki_name}\n🧹 Уборка: {proc_name}"
+        svodki_done = "✅" if is_task_done("svodki") else "⏳ не выполнено"
+        proc_done = "✅" if is_task_done("procedurka") else "⏳ не выполнено"
+        text = (
+            f"📅 <b>Сегодня:</b>\n\n"
+            f"📦 Сводки: <b>{svodki_name}</b> {svodki_done}\n"
+            f"🧹 Уборка: <b>{proc_name}</b> {proc_done}"
+        )
         await delete_previous_message(context.bot, CHAT_ID)
         sent = await query.message.reply_text(text, parse_mode='HTML', reply_markup=main_menu())
         save_last_message_id(sent.message_id)
-        await query.delete_message()
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
     elif data == "list":
         keyboard = [
             [InlineKeyboardButton("📦 Сводки", callback_data="list_svodki_0")],
@@ -327,13 +481,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_previous_message(context.bot, CHAT_ID)
         sent = await query.message.reply_text("Выберите список:", reply_markup=InlineKeyboardMarkup(keyboard))
         save_last_message_id(sent.message_id)
-        await query.delete_message()
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
     elif data.startswith("list_"):
         parts = data.split('_')
         if len(parts) == 3:
             list_type = parts[1]
             page = int(parts[2])
             await send_list_page(query, context, list_type, page)
+
     elif data == "stats":
         today = now_msk()
         svodki_stats, procedurka_stats = get_monthly_stats(today.year, today.month)
@@ -353,67 +512,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_previous_message(context.bot, CHAT_ID)
         sent = await query.message.reply_text(text, parse_mode='HTML', reply_markup=main_menu())
         save_last_message_id(sent.message_id)
-        await query.delete_message()
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
+    elif data == "remind_times":
+        svodki_h = get_setting('svodki_remind_hour') or '20'
+        proc_h = get_setting('procedurka_remind_hour') or '23'
+        text = (
+            f"⏰ <b>Текущее время напоминаний (МСК):</b>\n\n"
+            f"📦 Сводки — проверка в <b>{svodki_h}:00</b>\n"
+            f"🧹 Уборка — проверка в <b>{proc_h}:00</b>\n\n"
+            f"Для изменения отправьте:\n"
+            f"<code>/set_remind_times 20 23</code>\n"
+            f"(первое — час для сводок, второе — для уборки)"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_menu")]]
+        await delete_previous_message(context.bot, CHAT_ID)
+        sent = await query.message.reply_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+        save_last_message_id(sent.message_id)
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
     elif data == "toggle_shave_menu":
         if update.effective_user.id not in ADMIN_IDS:
-            await query.edit_message_text("⛔️ Только администраторы могут изменить эту настройку.", reply_markup=main_menu())
+            await query.answer("⛔️ Только администраторы!", show_alert=True)
             return
         current = get_setting('shave_enabled')
         new_value = '0' if current == '1' else '1'
         update_setting('shave_enabled', new_value)
-        status_text = "включено" if new_value == '1' else "выключено"
+        status_text = "включено ✅" if new_value == '1' else "выключено ❌"
         await delete_previous_message(context.bot, CHAT_ID)
-        sent = await query.message.reply_text(f"🪒 Напоминание о бритье {status_text}.", reply_markup=main_menu())
+        sent = await query.message.reply_text(
+            f"🪒 Напоминание о бритье {status_text}.",
+            reply_markup=main_menu()
+        )
         save_last_message_id(sent.message_id)
-        await query.delete_message()
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
     elif data in ["edit_svodki", "edit_procedurka", "set_current_svodki", "set_current_procedurka"]:
-        if data == "edit_svodki":
-            msg = "Отправьте команду:\n`/set_svodki Саша, Олег, Максим, ...`"
-        elif data == "edit_procedurka":
-            msg = "Отправьте команду:\n`/set_procedurka Илья, Слава, Саша, ...`"
-        elif data == "set_current_svodki":
-            msg = "Отправьте команду:\n`/set_current_svodki Максим`"
-        else:
-            msg = "Отправьте команду:\n`/set_current_procedurka Игоооорь`"
+        msgs = {
+            "edit_svodki": "Отправьте команду:\n`/set_svodki Саша, Олег, Максим, ...`",
+            "edit_procedurka": "Отправьте команду:\n`/set_procedurka Илья, Слава, Саша, ...`",
+            "set_current_svodki": "Отправьте команду:\n`/set_current_svodki Максим`",
+            "set_current_procedurka": "Отправьте команду:\n`/set_current_procedurka Игоооорь`",
+        }
         await delete_previous_message(context.bot, CHAT_ID)
-        sent = await query.message.reply_text(msg, parse_mode='Markdown')
+        sent = await query.message.reply_text(msgs[data], parse_mode='Markdown')
         save_last_message_id(sent.message_id)
-        await query.delete_message()
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
     elif data == "back_to_menu":
         await delete_previous_message(context.bot, CHAT_ID)
         sent = await query.message.reply_text("Главное меню:", reply_markup=main_menu())
         save_last_message_id(sent.message_id)
-        await query.delete_message()
-
-async def task_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data.startswith("done_"):
-        task_type = data.split("_")[1]
-        today_str = now_msk().date().isoformat()
-        svodki_name, proc_name = get_today_info()
-        user_name = svodki_name if task_type == "svodki" else proc_name
-        if mark_done(today_str, task_type, user_name):
-            await query.edit_message_text(f"✅ Спасибо, {user_name}! Выполнение отмечено.")
-            async def delete_later():
-                await asyncio.sleep(10)
-                try:
-                    await query.message.delete()
-                except:
-                    pass
-            asyncio.create_task(delete_later())
-        else:
-            await query.edit_message_text(f"⚠️ За сегодня уже отмечено выполнение по {task_type}.")
-            async def delete_later():
-                await asyncio.sleep(5)
-                try:
-                    await query.message.delete()
-                except:
-                    pass
-            asyncio.create_task(delete_later())
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
 
 # ================= КОМАНДЫ =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await delete_previous_message(context.bot, CHAT_ID)
+    sent = await update.message.reply_text("👋 Бот готов!\nВыберите действие:", reply_markup=main_menu())
+    save_last_message_id(sent.message_id)
+
 async def set_current_svodki(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔️ Только администраторам.")
@@ -483,7 +655,10 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today_str = now_msk().strftime('%d.%m.%Y')
     img_bio = generate_demotivator(svodki_name, proc_name, today_str)
     await delete_previous_message(context.bot, CHAT_ID)
-    sent = await update.message.reply_photo(photo=img_bio, caption=get_text_message(), parse_mode='HTML', reply_markup=main_menu())
+    sent = await update.message.reply_photo(
+        photo=img_bio, caption=get_text_message(),
+        parse_mode='HTML', reply_markup=main_menu()
+    )
     save_last_message_id(sent.message_id)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -518,51 +693,116 @@ async def toggle_shave_command(update: Update, context: ContextTypes.DEFAULT_TYP
     sent = await update.message.reply_text(f"🪒 Напоминание о бритье {status_text}.")
     save_last_message_id(sent.message_id)
 
-# ================= ТАЙМЕРЫ НА ВЫПОЛНЕНИЕ =================
-async def ask_for_task_completion(app, task_type: str, delay_minutes: int = 0):
-    await asyncio.sleep(delay_minutes * 60)
+async def set_remind_times_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /set_remind_times 20 23 — установить час напоминаний для сводок и уборки"""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔️ Только администраторам.")
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Пример: /set_remind_times 20 23\n"
+            "(первое — час для сводок, второе — для уборки, 0-23 по МСК)"
+        )
+        return
+    try:
+        h1 = int(context.args[0])
+        h2 = int(context.args[1])
+        if not (0 <= h1 <= 23 and 0 <= h2 <= 23):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Некорректные часы. Укажите числа от 0 до 23.")
+        return
+    update_setting('svodki_remind_hour', str(h1))
+    update_setting('procedurka_remind_hour', str(h2))
+    await update.message.reply_text(
+        f"✅ Время напоминаний обновлено!\n"
+        f"📦 Сводки — {h1}:00 МСК\n"
+        f"🧹 Уборка — {h2}:00 МСК\n\n"
+        f"⚠️ Изменения применятся с <b>следующего перезапуска бота</b>.",
+        parse_mode='HTML'
+    )
+
+# ================= ТАЙМЕРЫ НАПОМИНАНИЙ =================
+# FIX: используем точный расчёт времени вместо hardcoded задержки
+async def ask_for_task_completion(app, task_type: str, target_hour: int):
+    """Ждёт до target_hour по МСК и отправляет запрос о выполнении."""
+    now = now_msk()
+    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    delay_seconds = (target - now).total_seconds()
+    logging.info(f"Задержка до {target_hour}:00 МСК для {task_type}: {delay_seconds:.0f}с")
+    await asyncio.sleep(delay_seconds)
+
+    # Не отправляем если уже выполнено
+    if is_task_done(task_type):
+        logging.info(f"{task_type} уже выполнено, напоминание пропущено")
+        return
+
     svodki_name, proc_name = get_today_info()
     if task_type == "svodki":
         user = svodki_name
-        text = f"⏰ Напоминание: {user}, вы уже отнесли сводки? Нажмите кнопку ниже."
+        text = f"⏰ <b>Напоминание!</b>\n\n{user}, вы уже отнесли сводки?\nНажмите кнопку ниже 👇"
         callback_data = "done_svodki"
     else:
         user = proc_name
-        text = f"⏰ Напоминание: {user}, вы уже убрали процедурку? Нажмите кнопку ниже."
+        text = f"⏰ <b>Напоминание!</b>\n\n{user}, вы уже убрали процедурку?\nНажмите кнопку ниже 👇"
         callback_data = "done_procedurka"
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Выполнено", callback_data=callback_data)]])
-    sent = await app.bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=keyboard)
-    async def delete_after():
-        await asyncio.sleep(7200)
-        try:
-            await sent.delete()
-        except:
-            pass
-    asyncio.create_task(delete_after())
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Выполнено!", callback_data=callback_data)
+    ]])
+    try:
+        sent = await app.bot.send_message(
+            chat_id=CHAT_ID, text=text,
+            parse_mode='HTML', reply_markup=keyboard
+        )
+        today_str = now_msk().date().isoformat()
+        save_reminder_message(CHAT_ID, sent.message_id, task_type, today_str)
+
+        # Авто-удаление через 2 часа
+        async def delete_after():
+            await asyncio.sleep(7200)
+            try:
+                await sent.delete()
+            except Exception:
+                pass
+        asyncio.create_task(delete_after())
+    except Exception as e:
+        logging.error(f"Ошибка отправки напоминания {task_type}: {e}")
 
 async def daily_reminder_and_timers(app):
+    """Ежедневное напоминание в 18:00 + запуск таймеров проверки выполнения."""
     svodki_name, proc_name = get_today_info()
     today_str = now_msk().strftime('%d.%m.%Y')
     img_bio = generate_demotivator(svodki_name, proc_name, today_str)
-    await delete_previous_message(app, CHAT_ID)
-    sent = await app.bot.send_photo(chat_id=CHAT_ID, photo=img_bio, caption=get_text_message(), parse_mode='HTML')
+    # FIX: передаём app.bot, а не app
+    await delete_previous_message(app.bot, CHAT_ID)
+    sent = await app.bot.send_photo(
+        chat_id=CHAT_ID, photo=img_bio,
+        caption=get_text_message(), parse_mode='HTML'
+    )
     save_last_message_id(sent.message_id)
-    # Рассчитываем задержки до 23:00 по Москве
-    now = now_msk()
-    target_23 = datetime(now.year, now.month, now.day, 23, 0, 0, tzinfo=MSK)
-    if now >= target_23:
-        target_23 += timedelta(days=1)
-    delay_until_23 = (target_23 - now).total_seconds() / 60
-    asyncio.create_task(ask_for_task_completion(app, "svodki", delay_minutes=60))
-    asyncio.create_task(ask_for_task_completion(app, "procedurka", delay_minutes=delay_until_23))
+
+    # Запускаем напоминания-проверки с привязкой к настраиваемому времени
+    svodki_hour = int(get_setting('svodki_remind_hour') or '20')
+    procedurka_hour = int(get_setting('procedurka_remind_hour') or '23')
+
+    asyncio.create_task(ask_for_task_completion(app, "svodki", svodki_hour))
+    asyncio.create_task(ask_for_task_completion(app, "procedurka", procedurka_hour))
 
 # ================= ЗАПУСК =================
 def main():
     init_db()
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
 
     app = Application.builder().token(TOKEN).build()
 
+    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today_command))
     app.add_handler(CommandHandler("stats", stats_command))
@@ -571,17 +811,32 @@ def main():
     app.add_handler(CommandHandler("set_current_procedurka", set_current_procedurka))
     app.add_handler(CommandHandler("set_svodki", set_svodki))
     app.add_handler(CommandHandler("set_procedurka", set_procedurka))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(?!done_).*"))
+    app.add_handler(CommandHandler("set_remind_times", set_remind_times_command))
+
+    # FIX: done_ хендлер регистрируется ПЕРВЫМ, иначе перехватывается общим
     app.add_handler(CallbackQueryHandler(task_done_callback, pattern="^done_"))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    scheduler.add_job(lambda: asyncio.create_task(send_shave_reminder(app)), "cron", hour=17, minute=0)
-    scheduler.add_job(lambda: asyncio.create_task(daily_reminder_and_timers(app)), "cron", hour=18, minute=0)
-    scheduler.add_job(lambda: asyncio.create_task(send_monthly_report(app)), "cron", day=1, hour=10, minute=0)
+    # Используем partial чтобы избежать проблем с lambda в цикле
+    scheduler.add_job(
+        lambda: asyncio.create_task(send_shave_reminder(app)),
+        "cron", hour=17, minute=0
+    )
+    scheduler.add_job(
+        lambda: asyncio.create_task(daily_reminder_and_timers(app)),
+        "cron", hour=18, minute=0
+    )
+    scheduler.add_job(
+        lambda: asyncio.create_task(send_monthly_report(app)),
+        "cron", day=1, hour=10, minute=0
+    )
     scheduler.start()
 
-    print("✅ Бот запущен. Все временные метки привязаны к московскому времени (MSK).")
-    app.run_polling()
+    print("✅ Бот запущен. Временная зона: Europe/Moscow")
+    print(f"📦 Напоминание сводки: {get_setting('svodki_remind_hour')}:00 МСК")
+    print(f"🧹 Напоминание уборки: {get_setting('procedurka_remind_hour')}:00 МСК")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
