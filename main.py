@@ -13,8 +13,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-import pytz
 from aiogram.types import FSInputFile
+from card_generator import generate_card
+import pytz
+
 
 # Импорт генератора карточек (файл duty_card.py должен лежать рядом с bot.py)
 try:
@@ -789,12 +791,12 @@ async def send_card_with_message(
                 output_path    = tmp_path,
             )
             photo = FSInputFile(tmp_path)
-            sent  = await bot.send_photo(
-                chat_id,
-                photo    = photo,
-                caption  = msg_text,
-                parse_mode = "Markdown",
-                reply_markup = reply_markup,
+            sent = await bot.send_photo(
+            chat_id,
+            photo=FSInputFile(card),
+            caption=msg_text,
+            parse_mode="Markdown",
+            reply_markup=confirmation_keyboard(duty_type)
             )
             return sent.message_id
         except Exception as e:
@@ -851,6 +853,18 @@ async def send_daily_card(bot: Bot, chat_id):
 #  ОТПРАВКА НАПОМИНАНИЙ
 # ══════════════════════════════════════════════
 async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
+    card = generate_card(
+    svodki=get_svodki_person(today),
+    proc=get_procedura_person(today),
+    mood=get_mood_label(),
+    proc_day=get_duty_day_number(today),
+    total_svodki=get_total_duties(
+        get_svodki_person(today)
+    ),
+    total_proc=get_total_duties(
+        get_procedura_person(today)
+    )
+    )
     data    = load_data()
     if not data.get("reminders_enabled", True): return
     chat_id = data.get("chat_id", CHAT_ID)
