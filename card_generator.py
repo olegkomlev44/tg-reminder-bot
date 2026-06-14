@@ -22,17 +22,24 @@ def get_background():
     prompt = random.choice(THEMES)
 
     url = (
-        "https://image.pollinations.ai/prompt/"
-        + prompt +
+        f"https://image.pollinations.ai/prompt/{prompt}"
         "?width=1080&height=1350&nologo=true"
     )
 
-    response = requests.get(url, timeout=120)
+    try:
+        r = requests.get(url, timeout=120)
+        r.raise_for_status()
 
-    with open("background.png", "wb") as f:
-        f.write(response.content)
+        with open("background.png", "wb") as f:
+            f.write(r.content)
 
-    return "background.png"
+        return "background.png"
+
+    except Exception:
+        img = Image.new("RGB", (1080, 1350), (20, 20, 30))
+        img.save("background.png")
+        return "background.png"
+
 
 
 def progress_bar(draw, x, y, value, total):
