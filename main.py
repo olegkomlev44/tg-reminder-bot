@@ -792,11 +792,11 @@ async def send_card_with_message(
             )
             photo = FSInputFile(tmp_path)
             sent = await bot.send_photo(
-            chat_id,
-            photo=FSInputFile(card),
+            chat_id=chat_id,
+            photo=FSInputFile(tmp_path),
             caption=msg_text,
             parse_mode="Markdown",
-            reply_markup=confirmation_keyboard(duty_type)
+            reply_markup=reply_markup
             )
             return sent.message_id
         except Exception as e:
