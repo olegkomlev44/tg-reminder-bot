@@ -17,16 +17,16 @@ from aiogram.types import FSInputFile
 from card_generator import generate_card
 import pytz
 
-
-# Импорт генератора карточек (файл duty_card.py должен лежать рядом с bot.py)
 try:
-    from duty_card import make_reminder_card, make_daily_card
+    from card_generator import generate_card
+
     CARDS_ENABLED = True
-except ImportError:
+
+except Exception as e:
     CARDS_ENABLED = False
     logger_tmp = logging.getLogger(__name__)
-    logger_tmp.warning("duty_card.py не найден — изображения отключены")
-
+    logger_tmp.warning(f"card_generator не загружен: {e}")
+    
 # ══════════════════════════════════════════════
 #  КОНФИГУРАЦИЯ
 # ══════════════════════════════════════════════
