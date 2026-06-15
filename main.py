@@ -17,15 +17,6 @@ from aiogram.types import FSInputFile
 from card_generator import make_reminder_card, make_daily_card
 import pytz
 
-try:
-    from card_generator import make_reminder_card, make_daily_card
-
-    CARDS_ENABLED = True
-
-except Exception as e:
-    CARDS_ENABLED = False
-    logger_tmp = logging.getLogger(__name__)
-    logger_tmp.warning(f"card_generator не загружен: {e}")
     
 # ══════════════════════════════════════════════
 #  КОНФИГУРАЦИЯ
