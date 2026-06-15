@@ -3,7 +3,6 @@ import logging
 import json
 import os
 import random
-import tempfile
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -13,20 +12,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from aiogram.types import FSInputFile
-from card_generator import generate_card
 import pytz
 
-try:
-    from card_generator import generate_card
-
-    CARDS_ENABLED = True
-
-except Exception as e:
-    CARDS_ENABLED = False
-    logger_tmp = logging.getLogger(__name__)
-    logger_tmp.warning(f"card_generator не загружен: {e}")
-    
 # ══════════════════════════════════════════════
 #  КОНФИГУРАЦИЯ
 # ══════════════════════════════════════════════
@@ -60,55 +47,52 @@ WEEKDAY_STYLE = {
 }
 
 # ══════════════════════════════════════════════
-#  ✦ УЛУЧШЕНИЕ 1 — 50+ ФРАЗ ПО ДНЯМ НЕДЕЛИ
-#  ✦ УЛУЧШЕНИЕ 2 — НАСТРОЕНИЕ ДНЯ
+#  ✦ ФРАЗЫ ПО ДНЯМ НЕДЕЛИ
 # ══════════════════════════════════════════════
-
-# Заголовки по дням недели (7 дней × несколько вариантов)
 SVODKI_HEADERS_BY_DAY = {
-    0: [  # понедельник — строгий, апокалиптический
+    0: [
         "📋 понедельник. сводки. страдания. погнали",
         "📋 начало недели, начало боли. твой черёд, дежурный",
         "📋 пн детектед. наряд активирован. сопротивление бесполезно",
         "📋 понедельник говорит: подъём. сводки говорят: иди",
         "📋 новая неделя — те же сводки. ты знал на что шёл",
     ],
-    1: [  # вторник — ироничный
+    1: [
         "📋 вторник. скучный день, но сводки яркие",
         "📋 не понедельник, но тоже не пятница. зато сводки",
         "📋 вт детектед. уже не начало, ещё не конец. но сводки — вот они",
         "📋 вторник шепчет: сходи со сводками. ты слышишь?",
         "📋 второй день недели, первый раз сходишь со сводками",
     ],
-    2: [  # среда — усталый
+    2: [
         "📋 экватор недели. ты держишься. теперь ещё и сводки",
         "📋 среда — день силы. особенно если ты несёшь сводки",
         "📋 горб недели. сводки — твоя ноша сегодня",
         "📋 среда, половина ада позади. впереди — сводки",
         "📋 ср детектед. времени на нытьё нет. сводки ждут",
     ],
-    3: [  # четверг — почти пятница
+    3: [
         "📋 чт — это почти пт. почти. но сводки точно сейчас",
         "📋 ещё чуть-чуть до пятницы. но сначала — сводки, дружище",
         "📋 четверг мотивирует. не тебя. сводки — тебя",
         "📋 предпятничный наряд активирован",
         "📋 четверг: завтра пятница, сегодня сводки",
     ],
-    4: [  # пятница — расслабленный
+    4: [
         "📋 пятница! почти выходные. но сначала — сводки, не расслабляйся",
         "📋 🔥 пятничный наряд. после него — свобода",
         "📋 последний рывок недели: сводки и на покой",
         "📋 пт = праздник. но сначала сводки донеси, потом праздник",
         "📋 финишная прямая недели. сводки — последний барьер",
     ],
-    5: [  # суббота — весёлый
+    5: [
         "📋 🥳 сб! выходной! и всё равно сводки лол",
         "📋 суббота — день отдыха и сводок. в таком порядке нет",
         "📋 выходной? да. наряд отменён? нет 😂",
         "📋 сб детектед. сводки не знают что такое выходные",
         "📋 поздравляем! сегодня суббота и сводки одновременно",
     ],
-    6: [  # воскресенье — апокалипсис
+    6: [
         "📋 💀 воскресенье. последний день. и сводки",
         "📋 вс — конец недели и начало следующей боли. зато сводки сейчас",
         "📋 солнечный воскресный наряд. почти поэзия",
@@ -170,9 +154,73 @@ PROC_HEADERS_BY_DAY = {
 }
 
 # ══════════════════════════════════════════════
-#  ✦ УЛУЧШЕНИЕ 2 — НАСТРОЕНИЕ ДНЯ
+#  ✦ ИГРОВЫЕ И ПРОГРАММЕРСКИЕ ФРАЗЫ
+#  (Dota 2 / CS2 / Genshin Impact / разработка)
 # ══════════════════════════════════════════════
-# Хранится в data["daily_mood"] = {"date": "2024-06-01", "mood": "tired"}
+GAMING_HEADERS_SVODKI = [
+    # — Dota 2 —
+    "📋 [DOTA] курьер занят, сводки понесёшь сам — обычное дело",
+    "📋 First Blood дня: ты первый увидел это сообщение. сводки твои",
+    "📋 ward placed 👁 мы видим тебя. иди со сводками",
+    "📋 respawn через 5...4...3... успей со сводками",
+    # — CS2 —
+    "📋 [CS2] bomb has been planted... в твоём расписании. сводки = defuse",
+    "📋 rush B! но сначала сводки, потом раш",
+    "📋 эко-раунд отменяется, сводки — это must buy",
+    "📋 clutch 1v1 vs прокрастинация. сводки — твой ace",
+    # — Genshin Impact —
+    "📋 ежедневное поручение получено: «Доставка сводок» 📜",
+    "📋 [Genshin] Paimon: «эй! эй! сводки ждут, не задерживай Paimon!»",
+    "📋 traveler, открыт telepoint к сводкам. resin не тратится 🌟",
+    "📋 commission «Сводки» — лёгкая сложность, награда: спокойствие команды",
+    # — Программирование —
+    "📋 git commit -m 'отнёс сводки' && git push",
+    "📋 TODO: сводки [priority: HIGH, deadline: 18:00]",
+    "📋 функция donesi_svodki() ещё не вызвана. вызови сейчас",
+    "📋 [WARNING] uncommitted сводки detected — push now",
+]
+
+GAMING_HEADERS_PROC = [
+    # — Dota 2 —
+    "🧹 [DOTA] рошан убит, баунти забран. теперь убей грязь в процедурке",
+    "🧹 ночной дозор начался — время вечерней уборки 🌙",
+    "🧹 это твой ultimate на сегодня: cast «Уборка Процедурки» 🔥",
+    "🧹 backdoor protection не спасёт от швабры. иди убирайся",
+    # — CS2 —
+    "🧹 [CS2] retake процедурки назначен на 22:00",
+    "🧹 smoke вышел, дым рассеялся — пора убирать процедурку, метафорично, но факт",
+    "🧹 t-side выиграл день, ct-side выигрывает процедурку. твой ход",
+    "🧹 раунд начался: цель — обезвредить грязь до таймаута",
+    # — Genshin Impact —
+    "🧹 ежедневное поручение: «Чистота домена Процедурка» 📜",
+    "🧹 [Genshin] Paimon: «эй! эй! тут грязно! Paimon не пройдёт мимо!»",
+    "🧹 domain challenge «Процедурка» открыт. готов к испытанию?",
+    "🧹 resin потрачен на день — осталась только процедурка, traveler",
+    # — Программирование —
+    "🧹 git clean -fd ./процедурка --force",
+    "🧹 [CRON 22:00] задача cleanup_procedure() запущена",
+    "🧹 build failed: процедурка не убрана. fix and retry",
+    "🧹 rm -rf грязь/* && echo 'процедурка чистая'",
+]
+
+GAMING_ENDINGS = [
+    "gg wp, увидимся на следующем напоминании 🎮",
+    "+50 XP за выполнение. левел ап не за горами 🆙",
+    "ачивка «надёжный напарник» на расстоянии одного клика 🏆",
+    "пуш мид и иди делай наряд, союзники на тебя надеются",
+    "это не баг, это фича: наряд существует пока его не выполнят",
+    "commit сделан, тесты зелёные — осталось задеплоить себя в процедурку",
+    "respawn через 5 сек. время на подготовку — сейчас",
+    "критический урон по прокрастинации нанесён ⚔️",
+    "ранг «дежурный-про» ждёт подтверждения",
+    "сложность: лёгкая. награда: мир в команде 🕊",
+    "Paimon одобряет. Paimon редко кого-то одобряет",
+    "rampage! но только если сделаешь без задержек 🔥",
+]
+
+# ══════════════════════════════════════════════
+#  ✦ НАСТРОЕНИЕ ДНЯ (6 режимов)
+# ══════════════════════════════════════════════
 MOODS = {
     "hyper": {
         "label": "🚀 гиперактивный",
@@ -219,10 +267,19 @@ MOODS = {
             "сводки — это метафора ответственности. неси её буквально",
         ],
     },
+    "gamer": {
+        "label": "🎮 геймерский",
+        "endings": [
+            "go go go, таймер тикает как в CS ⏱",
+            "это твой daily quest, easy mode — не ной",
+            "respawn через 5 сек, успей подготовиться",
+            "ranked матч жизни начался, не фидь наряд",
+        ],
+    },
 }
 
 # ══════════════════════════════════════════════
-#  ✦ УЛУЧШЕНИЕ 3 — ПАСХАЛКИ (5% шанс)
+#  ✦ ПАСХАЛКИ (5% шанс) — теперь 9 штук
 # ══════════════════════════════════════════════
 EASTER_EGGS = [
     # официальный протокол
@@ -268,20 +325,58 @@ EASTER_EGGS = [
         f"TASK: {'svodki' if duty=='svodki' else 'procedura'}\nSTATUS: PENDING\n```\n\n"
         f"Перезагрузка невозможна. Выполни наряд для продолжения реальности."
     ),
+    # Dota 2 — результат матча
+    lambda person, duty: (
+        f"🎮 *DOTA 2 — MATCH RESULT*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Radiant 34 : Dire 21\n"
+        f"🏆 MVP матча: {PERSON_EMOJI.get(person,'👤')} *{person}*\n"
+        f"📊 KDA: 14/2/9 · GPM: 720\n"
+        f"🔥 Killing Spree x5\n\n"
+        f"GG WP! теперь твой ход — "
+        f"{'сводки' if duty=='svodki' else 'процедурка'} 🫡"
+    ),
+    # CS2 — конец раунда
+    lambda person, duty: (
+        f"💣 *CS2 — ROUND_OVER*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Counter-Terrorists Win!\n"
+        f"⭐ MVP: {PERSON_EMOJI.get(person,'👤')} *{person}*\n"
+        f"🎯 3 Headshot Kills · ACE\n"
+        f"💰 +3400$ за раунд\n\n"
+        f"следующий раунд: "
+        f"{'сводки' if duty=='svodki' else 'процедурка'}. defuse it 🔧"
+    ),
+    # Genshin Impact — поручение
+    lambda person, duty: (
+        f"🌟 *GENSHIN IMPACT — DAILY COMMISSION*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Traveler: {PERSON_EMOJI.get(person,'👤')} *{person}*\n"
+        f"📜 Поручение: "
+        f"{'«Доставка сводок»' if duty=='svodki' else '«Уборка домена Процедурка»'}\n"
+        f"🎁 Награда: 60 Primogems + Mora\n\n"
+        f"Paimon: «эй! эй! {person}! не забудь забрать награду!» 🍞"
+    ),
+    # программерский терминал
+    lambda person, duty: (
+        f"💻 *TERMINAL*\n"
+        f"```\n"
+        f"$ ssh duty@server\n"
+        f"$ whoami\n"
+        f"{person}\n"
+        f"$ cat /etc/duty/today.conf\n"
+        f"TASK={'svodki' if duty=='svodki' else 'procedura'}\n"
+        f"STATUS=pending\n"
+        f"PRIORITY=high\n"
+        f"DEADLINE={'18:00' if duty=='svodki' else '22:00'}\n"
+        f"$ _\n"
+        f"```"
+    ),
 ]
 
-# обычные концовки (фоллбэк)
-ENDINGS_DEFAULT = [
-    "давай, не подведи команду 💪",
-    "ты справишься, не ной 🫡",
-    "вперёд, легенда 🚀",
-    "команда верит. ну или типа того 👊",
-    "не тупи, сделай и иди отдыхай 🛋",
-    "всё в твоих руках, чемпион 🤝",
-    "удачи. хотя тут и удача не нужна, просто сделай 😐",
-    "погнали, чё стоишь 💨",
-]
-
+# ══════════════════════════════════════════════
+#  РЕАКЦИИ / ЛИЧНЫЕ СООБЩЕНИЯ / РАССЫЛКИ
+# ══════════════════════════════════════════════
 DONE_REPLIES = [
     "✅ красава! записал, можешь выдыхать 🛋",
     "✅ зафиксировал. команда тобой гордится (наверное)",
@@ -293,6 +388,18 @@ DONE_REPLIES = [
     "✅ принято! ты буквально держишь этот коллектив 🙌",
 ]
 
+# доп. реакции — игровые/программерские
+DONE_REPLIES_GAMING = [
+    "✅ ACE! сделано чисто, без вопросов 🎯",
+    "✅ +50 XP начислено, левел ап скоро 🆙",
+    "✅ commit successful — ветка наряда смержена в main 🌿",
+    "✅ quest completed! получено: уважение команды 🏆",
+    "✅ killing spree x3 — три дня подряд без пропусков? 🔥",
+    "✅ build passed ✅ все тесты зелёные",
+    "✅ First Blood дня записан на твой счёт 🩸",
+    "✅ Paimon одобряет! редкий случай 🌟",
+]
+
 RETRY_PREFIX = [
     "⏰ эй, ты там живой? повторяю:",
     "⏰ второй звонок, не игнорируй:",
@@ -300,6 +407,13 @@ RETRY_PREFIX = [
     "⏰ хм, всё ещё не сделано? ладно:",
     "⏰ я просто делаю своё дело. напоминаю:",
     "⏰ настойчивость — это я. вот снова:",
+]
+
+RETRY_PREFIX_GAMING = [
+    "⏰ [RESPAWN] таймер истёк, возвращаю в игру:",
+    "⏰ retry — round 2. вот снова:",
+    "⏰ [RECONNECTING...] напоминание восстановлено:",
+    "⏰ ping подскочил, повторяю пакет данных:",
 ]
 
 PERSONAL_SVODKI = [
@@ -311,6 +425,13 @@ PERSONAL_SVODKI = [
     "{name} сегодня несёт сводки. это ты. это не я. это ты 😐",
 ]
 
+PERSONAL_SVODKI_GAMING = [
+    "{name}, твой quest активен: «Donesi Svodki». награда — спокойствие 🎮",
+    "respawn, {name}! пора нести сводки, таймер пошёл ⏱",
+    "{name}, commission «Сводки» открыта. Paimon ждёт у выхода 🌟",
+    "git push {name} → сводки. без force, по-нормальному 👀",
+]
+
 PERSONAL_PROC = [
     "эй {name} 🧹 вечером процедурка на тебе. не забей",
     "yo {name}, уборка процедурки сегодня твоя. справишься",
@@ -318,6 +439,13 @@ PERSONAL_PROC = [
     "внимание, {name}! процедурка сегодня твоя. это судьба",
     "псс, {name} — убраться в процедурке это ты сегодня 🧹",
     "{name}, 22:00 приближается. процедурка уже скучает по тебе",
+]
+
+PERSONAL_PROC_GAMING = [
+    "{name}, твой ultimate — уборка процедурки. cast его 🧹",
+    "domain «Процедурка» доступен для {name}. удачи в challenge",
+    "{name}, cron-задача cleanup() назначена на тебя сегодня",
+    "rush B, {name}! но в процедурку, и со шваброй 🧹",
 ]
 
 MONDAY_INTROS = [
@@ -355,13 +483,9 @@ def load_data() -> dict:
         "log":                   {},
         "pending_retry":         {},
         "duty_counts":           {},
-        # ✦ 19 — id закреплённых сообщений для редактирования
-        "pinned_msg_id":         None,   # единое закреплённое сообщение
-        # ✦ 18 — очередь на удаление: [{"chat_id": x, "msg_id": y, "delete_at": iso}]
+        "pinned_msg_id":         None,
         "delete_queue":          [],
-        # ✦ 2 — настроение дня
-        "daily_mood":            {},     # {"date": "...", "mood": "ironic"}
-        # ✦ 18 — id последних служебных сообщений для автоудаления
+        "daily_mood":            {},
         "last_svodki_msg_id":    None,
         "last_proc_msg_id":      None,
     }
@@ -385,10 +509,9 @@ def get_total_duties(name: str) -> int:
     return counts.get("svodki", 0) + counts.get("proc", 0)
 
 # ══════════════════════════════════════════════
-#  ✦ УЛУЧШЕНИЕ 2 — НАСТРОЕНИЕ ДНЯ
+#  НАСТРОЕНИЕ ДНЯ
 # ══════════════════════════════════════════════
 def get_daily_mood() -> str:
-    """Возвращает настроение на сегодня, генерирует если нет."""
     data  = load_data()
     today = date.today().isoformat()
     dm    = data.get("daily_mood", {})
@@ -400,34 +523,32 @@ def get_daily_mood() -> str:
     return dm.get("mood", "ironic")
 
 def get_ending() -> str:
-    """Концовка с учётом настроения дня."""
+    """Концовка с учётом настроения дня + игровой пул."""
     mood = get_daily_mood()
-    return random.choice(MOODS[mood]["endings"])
+    pool = MOODS[mood]["endings"] + GAMING_ENDINGS
+    return random.choice(pool)
 
 def get_mood_label() -> str:
     mood = get_daily_mood()
     return MOODS[mood]["label"]
 
 # ══════════════════════════════════════════════
-#  ✦ УЛУЧШЕНИЕ 18 — УДАЛЕНИЕ СЛУЖЕБНЫХ СООБЩЕНИЙ
+#  АВТОУДАЛЕНИЕ СЛУЖЕБНЫХ СООБЩЕНИЙ
 # ══════════════════════════════════════════════
-async def schedule_delete(bot: Bot, chat_id: int | str, msg_id: int, delay_seconds: int):
-    """Удаляет сообщение через delay_seconds секунд."""
+async def schedule_delete(bot: Bot, chat_id, msg_id: int, delay_seconds: int):
     await asyncio.sleep(delay_seconds)
     try:
         await bot.delete_message(chat_id, msg_id)
     except Exception:
-        pass  # уже удалено или нет прав
+        pass
 
-async def auto_delete_later(bot: Bot, chat_id: int | str, msg_id: int, seconds: int = 30):
-    """Запускает фоновую задачу на удаление."""
+async def auto_delete_later(bot: Bot, chat_id, msg_id: int, seconds: int = 30):
     asyncio.create_task(schedule_delete(bot, chat_id, msg_id, seconds))
 
 # ══════════════════════════════════════════════
-#  ✦ УЛУЧШЕНИЕ 19 — ЕДИНОЕ ЗАКРЕПЛЁННОЕ СООБЩЕНИЕ
+#  ЕДИНОЕ ЗАКРЕПЛЁННОЕ СООБЩЕНИЕ
 # ══════════════════════════════════════════════
 def build_pinned_content() -> str:
-    """Содержимое единого закреплённого сообщения — актуальный наряд на сегодня."""
     today    = date.today()
     svodki   = get_svodki_person(today)
     proc     = get_procedura_person(today)
@@ -456,10 +577,6 @@ def build_pinned_content() -> str:
     )
 
 async def update_pinned_message(bot: Bot):
-    """
-    ✦ 19 — Редактирует единое закреплённое сообщение.
-    Если его нет — создаёт и закрепляет.
-    """
     data    = load_data()
     chat_id = data.get("chat_id", CHAT_ID)
     if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
@@ -469,19 +586,12 @@ async def update_pinned_message(bot: Bot):
     pinned_msg_id = data.get("pinned_msg_id")
 
     if pinned_msg_id:
-        # пробуем отредактировать существующее
         try:
-            await bot.edit_message_text(
-                content, chat_id=chat_id,
-                message_id=pinned_msg_id,
-                parse_mode="Markdown"
-            )
-            logger.info("✦19 закреплённое сообщение обновлено")
+            await bot.edit_message_text(content, chat_id=chat_id, message_id=pinned_msg_id, parse_mode="Markdown")
             return
         except Exception as e:
-            logger.warning(f"✦19 не удалось отредактировать закреплённое: {e}")
+            logger.warning(f"не удалось отредактировать закреплённое: {e}")
 
-    # создаём новое и закрепляем
     try:
         sent = await bot.send_message(chat_id, content, parse_mode="Markdown")
         try:
@@ -490,9 +600,8 @@ async def update_pinned_message(bot: Bot):
             pass
         data["pinned_msg_id"] = sent.message_id
         save_data(data)
-        logger.info(f"✦19 создано новое закреплённое сообщение id={sent.message_id}")
     except Exception as e:
-        logger.error(f"✦19 ошибка создания закреплённого: {e}")
+        logger.error(f"ошибка создания закреплённого: {e}")
 
 # ══════════════════════════════════════════════
 #  ЛОГИКА НАРЯДОВ
@@ -538,7 +647,7 @@ class AdminStates(StatesGroup):
     waiting_register = State()
 
 # ══════════════════════════════════════════════
-#  ОФОРМЛЕНИЕ
+#  ОФОРМЛЕНИЕ — БАЗОВЫЕ ХЕЛПЕРЫ
 # ══════════════════════════════════════════════
 def is_weekend(d: date) -> bool:
     return d.weekday() >= 5
@@ -574,7 +683,78 @@ def next_person_proc(name: str) -> str:
     return PROCEDURA_LIST[(PROCEDURA_LIST.index(name) + 1) % len(PROCEDURA_LIST)]
 
 # ══════════════════════════════════════════════
-#  ПОСТРОЕНИЕ СООБЩЕНИЙ
+#  ✦ СТИЛИ ОФОРМЛЕНИЯ БЛОКА СТАТИСТИКИ
+#  (рандомный, но всегда понятный формат — 4 варианта)
+# ══════════════════════════════════════════════
+def stat_block_default(ctx: dict) -> str:
+    """Обычный стиль — как раньше."""
+    icon  = "🤷‍♀️" if ctx["duty_type"] == "svodki" else "⚡️"
+    lines = [
+        f"{icon} *{ctx['num_label']}:*",
+        f"    {person_tag(ctx['person'])}",
+    ]
+    if ctx["duty_type"] == "proc":
+        lines.append(f"    {progress_bar(ctx['proc_day'], 2)}")
+    lines += [
+        f"    📊 нарядов всего: *{ctx['total']}*",
+        f"    ⏭ следующий: {person_tag(ctx['next_name'])} через *{ctx['next_days']} д.*",
+    ]
+    return "\n".join(lines)
+
+def stat_block_scoreboard(ctx: dict) -> str:
+    """Игровой HUD-стиль (Dota/CS табло)."""
+    title = "СВОДКИ" if ctx["duty_type"] == "svodki" else "ПРОЦЕДУРКА"
+    pad   = max(1, 18 - len(title))
+    lines = [
+        f"┌─[ {title} ]" + "─" * pad + "┐",
+        f"│ {person_tag(ctx['person'])}",
+        f"│ позиция: #{ctx['position']}",
+    ]
+    if ctx["duty_type"] == "proc":
+        lines.append(f"│ прогресс: {progress_bar(ctx['proc_day'], 2)}")
+    lines += [
+        f"│ матчей всего: {ctx['total']}",
+        f"│ next: {person_tag(ctx['next_name'])} ({ctx['next_days']}д)",
+        "└" + "─" * 22 + "┘",
+    ]
+    return "\n".join(lines)
+
+def stat_block_terminal(ctx: dict) -> str:
+    """Программерский терминальный стиль."""
+    cmd = "check_svodki" if ctx["duty_type"] == "svodki" else "check_procedura"
+    lines = [
+        f"`$ ./{cmd}.sh --today`",
+        f"`> duty: {ctx['person']} (#{ctx['position']})`",
+    ]
+    if ctx["duty_type"] == "proc":
+        lines.append(f"`> progress: {ctx['proc_day']}/2`")
+    lines += [
+        f"`> total_runs: {ctx['total']}`",
+        f"`> next: {ctx['next_name']} in {ctx['next_days']}d`",
+        "`> status: ACTIVE`",
+    ]
+    return "\n".join(lines)
+
+def stat_block_quest(ctx: dict) -> str:
+    """Genshin-стиль квестового журнала."""
+    quest = "Сводки" if ctx["duty_type"] == "svodki" else "Чистота процедурки"
+    lines = [
+        f"📜 *QUEST: {quest}*",
+        f"👤 герой: {person_tag(ctx['person'])}",
+        f"⭐ ранг: №{ctx['position']}",
+    ]
+    if ctx["duty_type"] == "proc":
+        lines.append(f"🔥 прогресс: {progress_bar(ctx['proc_day'], 2)}")
+    lines += [
+        f"🏆 квестов выполнено: {ctx['total']}",
+        f"➡️ следующий герой: {person_tag(ctx['next_name'])} ({ctx['next_days']}д)",
+    ]
+    return "\n".join(lines)
+
+STAT_BLOCK_STYLES = [stat_block_default, stat_block_scoreboard, stat_block_terminal, stat_block_quest]
+
+# ══════════════════════════════════════════════
+#  ПОСТРОЕНИЕ СООБЩЕНИЙ (команды — стабильный формат)
 # ══════════════════════════════════════════════
 def build_duty_message(target_date: date, label: str) -> str:
     svodki   = get_svodki_person(target_date)
@@ -742,129 +922,9 @@ def procedura_pick_keyboard(actual_idx: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ══════════════════════════════════════════════
-#  ГЕНЕРАЦИЯ И ОТПРАВКА КАРТОЧКИ
-# ══════════════════════════════════════════════
-WEEKDAY_FULL_NAMES = ["понедельник","вторник","среда","четверг","пятница","суббота","воскресенье"]
-WEEKDAY_ICONS_LIST = ["😵","😐","⬡","✦","🔥","🥳","💀"]
-
-async def send_card_with_message(
-    bot: Bot,
-    chat_id,
-    msg_text: str,
-    reply_markup,
-    duty_type: str,
-    person: str,
-    position_label: str,
-    time_label: str,
-    header_text: str,
-    ending_text: str,
-    proc_day: int = 1,
-    next_person: str = "",
-    next_days: int = 0,
-    total_duties: int = 0,
-) -> int | None:
-    """
-    Генерирует картинку и отправляет её вместе с текстом.
-    Возвращает message_id отправленного сообщения.
-    """
-    today    = datetime.now(TIMEZONE).date()
-    date_lbl = today.strftime("%d.%m.%Y") + " • " + WEEKDAY_FULL_NAMES[today.weekday()]
-    mood_lbl = get_mood_label()
-
-    if CARDS_ENABLED:
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-            tmp_path = tf.name
-        try:
-            make_reminder_card(
-                duty_type      = duty_type,
-                person         = person,
-                position_label = position_label,
-                time_label     = time_label,
-                header_text    = header_text,
-                ending_text    = ending_text,
-                date_label     = date_lbl,
-                proc_day       = proc_day,
-                next_person    = next_person,
-                next_days      = next_days,
-                total_duties   = total_duties,
-                mood_label     = mood_lbl,
-                output_path    = tmp_path,
-            )
-            photo = FSInputFile(tmp_path)
-            sent = await bot.send_photo(
-            chat_id=chat_id,
-            photo=FSInputFile(tmp_path),
-            caption=msg_text,
-            parse_mode="Markdown",
-            reply_markup=reply_markup
-            )
-            return sent.message_id
-        except Exception as e:
-            logger.error(f"ошибка генерации карточки: {e}")
-        finally:
-            try: os.unlink(tmp_path)
-            except: pass
-
-    # фоллбэк — просто текст без картинки
-    sent = await bot.send_message(
-        chat_id, msg_text,
-        parse_mode="Markdown",
-        reply_markup=reply_markup,
-    )
-    return sent.message_id
-
-
-async def send_daily_card(bot: Bot, chat_id):
-    """Карточка дня с обеими зонами (для понедельничной рассылки)."""
-    if not CARDS_ENABLED:
-        return
-    today = datetime.now(TIMEZONE).date()
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-        tmp_path = tf.name
-    try:
-        make_daily_card(
-            svodki_person    = get_svodki_person(today),
-            svodki_label     = svodki_num_label(get_svodki_person(today)),
-            proc_person      = get_procedura_person(today),
-            proc_label       = proc_num_label(get_procedura_person(today)),
-            proc_day         = get_duty_day_number(today),
-            date_label       = today.strftime("%d.%m.%Y"),
-            weekday_name     = WEEKDAY_FULL_NAMES[today.weekday()],
-            weekday_icon     = WEEKDAY_ICONS_LIST[today.weekday()],
-            svodki_next      = next_person_svodki(get_svodki_person(today)),
-            svodki_next_days = days_until_svodki(get_svodki_person(today), today),
-            proc_next        = next_person_proc(get_procedura_person(today)),
-            proc_next_days   = days_until_procedura(get_procedura_person(today), today),
-            svodki_total     = get_total_duties(get_svodki_person(today)),
-            proc_total       = get_total_duties(get_procedura_person(today)),
-            mood_label       = get_mood_label(),
-            output_path      = tmp_path,
-        )
-        photo = FSInputFile(tmp_path)
-        await bot.send_photo(chat_id, photo=photo)
-    except Exception as e:
-        logger.error(f"ошибка daily card: {e}")
-    finally:
-        try: os.unlink(tmp_path)
-        except: pass
-
-
-# ══════════════════════════════════════════════
 #  ОТПРАВКА НАПОМИНАНИЙ
 # ══════════════════════════════════════════════
 async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
-    card = generate_card(
-    svodki=get_svodki_person(today),
-    proc=get_procedura_person(today),
-    mood=get_mood_label(),
-    proc_day=get_duty_day_number(today),
-    total_svodki=get_total_duties(
-        get_svodki_person(today)
-    ),
-    total_proc=get_total_duties(
-        get_procedura_person(today)
-    )
-    )
     data    = load_data()
     if not data.get("reminders_enabled", True): return
     chat_id = data.get("chat_id", CHAT_ID)
@@ -875,7 +935,7 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
     div     = weekday_divider(today)
     wd      = today.weekday()
 
-    # ✦ 3 — пасхалка с шансом 5%
+    # 5% шанс пасхалки (не для повторных)
     easter  = random.random() < 0.05 and not retry
 
     if duty_type == "svodki":
@@ -883,20 +943,25 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
         next_d   = days_until_svodki(person, today)
         next_n   = next_person_svodki(person)
         total    = get_total_duties(person)
-        # ✦ 1 — заголовок по дню недели
-        header   = random.choice(RETRY_PREFIX) if retry else random.choice(SVODKI_HEADERS_BY_DAY[wd])
-        # ✦ 2 — концовка по настроению дня
-        ending   = get_ending()
+        position = SVODKI_LIST.index(person) + 1
+
+        headers_pool = SVODKI_HEADERS_BY_DAY[wd] + GAMING_HEADERS_SVODKI
+        retry_pool   = RETRY_PREFIX + RETRY_PREFIX_GAMING
+        header       = random.choice(retry_pool) if retry else random.choice(headers_pool)
+        ending       = get_ending()
 
         if easter:
             msg_text = random.choice(EASTER_EGGS)(person, duty_type)
         else:
+            ctx = {
+                "duty_type": "svodki", "person": person,
+                "num_label": svodki_num_label(person), "position": position,
+                "total": total, "next_name": next_n, "next_days": next_d,
+            }
+            stat_block = random.choice(STAT_BLOCK_STYLES)(ctx)
             msg_text = (
                 f"*{header}*\n{div}\n\n"
-                f"🤷‍♀️ *{svodki_num_label(person)}:*\n"
-                f"    {person_tag(person)}\n"
-                f"    📊 нарядов за всё время: *{total}*\n"
-                f"    ⏭ после — {person_tag(next_n)} через *{next_d} д.*\n\n"
+                f"{stat_block}\n\n"
                 f"_{ending}_\n{div}"
             )
 
@@ -909,26 +974,36 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
         next_d     = days_until_procedura(person, today)
         next_n     = next_person_proc(person)
         total      = get_total_duties(person)
-        header     = random.choice(RETRY_PREFIX) if retry else random.choice(PROC_HEADERS_BY_DAY[wd])
-        ending     = get_ending()
+        position   = PROCEDURA_LIST.index(person) + 1
+
+        headers_pool = PROC_HEADERS_BY_DAY[wd] + GAMING_HEADERS_PROC
+        retry_pool   = RETRY_PREFIX + RETRY_PREFIX_GAMING
+        header       = random.choice(retry_pool) if retry else random.choice(headers_pool)
+        ending       = get_ending()
 
         if easter:
             msg_text = random.choice(EASTER_EGGS)(person, duty_type)
         else:
+            ctx = {
+                "duty_type": "proc", "person": person,
+                "num_label": proc_num_label(person), "position": position,
+                "total": total, "next_name": next_n, "next_days": next_d,
+                "proc_day": proc_day,
+            }
+            stat_block     = random.choice(STAT_BLOCK_STYLES)(ctx)
+            tomorrow_block = (
+                f"\n\n⏭ *завтра пашет:*\n"
+                f"    {person_tag(proc_next)} {progress_bar(proc_day_t, 2)}"
+            )
             msg_text = (
                 f"*{header}*\n{div}\n\n"
-                f"⚡️ *{proc_num_label(person)}:*\n"
-                f"    {person_tag(person)}\n"
-                f"    {progress_bar(proc_day, 2)}\n"
-                f"    📊 нарядов за всё время: *{total}*\n"
-                f"    ⏭ после — {person_tag(next_n)} через *{next_d} д.*\n\n"
-                f"⏭ *завтра пашет:*\n"
-                f"    {person_tag(proc_next)} {progress_bar(proc_day_t, 2)}\n\n"
+                f"{stat_block}"
+                f"{tomorrow_block}\n\n"
                 f"_{ending}_\n{div}"
             )
 
     try:
-        # ✦ 19 — удаляем предыдущее напоминание того же типа
+        # удаляем предыдущее напоминание того же типа
         prev_key = "last_svodki_msg_id" if duty_type == "svodki" else "last_proc_msg_id"
         prev_id  = data.get(prev_key)
         if prev_id:
@@ -937,38 +1012,27 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
             except Exception:
                 pass
 
-        # отправляем карточку + текст
-        sent_id = await send_card_with_message(
-            bot          = bot,
-            chat_id      = chat_id,
-            msg_text     = msg_text,
-            reply_markup = confirmation_keyboard(duty_type),
-            duty_type    = duty_type,
-            person       = person,
-            position_label = svodki_num_label(person) if duty_type == "svodki" else proc_num_label(person),
-            time_label   = "18:00" if duty_type == "svodki" else "22:00",
-            header_text  = header.replace("📋 ", "").replace("🧹 ", ""),
-            ending_text  = ending,
-            proc_day     = proc_day if duty_type == "proc" else 1,
-            next_person  = next_n,
-            next_days    = next_d,
-            total_duties = total,
+        sent = await bot.send_message(
+            chat_id, msg_text,
+            parse_mode="Markdown",
+            reply_markup=confirmation_keyboard(duty_type)
         )
+        data[prev_key] = sent.message_id
+        save_data(data)
 
-        # сохраняем id для удаления при следующем напоминании
-        if sent_id:
-            data[prev_key] = sent_id
-            save_data(data)
-
-        # ✦ 19 — обновляем закреплённое сообщение
+        # обновляем закреплённое
         await update_pinned_message(bot)
 
-        # личное уведомление
+        # личное уведомление (обычный + игровой пул)
         uid = data.get("personal_ids", {}).get(person)
         if uid:
-            tmpl = random.choice(PERSONAL_SVODKI if duty_type == "svodki" else PERSONAL_PROC)
+            tmpl_pool = (
+                (PERSONAL_SVODKI + PERSONAL_SVODKI_GAMING)
+                if duty_type == "svodki"
+                else (PERSONAL_PROC + PERSONAL_PROC_GAMING)
+            )
             try:
-                await bot.send_message(uid, tmpl.format(name=person))
+                await bot.send_message(uid, random.choice(tmpl_pool).format(name=person))
             except Exception as e:
                 logger.warning(f"личное сообщение {person}: {e}")
 
@@ -1000,7 +1064,6 @@ async def send_monday_briefing(bot: Bot):
     if not chat_id or chat_id == "YOUR_CHAT_ID_HERE": return
     try:
         await bot.send_message(chat_id, build_monday_briefing(), parse_mode="Markdown")
-        # обновляем закреплённое — новая неделя
         await update_pinned_message(bot)
     except Exception as e:
         logger.error(f"понедельничная рассылка: {e}")
@@ -1016,7 +1079,6 @@ async def send_sunday_summary(bot: Bot):
         logger.error(f"воскресный итог: {e}")
 
 async def daily_pinned_update(bot: Bot):
-    """✦ 19 — обновляем закреплённое каждый день в полночь."""
     await update_pinned_message(bot)
 
 # ══════════════════════════════════════════════
@@ -1031,6 +1093,8 @@ async def cmd_start(message: types.Message):
         "• пн *9:00* — расписание на всю неделю\n"
         "• вс *20:00* — итоги недели + mvp\n\n"
         "у меня есть *настроение* — каждый день разное 🎭\n"
+        "оформление напоминаний рандомное: то табло как в CS, "
+        "то квест как в Genshin, то терминал разработчика 🖥\n"
         "иногда случаются *пасхалки* — следи за напоминаниями 👀\n"
         "старые напоминания удаляются автоматически 🗑\n"
         "закреплённое сообщение обновляется каждый день 📌\n\n"
@@ -1038,12 +1102,11 @@ async def cmd_start(message: types.Message):
         parse_mode="Markdown",
         reply_markup=main_keyboard()
     )
-    # ✦ 18 — удаляем через 60 секунд (команда /start — служебное)
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 60)
 
 async def cmd_today(message: types.Message):
     sent = await message.answer(build_duty_message(date.today(), "сегодня"), parse_mode="Markdown")
-    await auto_delete_later(message.bot, message.chat.id, sent.message_id, 300)  # 5 минут
+    await auto_delete_later(message.bot, message.chat.id, sent.message_id, 300)
 
 async def cmd_tomorrow(message: types.Message):
     sent = await message.answer(build_duty_message(date.today() + timedelta(days=1), "завтра"), parse_mode="Markdown")
@@ -1058,7 +1121,6 @@ async def cmd_log(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 120)
 
 async def cmd_remind_now(message: types.Message):
-    # ✦ 18 — удаляем сообщение с кнопкой через 30 сек
     sent = await message.answer("🔔 *погнали, отправляю в чат...*", parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
     await _send_reminder(message.bot, "svodki")
@@ -1093,7 +1155,6 @@ async def cmd_getchatid(message: types.Message):
         f"📍 *id этого чата:*\n`{message.chat.id}`\n\nскопируй и вставь в настройки",
         parse_mode="Markdown"
     )
-    # ✦ 18 — удаляем служебное через 30 сек
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 30)
 
 # ── ПОДТВЕРЖДЕНИЕ ──
@@ -1110,9 +1171,9 @@ async def callback_done(callback: types.CallbackQuery):
     data.get("pending_retry", {}).pop(duty_type, None)
     save_data(data)
     increment_count(person, field)
-    await callback.answer(random.choice(DONE_REPLIES), show_alert=False)
+    reply_pool = DONE_REPLIES + DONE_REPLIES_GAMING
+    await callback.answer(random.choice(reply_pool), show_alert=False)
     await callback.message.edit_reply_markup(reply_markup=None)
-    # ✦ 19 — обновляем закреплённое после подтверждения
     await update_pinned_message(callback.bot)
 
 async def callback_retry(callback: types.CallbackQuery):
@@ -1151,7 +1212,6 @@ async def process_chat_id(message: types.Message, state: FSMContext):
     sent = await message.answer(f"✅ *чат установлен!*\nid: `{chat_id}`", parse_mode="Markdown", reply_markup=main_keyboard())
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 30)
 
-# ── ✦ 19 ОБНОВИТЬ ЗАКРЕПЛЁННОЕ ВРУЧНУЮ ──
 async def callback_update_pinned(callback: types.CallbackQuery):
     await callback.answer("📌 обновляю закреплённое...", show_alert=False)
     await update_pinned_message(callback.bot)
@@ -1301,7 +1361,6 @@ async def main():
     storage = MemoryStorage()
     dp      = Dispatcher(storage=storage)
 
-    # команды и кнопки
     dp.message.register(cmd_start,        Command("start"))
     dp.message.register(cmd_getchatid,    Command("chatid"))
     dp.message.register(cmd_today,        F.text == "📋 Наряд сегодня")
@@ -1313,7 +1372,6 @@ async def main():
     dp.message.register(process_chat_id,  AdminStates.waiting_chat_id)
     dp.message.register(process_register, AdminStates.waiting_register)
 
-    # callbacks
     dp.callback_query.register(callback_done,                F.data.startswith("done:"))
     dp.callback_query.register(callback_retry,               F.data.startswith("retry:"))
     dp.callback_query.register(callback_toggle_reminders,    F.data == "toggle_reminders")
@@ -1329,15 +1387,12 @@ async def main():
     dp.callback_query.register(callback_back_settings,       F.data == "back_settings")
     dp.callback_query.register(callback_back_main,           F.data == "back_main")
 
-    # планировщик
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(send_svodki_reminder,    CronTrigger(hour=18, minute=0,  timezone=TIMEZONE), args=[bot])
     scheduler.add_job(send_procedura_reminder,  CronTrigger(hour=22, minute=0, timezone=TIMEZONE), args=[bot])
     scheduler.add_job(send_monday_briefing,    CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=TIMEZONE), args=[bot])
     scheduler.add_job(send_sunday_summary,     CronTrigger(day_of_week="sun", hour=20, minute=0, timezone=TIMEZONE), args=[bot])
-    # ✦ 19 — обновляем закреплённое каждый день в 00:01
     scheduler.add_job(daily_pinned_update,     CronTrigger(hour=0, minute=1, timezone=TIMEZONE), args=[bot])
-    # повторные напоминания
     scheduler.add_job(send_retry_reminder, "interval", minutes=15, args=[bot, "svodki"])
     scheduler.add_job(send_retry_reminder, "interval", minutes=15, args=[bot, "proc"])
     scheduler.start()
@@ -1351,4 +1406,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
