@@ -754,47 +754,51 @@ async def send_card_with_message(
     next_days: int = 0,
     total_duties: int = 0,
 ) -> int | None:
-    """
-    Генерирует картинку и отправляет её вместе с текстом.
-    Возвращает message_id отправленного сообщения.
-    """
+    """Генерирует картинку и отправляет её вместе с текстом."""
     today    = datetime.now(TIMEZONE).date()
     date_lbl = today.strftime("%d.%m.%Y") + " • " + WEEKDAY_FULL_NAMES[today.weekday()]
     mood_lbl = get_mood_label()
 
-    if CARDS_ENABLED:
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
-            tmp_path = tf.name
-        try:
-            make_reminder_card(
-                duty_type      = duty_type,
-                person         = person,
-                position_label = position_label,
-                time_label     = time_label,
-                header_text    = header_text,
-                ending_text    = ending_text,
-                date_label     = date_lbl,
-                proc_day       = proc_day,
-                next_person    = next_person,
-                next_days      = next_days,
-                total_duties   = total_duties,
-                mood_label     = mood_lbl,
-                output_path    = tmp_path,
-            )
-            photo = FSInputFile(tmp_path)
-            sent = await bot.send_photo(
+     # Генерируем карточку во временный файл
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+        tmp_path = tf.name
+    try:
+        make_reminder_card(
+            duty_type      = duty_type,
+            person         = person,
+            position_label = position_label,
+            time_label     = time_label,
+            header_text    = header_text,
+            ending_text    = ending_text,
+            date_label     = date_lbl,
+            proc_day       = proc_day,
+            next_person    = next_person,
+            next_days      = next_days,
+            total_duties   = total_duties,
+            mood_label     = mood_lbl,
+            output_path    = tmp_path,
+        )
+        photo = FSInputFile(tmp_path)
+        sent = await bot.send_photo(
             chat_id=chat_id,
-            photo=FSInputFile(tmp_path),
+            photo=photo,
             caption=msg_text,
             parse_mode="Markdown",
             reply_markup=reply_markup
             )
             return sent.message_id
-        except Exception as e:
-            logger.error(f"ошибка генерации карточки: {e}")
-        finally:
-            try: os.unlink(tmp_path)
-            except: pass
+    except Exception as e:
+        logger.error(f"ошибка генерации карточки: {e}")
+        # Фоллбэк — отправляем только текст
+        sent = await bot.send_message(
+            chat_id, msg_text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+        return sent.message_id
+    finally:
+        try: os.unlink(tmp_path)
+        except: pass
 
     # фоллбэк — просто текст без картинки
     sent = await bot.send_message(
@@ -804,11 +808,19 @@ async def send_card_with_message(
     )
     return sent.message_id
 
+ # Фоллбэк — отправляем только текст
+        sent = await bot.send_message(
+            chat_id, msg_text,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+        return sent.message_id
+    finally:
+        try: os.unlink(tmp_path)
+        except: pass
 
 async def send_daily_card(bot: Bot, chat_id):
     """Карточка дня с обеими зонами (для понедельничной рассылки)."""
-    if not CARDS_ENABLED:
-        return
     today = datetime.now(TIMEZONE).date()
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
         tmp_path = tf.name
@@ -831,42 +843,32 @@ async def send_daily_card(bot: Bot, chat_id):
             mood_label       = get_mood_label(),
             output_path      = tmp_path,
         )
-        photo = FSInputFile(tmp_path)
+         photo = FSInputFile(tmp_path)
         await bot.send_photo(chat_id, photo=photo)
     except Exception as e:
         logger.error(f"ошибка daily card: {e}")
     finally:
         try: os.unlink(tmp_path)
-        except: pass
+        except: pass  
+            
+            
 
 
 # ══════════════════════════════════════════════
 #  ОТПРАВКА НАПОМИНАНИЙ
 # ══════════════════════════════════════════════
 async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
-    card = generate_card(
-    svodki=get_svodki_person(today),
-    proc=get_procedura_person(today),
-    mood=get_mood_label(),
-    proc_day=get_duty_day_number(today),
-    total_svodki=get_total_duties(
-        get_svodki_person(today)
-    ),
-    total_proc=get_total_duties(
-        get_procedura_person(today)
-    )
-    )
     data    = load_data()
     if not data.get("reminders_enabled", True): return
     chat_id = data.get("chat_id", CHAT_ID)
     if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
-        logger.warning("CHAT_ID не настроен!"); return
+        logger.warning("CHAT_ID не настроен!")
+        return
 
     today   = datetime.now(TIMEZONE).date()
     div     = weekday_divider(today)
     wd      = today.weekday()
 
-    # ✦ 3 — пасхалка с шансом 5%
     easter  = random.random() < 0.05 and not retry
 
     if duty_type == "svodki":
@@ -874,9 +876,7 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
         next_d   = days_until_svodki(person, today)
         next_n   = next_person_svodki(person)
         total    = get_total_duties(person)
-        # ✦ 1 — заголовок по дню недели
         header   = random.choice(RETRY_PREFIX) if retry else random.choice(SVODKI_HEADERS_BY_DAY[wd])
-        # ✦ 2 — концовка по настроению дня
         ending   = get_ending()
 
         if easter:
@@ -890,7 +890,12 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
                 f"    ⏭ после — {person_tag(next_n)} через *{next_d} д.*\n\n"
                 f"_{ending}_\n{div}"
             )
-
+        position_label = svodki_num_label(person)
+        time_label = "18:00"
+        proc_day = 1
+        next_person = next_n
+        next_days = next_d
+        total_duties = total
     else:
         person     = get_procedura_person(today)
         proc_day   = get_duty_day_number(today)
@@ -917,55 +922,57 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
                 f"    {person_tag(proc_next)} {progress_bar(proc_day_t, 2)}\n\n"
                 f"_{ending}_\n{div}"
             )
+        position_label = proc_num_label(person)
+        time_label = "22:00"
+        next_person = next_n
+        next_days = next_d
+        total_duties = total
 
     try:
-        # ✦ 19 — удаляем предыдущее напоминание того же типа
-        prev_key = "last_svodki_msg_id" if duty_type == "svodki" else "last_proc_msg_id"
-        prev_id  = data.get(prev_key)
-        if prev_id:
-            try:
-                await bot.delete_message(chat_id, prev_id)
-            except Exception:
-                pass
+        # Удаляем предыдущее напоминание того же типа
+    prev_key = "last_svodki_msg_id" if duty_type == "svodki" else "last_proc_msg_id"
+    prev_id  = data.get(prev_key)
+    if prev_id:
+        try:
+            await bot.delete_message(chat_id, prev_id)
+        except Exception:
+            pass
 
-        # отправляем карточку + текст
-        sent_id = await send_card_with_message(
-            bot          = bot,
-            chat_id      = chat_id,
-            msg_text     = msg_text,
-            reply_markup = confirmation_keyboard(duty_type),
-            duty_type    = duty_type,
-            person       = person,
-            position_label = svodki_num_label(person) if duty_type == "svodki" else proc_num_label(person),
-            time_label   = "18:00" if duty_type == "svodki" else "22:00",
-            header_text  = header.replace("📋 ", "").replace("🧹 ", ""),
-            ending_text  = ending,
-            proc_day     = proc_day if duty_type == "proc" else 1,
-            next_person  = next_n,
-            next_days    = next_d,
-            total_duties = total,
-        )
+    # Отправляем карточку + текст
+    sent_id = await send_card_with_message(
+        bot          = bot,
+        chat_id      = chat_id,
+        msg_text     = msg_text,
+        reply_markup = confirmation_keyboard(duty_type),
+        duty_type    = duty_type,
+        person       = person,
+        position_label = position_label,
+        time_label     = time_label,
+        header_text    = header.replace("📋 ", "").replace("🧹 ", ""),
+        ending_text    = ending,
+        proc_day       = proc_day if duty_type == "proc" else 1,
+        next_person    = next_person,
+        next_days      = next_days,
+        total_duties   = total_duties,
+    )
 
         # сохраняем id для удаления при следующем напоминании
         if sent_id:
-            data[prev_key] = sent_id
-            save_data(data)
+        data[prev_key] = sent_id
+        save_data(data)
 
-        # ✦ 19 — обновляем закреплённое сообщение
-        await update_pinned_message(bot)
+    await update_pinned_message(bot)
 
-        # личное уведомление
-        uid = data.get("personal_ids", {}).get(person)
-        if uid:
-            tmpl = random.choice(PERSONAL_SVODKI if duty_type == "svodki" else PERSONAL_PROC)
-            try:
-                await bot.send_message(uid, tmpl.format(name=person))
-            except Exception as e:
-                logger.warning(f"личное сообщение {person}: {e}")
+    # Личное уведомление
+    uid = data.get("personal_ids", {}).get(person)
+    if uid:
+        tmpl = random.choice(PERSONAL_SVODKI if duty_type == "svodki" else PERSONAL_PROC)
+        try:
+            await bot.send_message(uid, tmpl.format(name=person))
+        except Exception as e:
+            logger.warning(f"личное сообщение {person}: {e}")
 
-        logger.info(f"напоминание [{duty_type}] → {person} {'🥚ПАСХАЛКА' if easter else ''}")
-    except Exception as e:
-        logger.error(f"ошибка отправки [{duty_type}]: {e}")
+    logger.info(f"напоминание [{duty_type}] → {person} {'🥚ПАСХАЛКА' if easter else ''}")
 
 
 async def send_svodki_reminder(bot: Bot):
@@ -990,8 +997,10 @@ async def send_monday_briefing(bot: Bot):
     chat_id = data.get("chat_id", CHAT_ID)
     if not chat_id or chat_id == "YOUR_CHAT_ID_HERE": return
     try:
-        await bot.send_message(chat_id, build_monday_briefing(), parse_mode="Markdown")
+        await bot.send_message(chat_id, build_monday_briefing(), parse_mode="Markdown")       
         # обновляем закреплённое — новая неделя
+         # Также можно отправить красивую карточку дня
+        await send_daily_card(bot, chat_id)
         await update_pinned_message(bot)
     except Exception as e:
         logger.error(f"понедельничная рассылка: {e}")
@@ -1007,7 +1016,6 @@ async def send_sunday_summary(bot: Bot):
         logger.error(f"воскресный итог: {e}")
 
 async def daily_pinned_update(bot: Bot):
-    """✦ 19 — обновляем закреплённое каждый день в полночь."""
     await update_pinned_message(bot)
 
 # ══════════════════════════════════════════════
