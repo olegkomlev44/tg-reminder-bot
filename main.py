@@ -14,11 +14,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram.types import FSInputFile
-from card_generator import generate_card
+from card_generator import make_reminder_card, make_daily_card
 import pytz
 
 try:
-    from card_generator import generate_card
+    from card_generator import make_reminder_card, make_daily_card
 
     CARDS_ENABLED = True
 
