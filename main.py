@@ -23,21 +23,27 @@ from card_generator import make_reminder_card, THEME_KEYS
 # ══════════════════════════════════════════════
 TOKEN     = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID   = os.getenv("CHAT_ID",   "YOUR_CHAT_ID_HERE")
-DATA_FILE = "duty_data.json"
+SHARED_DIR = os.getenv("SHARED_DIR", "/app/shared")
+DATA_FILE = os.path.join(SHARED_DIR, "duty_data.json")
+CARDS_DIR = os.path.join(SHARED_DIR, "cards")
 TIMEZONE  = pytz.timezone("Europe/Moscow")
+
+# Создаём папки
+os.makedirs(SHARED_DIR, exist_ok=True)
+os.makedirs(CARDS_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════
-#  СПИСКИ ДЕЖУРНЫХ
+#  СПИСКИ ДЕЖУРНЫХ (без изменений)
 # ══════════════════════════════════════════════
-SVODKI_LIST    = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Ильнар"]
-PROCEDURA_LIST = ["Илья", "Саша", "Игорь", "Глеба", "Ильнар"]
+SVODKI_LIST    = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Слава", "Ильнар"]
+PROCEDURA_LIST = ["Илья", "Слава", "Саша", "Игорь", "Глеба", "Ильнар"]
 
 PERSON_EMOJI = {
     "Саша": "🦊", "Олег": "🐻", "Максим": "🦁", "Игорь": "🐺",
-    "Илья": "🦅", "Глеба": "🐯", "Ильнар": "🐉",
+    "Илья": "🦅", "Глеба": "🐯", "Слава": "🦝", "Ильнар": "🐉",
 }
 
 WEEKDAY_STYLE = {
@@ -277,7 +283,6 @@ MOODS = {
 #  ✦ ПАСХАЛКИ
 # ══════════════════════════════════════════════
 EASTER_EGGS = [
-    # официальный протокол
     lambda person, duty: (
         f"📎 *ОФИЦИАЛЬНЫЙ ПРОТОКОЛ №{random.randint(100,999)}/А*\n\n"
         f"Настоящим уведомляем гражданина *{person}* о необходимости "
@@ -285,7 +290,6 @@ EASTER_EGGS = [
         f"Уклонение от исполнения влечёт последствия.\n\n"
         f"_Подписано: Комитет по нарядам_"
     ),
-    # инопланетяне
     lambda person, duty: (
         f"👽 *ВХОДЯЩИЙ СИГНАЛ ИЗ ГЛУБОКОГО КОСМОСА*\n\n"
         f"Земляни-ин *{person}*!\n"
@@ -294,7 +298,6 @@ EASTER_EGGS = [
         f"Не подводи-и Землю-у. Мы наблюдаем-м.\n\n"
         f"_— цивилизация Зоргов_"
     ),
-    # рэп
     lambda person, duty: (
         f"🎤 *ДРОП*\n\n"
         f"йо, {person}, слышишь зов?\n"
@@ -304,7 +307,6 @@ EASTER_EGGS = [
         f"хоп-хоп, не тупи\n"
         f"погнал, до свидания 🎤"
     ),
-    # стихотворение
     lambda person, duty: (
         f"📜 *Ода дежурному*\n\n"
         f"О, {person}, герой без плаща,\n"
@@ -313,14 +315,12 @@ EASTER_EGGS = [
         f"Иди же скорее, не медли ничё.\n\n"
         f"_— анонимный поэт нарядов_"
     ),
-    # баг матрицы
     lambda person, duty: (
         f"⚠️ *ОБНАРУЖЕН БАГ В МАТРИЦЕ*\n\n"
         f"```\nERROR: duty_avoidance detected\nUSER: {person}\n"
         f"TASK: {'svodki' if duty=='svodki' else 'procedura'}\nSTATUS: PENDING\n```\n\n"
         f"Перезагрузка невозможна. Выполни наряд для продолжения реальности."
     ),
-    # Dota 2 — результат матча
     lambda person, duty: (
         f"🎮 *DOTA 2 — MATCH RESULT*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -331,7 +331,6 @@ EASTER_EGGS = [
         f"GG WP! теперь твой ход — "
         f"{'сводки' if duty=='svodki' else 'процедурка'} 🫡"
     ),
-    # CS2 — конец раунда
     lambda person, duty: (
         f"💣 *CS2 — ROUND_OVER*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -342,7 +341,6 @@ EASTER_EGGS = [
         f"следующий раунд: "
         f"{'сводки' if duty=='svodki' else 'процедурка'}. defuse it 🔧"
     ),
-    # Genshin Impact — поручение
     lambda person, duty: (
         f"🌟 *GENSHIN IMPACT — DAILY COMMISSION*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -352,7 +350,6 @@ EASTER_EGGS = [
         f"🎁 Награда: 60 Primogems + Mora\n\n"
         f"Paimon: «эй! эй! {person}! не забудь забрать награду!» 🍞"
     ),
-    # программерский терминал
     lambda person, duty: (
         f"💻 *TERMINAL*\n"
         f"```\n"
@@ -913,7 +910,6 @@ def procedura_pick_keyboard(actual_idx: int) -> InlineKeyboardMarkup:
 #  ОТПРАВКА НАПОМИНАНИЙ (С ГЕНЕРАЦИЕЙ КАРТИНКИ)
 # ══════════════════════════════════════════════
 async def _send_personal(bot: Bot, person: str, duty_type: str):
-    """Отправляет личное сообщение дежурному, если он зарегистрирован."""
     data = load_data()
     uid = data.get("personal_ids", {}).get(person)
     if not uid: return
@@ -952,27 +948,9 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
         header       = random.choice(retry_pool) if retry else random.choice(headers_pool)
         ending       = get_ending()
         prev_key = "last_svodki_msg_id"
-
-        if easter:
-            msg_text = random.choice(EASTER_EGGS)(person, duty_type)
-            prev_id = data.get(prev_key)
-            if prev_id:
-                try: await bot.delete_message(chat_id, prev_id)
-                except: pass
-            sent = await bot.send_message(chat_id, msg_text, parse_mode="Markdown",
-                                          reply_markup=confirmation_keyboard(duty_type))
-            data[prev_key] = sent.message_id
-            save_data(data)
-            await update_pinned_message(bot)
-            await _send_personal(bot, person, duty_type)
-            return
-
-    else:  # proc
+    else:
         person     = get_procedura_person(today)
         proc_day   = get_duty_day_number(today)
-        tomorrow   = today + timedelta(days=1)
-        proc_next  = get_procedura_person(tomorrow)
-        proc_day_t = get_duty_day_number(tomorrow)
         next_d     = days_until_procedura(person, today)
         next_n     = next_person_proc(person)
         total      = get_total_duties(person)
@@ -984,42 +962,73 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
         ending       = get_ending()
         prev_key = "last_proc_msg_id"
 
-        if easter:
-            msg_text = random.choice(EASTER_EGGS)(person, duty_type)
-            prev_id = data.get(prev_key)
-            if prev_id:
-                try: await bot.delete_message(chat_id, prev_id)
-                except: pass
-            sent = await bot.send_message(chat_id, msg_text, parse_mode="Markdown",
-                                          reply_markup=confirmation_keyboard(duty_type))
-            data[prev_key] = sent.message_id
-            save_data(data)
-            await update_pinned_message(bot)
-            await _send_personal(bot, person, duty_type)
-            return
+    if easter:
+        msg_text = random.choice(EASTER_EGGS)(person, duty_type)
+        prev_id = data.get(prev_key)
+        if prev_id:
+            try: await bot.delete_message(chat_id, prev_id)
+            except: pass
+        sent = await bot.send_message(chat_id, msg_text, parse_mode="Markdown",
+                                      reply_markup=confirmation_keyboard(duty_type))
+        data[prev_key] = sent.message_id
+        save_data(data)
+        await update_pinned_message(bot)
+        await _send_personal(bot, person, duty_type)
+        return
 
-    # --- Генерация картинки ---
+    # Генерация картинки
     date_label = today.strftime("%d.%m.%Y") + " • " + WEEKDAY_STYLE[wd][0]
     theme_key = random.choice(THEME_KEYS)
-    img_path = f"/tmp/card_{duty_type}_{int(time.time())}.jpg"
+    # Используем общую папку для карточек
+    img_filename = f"card_{duty_type}_{int(time.time())}.jpg"
+    img_path = os.path.join(CARDS_DIR, img_filename)
 
-    make_reminder_card(
-        duty_type=duty_type,
-        person=person,
-        position_label=position_label,
-        time_label=time_label,
-        header_text=header,
-        ending_text=ending,
-        date_label=date_label,
-        mood_label=mood_label,
-        proc_day=proc_day if duty_type == "proc" else 1,
-        next_person=next_n,
-        next_days=next_d,
-        total_duties=total,
-        theme_key=theme_key,
-        output_path=img_path
-    )
+    try:
+        logger.info(f"Генерация карточки для {person} ({duty_type})")
+        make_reminder_card(
+            duty_type=duty_type,
+            person=person,
+            position_label=position_label,
+            time_label=time_label,
+            header_text=header,
+            ending_text=ending,
+            date_label=date_label,
+            mood_label=mood_label,
+            proc_day=proc_day if duty_type == "proc" else 1,
+            next_person=next_n,
+            next_days=next_d,
+            total_duties=total,
+            theme_key=theme_key,
+            output_path=img_path
+        )
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f"Файл {img_path} не создан")
+        logger.info(f"Карточка успешно создана: {img_path}")
+    except Exception as e:
+        logger.error(f"Ошибка генерации карточки: {e}", exc_info=True)
+        # Отправляем текстовое сообщение
+        msg_text = (
+            f"*{header}*\n\n"
+            f"👤 {person}\n"
+            f"📋 {position_label}\n"
+            f"⏰ {time_label}\n"
+            f"📊 нарядов всего: {total}\n"
+            f"⏭ следующий: {next_n} ({next_d}д)\n\n"
+            f"_{ending}_"
+        )
+        prev_id = data.get(prev_key)
+        if prev_id:
+            try: await bot.delete_message(chat_id, prev_id)
+            except: pass
+        sent = await bot.send_message(chat_id, msg_text, parse_mode="Markdown",
+                                      reply_markup=confirmation_keyboard(duty_type))
+        data[prev_key] = sent.message_id
+        save_data(data)
+        await update_pinned_message(bot)
+        await _send_personal(bot, person, duty_type)
+        return
 
+    # Отправляем фото
     caption = f"🔔 Напоминание по {duty_type.upper()} для *{person}*"
 
     prev_id = data.get(prev_key)
@@ -1027,24 +1036,33 @@ async def _send_reminder(bot: Bot, duty_type: str, retry: bool = False):
         try: await bot.delete_message(chat_id, prev_id)
         except: pass
 
-    photo = FSInputFile(img_path)
-    sent = await bot.send_photo(
-        chat_id,
-        photo=photo,
-        caption=caption,
-        parse_mode="Markdown",
-        reply_markup=confirmation_keyboard(duty_type)
-    )
-    data[prev_key] = sent.message_id
-    save_data(data)
-
-    try: os.remove(img_path)
-    except: pass
+    try:
+        photo = FSInputFile(img_path)
+        sent = await bot.send_photo(
+            chat_id,
+            photo=photo,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=confirmation_keyboard(duty_type)
+        )
+        data[prev_key] = sent.message_id
+        save_data(data)
+        logger.info(f"Фото отправлено для {person} ({duty_type})")
+    except Exception as e:
+        logger.error(f"Ошибка отправки фото: {e}", exc_info=True)
+        # Пытаемся отправить текст
+        msg_text = f"*{header}*\n\n👤 {person}\n📋 {position_label}\n⏰ {time_label}\n\n_{ending}_"
+        sent = await bot.send_message(chat_id, msg_text, parse_mode="Markdown",
+                                      reply_markup=confirmation_keyboard(duty_type))
+        data[prev_key] = sent.message_id
+        save_data(data)
+    finally:
+        # Удаляем временный файл
+        try: os.remove(img_path)
+        except: pass
 
     await update_pinned_message(bot)
     await _send_personal(bot, person, duty_type)
-
-    logger.info(f"напоминание [{duty_type}] → {person} (картинка)")
 
 async def send_svodki_reminder(bot: Bot):
     await _send_reminder(bot, "svodki")
