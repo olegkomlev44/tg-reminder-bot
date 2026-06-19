@@ -3,3 +3,4 @@ apscheduler==3.10.4
 pytz==2024.1
 Pillow==11.0.0
 requests==2.32.3
+python-dotenv==1.2.2
