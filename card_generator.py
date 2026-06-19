@@ -4,7 +4,7 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 # ══════════════════════════════════════════════
-#  ШРИФТЫ – расширенный список для контейнера
+#  ШРИФТЫ
 # ══════════════════════════════════════════════
 _FONT_CANDIDATES_BOLD = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -41,7 +41,7 @@ def load_font(path, size):
     return ImageFont.load_default()
 
 # ══════════════════════════════════════════════
-#  РАЗМЕРЫ И БАЗОВЫЕ ЦВЕТА
+#  РАЗМЕРЫ
 # ══════════════════════════════════════════════
 W, H   = 1080, 1350
 BG_H   = 620
@@ -50,7 +50,7 @@ WHITE = (255, 255, 255)
 DARK  = (12, 12, 16)
 
 # ══════════════════════════════════════════════
-#  23 ТЕМЫ
+#  ТЕМЫ
 # ══════════════════════════════════════════════
 THEMES = {
     "cs2": {"title": "CS2", "accent": (255, 178, 40)},
@@ -80,28 +80,29 @@ THEMES = {
 THEME_KEYS = list(THEMES.keys())
 
 # ══════════════════════════════════════════════
-#  ОПТИМИЗИРОВАННЫЙ ПРОЦЕДУРНЫЙ ФОН
+#  ПРОЦЕДУРНЫЙ ФОН (быстрый)
 # ══════════════════════════════════════════════
 def generate_background(theme_key, width, height):
     theme = THEMES.get(theme_key, THEMES["matrix"])
     accent = theme["accent"]
-    
-    # Нативный быстрый градиент средствами Pillow вместо построчного цикла
+    img = Image.new("RGB", (width, height), (8, 8, 12))
+    draw = ImageDraw.Draw(img)
+
     dark_accent = tuple(max(0, c - 180) for c in accent)
-    base = Image.new("RGB", (1, 2))
-    base.putpixel((0, 0), (8, 8, 12))
-    base.putpixel((0, 1), dark_accent)
-    img = base.resize((width, height), Image.Resampling.BILINEAR)
+    for y in range(height):
+        t = y / height
+        r = int(8 + (dark_accent[0] - 8) * t)
+        g = int(8 + (dark_accent[1] - 8) * t)
+        b = int(12 + (dark_accent[2] - 12) * t)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
 
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     odraw = ImageDraw.Draw(overlay)
     cx, cy = width // 2, int(height * 0.4)
-    
     for r in range(40, max(width, height), 100):
         alpha = max(20, 120 - r // 10)
         color = accent + (alpha,)
         odraw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=random.randint(2, 6))
-        
     for _ in range(8):
         x1 = random.randint(0, width)
         y1 = random.randint(0, height)
@@ -116,7 +117,7 @@ def generate_background(theme_key, width, height):
     return img.convert("RGB")
 
 # ══════════════════════════════════════════════
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ РИСОВАНИЯ
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (оптимизированные)
 # ══════════════════════════════════════════════
 def _centered_x(draw, text, font):
     bb = draw.textbbox((0, 0), text, font=font)
@@ -147,20 +148,18 @@ def _wrap_text(draw, text, font, max_w):
         lines.append(cur)
     return lines
 
-def _draw_outlined_text(draw, xy, text, font, fill, outline_color=(0,0,0), outline_w=2):
-    # Используем встроенный высокопроизводительный stroke_width в Pillow 11 вместо вложенных циклов Python
-    draw.text(xy, text, font=font, fill=fill, stroke_width=outline_w, stroke_fill=outline_color)
-
-def _draw_noise(img, amount=8):
+def _draw_noise_opt(img, amount=8):
+    """Быстрый шум – только 10% пикселей."""
     px = img.load()
     w, h = img.size
-    # Фиксированное число итераций (10000 вместо 180000+), чтобы не вешать поток выполнения
-    for _ in range(10000):
-        x = random.randint(0, w-1)
-        y = random.randint(0, h-1)
-        r, g, b = px[x, y][:3]
+    total = w * h
+    step = max(1, total // 200)  # ~0.5% пикселей
+    for i in range(0, total, step):
+        x = i % w
+        y = i // w
+        r,g,b = px[x,y][:3]
         d = random.randint(-amount, amount)
-        px[x, y] = (max(0, min(255, r+d)), max(0, min(255, g+d)), max(0, min(255, b+d)))
+        px[x,y] = (max(0,min(255,r+d)), max(0,min(255,g+d)), max(0,min(255,b+d)))
 
 # ══════════════════════════════════════════════
 #  ГЛАВНАЯ ФУНКЦИЯ
@@ -181,7 +180,7 @@ def make_reminder_card(
         img = Image.new("RGB", (W, H), DARK)
         img.paste(bg, (0,0))
 
-        # затемнение
+        # Затемнение перехода
         img = img.convert("RGBA")
         fade = Image.new("RGBA", (W,H), (0,0,0,0))
         fd = ImageDraw.Draw(fade)
@@ -194,7 +193,7 @@ def make_reminder_card(
         img = img.convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        # бейдж темы
+        # ── бейдж темы ──
         badge_font = load_font(FONT_BOLD, 26)
         badge_text = f"[ {theme['title']} ]"
         bb = draw.textbbox((0,0), badge_text, font=badge_font)
@@ -202,22 +201,24 @@ def make_reminder_card(
         draw.rectangle([MARGIN-12, MARGIN-10, MARGIN+bw+12, MARGIN+bh+14], fill=(15,15,20))
         draw.text((MARGIN, MARGIN), badge_text, font=badge_font, fill=accent)
 
-        # время
+        # ── время ──
         time_font = load_font(FONT_BOLD, 26)
         tb = draw.textbbox((0,0), time_label, font=time_font)
         tw = tb[2]-tb[0]
         draw.rectangle([W-MARGIN-tw-24, MARGIN-10, W-MARGIN+12, MARGIN+bh+14], fill=(15,15,20))
         draw.text((W-MARGIN-tw-12, MARGIN), time_label, font=time_font, fill=WHITE)
 
-        # имя
+        # ── имя (с обводкой через stroke_width) ──
         name_font = load_font(FONT_BOLD, 96)
         nb = draw.textbbox((0,0), person, font=name_font)
         nw, nh = nb[2]-nb[0], nb[3]-nb[1]
         nx = (W-nw)//2
         ny = BG_H - nh - 150
-        _draw_outlined_text(draw, (nx, ny), person, name_font, fill=WHITE, outline_w=3)
+        # Используем встроенную обводку
+        draw.text((nx, ny), person, font=name_font, fill=WHITE,
+                  stroke_width=4, stroke_fill=(0,0,0))
 
-        # позиция
+        # ── позиция ──
         pos_font = load_font(FONT_REGULAR, 30)
         pos_text = f"— {position_label} —"
         px = _centered_x(draw, pos_text, pos_font)
@@ -225,7 +226,7 @@ def make_reminder_card(
         draw.text((px+2, py+2), pos_text, font=pos_font, fill=(0,0,0))
         draw.text((px, py), pos_text, font=pos_font, fill=accent)
 
-        # панель
+        # ── панель ──
         text_y = BG_H + 30
         max_w = W - 110
 
@@ -277,23 +278,23 @@ def make_reminder_card(
         fx = _centered_x(draw, foot_text, foot_font)
         draw.text((fx, H-MARGIN-26), foot_text, font=foot_font, fill=(70,70,80))
 
-        _draw_noise(img, amount=8)
+        _draw_noise_opt(img, amount=8)
 
-        # сохраняем
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path, "JPEG", quality=92)
-        print(f"✅ Карточка успешно сохранена: {output_path}")
+        print(f"✅ Карточка сохранена: {output_path}")
         return theme_key
 
     except Exception as e:
         print(f"❌ Ошибка генерации карточки: {e}", file=sys.stderr)
+        # Заглушка
         try:
             fallback = Image.new("RGB", (W, H), DARK)
             fd2 = ImageDraw.Draw(fallback)
-            fd2.text((W//2, H//2), f"Ошибка генерации\n{e}", fill=WHITE, anchor="mm")
+            fd2.text((W//2, H//2), "Ошибка генерации", fill=WHITE, anchor="mm")
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             fallback.save(output_path, "JPEG")
-            print(f"⚠️ Сохранена аварийная заглушка: {output_path}")
+            print(f"⚠️ Сохранена заглушка: {output_path}")
         except Exception as e2:
             print(f"❌ Критическая ошибка при создании заглушки: {e2}", file=sys.stderr)
         return theme_key
