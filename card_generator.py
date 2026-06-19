@@ -1,4 +1,3 @@
-import io
 import os
 import random
 import sys
@@ -194,9 +193,14 @@ def make_reminder_card(
     next_days: int = 0,
     total_duties: int = 0,
     theme_key: str | None = None,
-    output_path: str = "/tmp/card.jpg",
+    output_path: str = "/app/shared/card.jpg",
 ) -> str:
     try:
+        # Убедимся, что папка для карточек существует
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
         if theme_key not in THEMES:
             theme_key = random.choice(THEME_KEYS)
         theme  = THEMES[theme_key]
@@ -311,7 +315,6 @@ def make_reminder_card(
         _draw_noise(img, amount=8)
 
         # сохраняем
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path, "JPEG", quality=92)
         print(f"✅ Карточка сохранена: {output_path}")
         return theme_key
@@ -324,7 +327,9 @@ def make_reminder_card(
             fallback_draw = ImageDraw.Draw(fallback)
             fallback_font = load_font(FONT_BOLD, 60)
             fallback_draw.text((W//2, H//2), "Ошибка генерации", font=fallback_font, fill=WHITE, anchor="mm")
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            output_dir = os.path.dirname(output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
             fallback.save(output_path, "JPEG")
             print(f"⚠️ Сохранена заглушка: {output_path}")
         except Exception as e2:
