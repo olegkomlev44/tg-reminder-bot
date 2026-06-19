@@ -80,29 +80,28 @@ THEMES = {
 THEME_KEYS = list(THEMES.keys())
 
 # ══════════════════════════════════════════════
-#  ПРОЦЕДУРНЫЙ ФОН
+#  ОПТИМИЗИРОВАННЫЙ ПРОЦЕДУРНЫЙ ФОН
 # ══════════════════════════════════════════════
 def generate_background(theme_key, width, height):
     theme = THEMES.get(theme_key, THEMES["matrix"])
     accent = theme["accent"]
-    img = Image.new("RGB", (width, height), (8, 8, 12))
-    draw = ImageDraw.Draw(img)
-
+    
+    # Нативный быстрый градиент средствами Pillow вместо построчного цикла
     dark_accent = tuple(max(0, c - 180) for c in accent)
-    for y in range(height):
-        t = y / height
-        r = int(8 + (dark_accent[0] - 8) * t)
-        g = int(8 + (dark_accent[1] - 8) * t)
-        b = int(12 + (dark_accent[2] - 12) * t)
-        draw.line([(0, y), (width, y)], fill=(r, g, b))
+    base = Image.new("RGB", (1, 2))
+    base.putpixel((0, 0), (8, 8, 12))
+    base.putpixel((0, 1), dark_accent)
+    img = base.resize((width, height), Image.Resampling.BILINEAR)
 
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     odraw = ImageDraw.Draw(overlay)
     cx, cy = width // 2, int(height * 0.4)
+    
     for r in range(40, max(width, height), 100):
         alpha = max(20, 120 - r // 10)
         color = accent + (alpha,)
         odraw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=random.randint(2, 6))
+        
     for _ in range(8):
         x1 = random.randint(0, width)
         y1 = random.randint(0, height)
@@ -149,22 +148,19 @@ def _wrap_text(draw, text, font, max_w):
     return lines
 
 def _draw_outlined_text(draw, xy, text, font, fill, outline_color=(0,0,0), outline_w=2):
-    x, y = xy
-    for dx in range(-outline_w, outline_w+1):
-        for dy in range(-outline_w, outline_w+1):
-            if dx == 0 and dy == 0: continue
-            draw.text((x+dx, y+dy), text, font=font, fill=outline_color)
-    draw.text((x,y), text, font=font, fill=fill)
+    # Используем встроенный высокопроизводительный stroke_width в Pillow 11 вместо вложенных циклов Python
+    draw.text(xy, text, font=font, fill=fill, stroke_width=outline_w, stroke_fill=outline_color)
 
-def _draw_noise(img, amount=10):
+def _draw_noise(img, amount=8):
     px = img.load()
     w, h = img.size
-    for _ in range(w * h // 8):
+    # Фиксированное число итераций (10000 вместо 180000+), чтобы не вешать поток выполнения
+    for _ in range(10000):
         x = random.randint(0, w-1)
         y = random.randint(0, h-1)
-        r,g,b = px[x,y][:3]
+        r, g, b = px[x, y][:3]
         d = random.randint(-amount, amount)
-        px[x,y] = (max(0,min(255,r+d)), max(0,min(255,g+d)), max(0,min(255,b+d)))
+        px[x, y] = (max(0, min(255, r+d)), max(0, min(255, g+d)), max(0, min(255, b+d)))
 
 # ══════════════════════════════════════════════
 #  ГЛАВНАЯ ФУНКЦИЯ
@@ -286,19 +282,18 @@ def make_reminder_card(
         # сохраняем
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         img.save(output_path, "JPEG", quality=92)
-        print(f"✅ Карточка сохранена: {output_path}")
+        print(f"✅ Карточка успешно сохранена: {output_path}")
         return theme_key
 
     except Exception as e:
         print(f"❌ Ошибка генерации карточки: {e}", file=sys.stderr)
-        # Создаём простую заглушку
         try:
             fallback = Image.new("RGB", (W, H), DARK)
             fd2 = ImageDraw.Draw(fallback)
-            fd2.text((W//2, H//2), "Ошибка генерации", fill=WHITE, anchor="mm")
+            fd2.text((W//2, H//2), f"Ошибка генерации\n{e}", fill=WHITE, anchor="mm")
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             fallback.save(output_path, "JPEG")
-            print(f"⚠️ Сохранена заглушка: {output_path}")
+            print(f"⚠️ Сохранена аварийная заглушка: {output_path}")
         except Exception as e2:
             print(f"❌ Критическая ошибка при создании заглушки: {e2}", file=sys.stderr)
         return theme_key
