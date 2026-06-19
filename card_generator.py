@@ -1,6 +1,7 @@
 import io
 import os
 import random
+import sys
 from PIL import Image, ImageDraw, ImageFont
 
 # ══════════════════════════════════════════════
@@ -38,8 +39,8 @@ def load_font(path, size):
     if path:
         try:
             return ImageFont.truetype(path, size)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ Не удалось загрузить шрифт {path}: {e}", file=sys.stderr)
     return ImageFont.load_default()
 
 # ══════════════════════════════════════════════
@@ -53,140 +54,45 @@ WHITE = (255, 255, 255)
 DARK  = (12, 12, 16)
 
 # ══════════════════════════════════════════════
-#  23 ТЕМЫ (без изменений)
+#  23 ТЕМЫ
 # ══════════════════════════════════════════════
 THEMES = {
-    "cs2": {
-        "title": "CS2",
-        "accent": (255, 178, 40),
-        "prompts": [],  # больше не используются
-    },
-    "dota2": {
-        "title": "DOTA 2",
-        "accent": (210, 60, 60),
-        "prompts": [],
-    },
-    "genshin": {
-        "title": "GENSHIN IMPACT",
-        "accent": (130, 195, 255),
-        "prompts": [],
-    },
-    "valorant": {
-        "title": "VALORANT",
-        "accent": (255, 70, 85),
-        "prompts": [],
-    },
-    "minecraft": {
-        "title": "MINECRAFT",
-        "accent": (110, 205, 90),
-        "prompts": [],
-    },
-    "gta": {
-        "title": "GTA",
-        "accent": (255, 222, 60),
-        "prompts": [],
-    },
-    "cyberpunk": {
-        "title": "CYBERPUNK",
-        "accent": (250, 230, 10),
-        "prompts": [],
-    },
-    "lol": {
-        "title": "LEAGUE OF LEGENDS",
-        "accent": (20, 200, 220),
-        "prompts": [],
-    },
-    "apex": {
-        "title": "APEX LEGENDS",
-        "accent": (255, 95, 30),
-        "prompts": [],
-    },
-    "fortnite": {
-        "title": "FORTNITE",
-        "accent": (150, 95, 255),
-        "prompts": [],
-    },
-    "overwatch": {
-        "title": "OVERWATCH",
-        "accent": (255, 155, 30),
-        "prompts": [],
-    },
-    "amongus": {
-        "title": "AMONG US",
-        "accent": (255, 60, 60),
-        "prompts": [],
-    },
-    "warzone": {
-        "title": "CALL OF DUTY",
-        "accent": (150, 165, 100),
-        "prompts": [],
-    },
-    "pubg": {
-        "title": "PUBG",
-        "accent": (240, 175, 60),
-        "prompts": [],
-    },
-    "witcher": {
-        "title": "THE WITCHER",
-        "accent": (205, 170, 95),
-        "prompts": [],
-    },
-    "eldenring": {
-        "title": "ELDEN RING",
-        "accent": (230, 195, 115),
-        "prompts": [],
-    },
-    "stardew": {
-        "title": "STARDEW VALLEY",
-        "accent": (255, 175, 95),
-        "prompts": [],
-    },
-    "hollowknight": {
-        "title": "HOLLOW KNIGHT",
-        "accent": (115, 205, 230),
-        "prompts": [],
-    },
-    "portal": {
-        "title": "PORTAL",
-        "accent": (255, 145, 30),
-        "prompts": [],
-    },
-    "starwars": {
-        "title": "STAR WARS",
-        "accent": (255, 222, 105),
-        "prompts": [],
-    },
-    "marvel": {
-        "title": "SUPERHEROES",
-        "accent": (235, 45, 45),
-        "prompts": [],
-    },
-    "synthwave": {
-        "title": "SYNTHWAVE",
-        "accent": (255, 60, 180),
-        "prompts": [],
-    },
-    "matrix": {
-        "title": "TERMINAL",
-        "accent": (60, 255, 110),
-        "prompts": [],
-    },
+    "cs2": {"title": "CS2", "accent": (255, 178, 40)},
+    "dota2": {"title": "DOTA 2", "accent": (210, 60, 60)},
+    "genshin": {"title": "GENSHIN IMPACT", "accent": (130, 195, 255)},
+    "valorant": {"title": "VALORANT", "accent": (255, 70, 85)},
+    "minecraft": {"title": "MINECRAFT", "accent": (110, 205, 90)},
+    "gta": {"title": "GTA", "accent": (255, 222, 60)},
+    "cyberpunk": {"title": "CYBERPUNK", "accent": (250, 230, 10)},
+    "lol": {"title": "LEAGUE OF LEGENDS", "accent": (20, 200, 220)},
+    "apex": {"title": "APEX LEGENDS", "accent": (255, 95, 30)},
+    "fortnite": {"title": "FORTNITE", "accent": (150, 95, 255)},
+    "overwatch": {"title": "OVERWATCH", "accent": (255, 155, 30)},
+    "amongus": {"title": "AMONG US", "accent": (255, 60, 60)},
+    "warzone": {"title": "CALL OF DUTY", "accent": (150, 165, 100)},
+    "pubg": {"title": "PUBG", "accent": (240, 175, 60)},
+    "witcher": {"title": "THE WITCHER", "accent": (205, 170, 95)},
+    "eldenring": {"title": "ELDEN RING", "accent": (230, 195, 115)},
+    "stardew": {"title": "STARDEW VALLEY", "accent": (255, 175, 95)},
+    "hollowknight": {"title": "HOLLOW KNIGHT", "accent": (115, 205, 230)},
+    "portal": {"title": "PORTAL", "accent": (255, 145, 30)},
+    "starwars": {"title": "STAR WARS", "accent": (255, 222, 105)},
+    "marvel": {"title": "SUPERHEROES", "accent": (235, 45, 45)},
+    "synthwave": {"title": "SYNTHWAVE", "accent": (255, 60, 180)},
+    "matrix": {"title": "TERMINAL", "accent": (60, 255, 110)},
 }
 THEME_KEYS = list(THEMES.keys())
 
 # ══════════════════════════════════════════════
-#  ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ ФОНА (без AI)
+#  ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ ФОНА
 # ══════════════════════════════════════════════
 def generate_background(theme_key: str, width: int, height: int) -> Image.Image:
-    """Создаёт красивый процедурный фон в стиле темы."""
     theme  = THEMES.get(theme_key, THEMES["matrix"])
     accent = theme["accent"]
 
-    # База – тёмный фон
     img = Image.new("RGB", (width, height), (8, 8, 12))
     draw = ImageDraw.Draw(img)
 
-    # 1. Градиент от тёмно-акцентного к чёрному
     dark_accent = tuple(max(0, c - 180) for c in accent)
     for y in range(height):
         t = y / height
@@ -195,7 +101,6 @@ def generate_background(theme_key: str, width: int, height: int) -> Image.Image:
         b = int(12 + (dark_accent[2] - 12) * t)
         draw.line([(0, y), (width, y)], fill=(r, g, b))
 
-    # 2. Несколько кругов с акцентным цветом (с прозрачностью через отдельный слой)
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     odraw = ImageDraw.Draw(overlay)
 
@@ -205,7 +110,6 @@ def generate_background(theme_key: str, width: int, height: int) -> Image.Image:
         color = accent + (alpha,)
         odraw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=random.randint(2, 6))
 
-    # Добавим несколько случайных линий
     for _ in range(8):
         x1 = random.randint(0, width)
         y1 = random.randint(0, height)
@@ -215,15 +119,13 @@ def generate_background(theme_key: str, width: int, height: int) -> Image.Image:
         color = accent + (alpha,)
         odraw.line([(x1, y1), (x2, y2)], fill=color, width=random.randint(1, 4))
 
-    # Наложим overlay на основное изображение
     img = img.convert("RGBA")
     img.alpha_composite(overlay)
     img = img.convert("RGB")
-
     return img
 
 # ══════════════════════════════════════════════
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ РИСОВАНИЯ (без изменений)
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ РИСОВАНИЯ
 # ══════════════════════════════════════════════
 def _centered_x(draw, text, font):
     bb = draw.textbbox((0, 0), text, font=font)
@@ -279,13 +181,13 @@ def _draw_noise(img: Image.Image, amount: int = 10):
 #  ГЛАВНАЯ ФУНКЦИЯ – КАРТОЧКА НАПОМИНАНИЯ
 # ══════════════════════════════════════════════
 def make_reminder_card(
-    duty_type: str,             # "svodki" | "proc"
+    duty_type: str,
     person: str,
-    position_label: str,        # "Дежурный №1 по сводкам"
-    time_label: str,            # "18:00" / "22:00"
-    header_text: str,           # тематическая фраза дня
-    ending_text: str,           # концовка
-    date_label: str,            # "15.06.2026 • понедельник"
+    position_label: str,
+    time_label: str,
+    header_text: str,
+    ending_text: str,
+    date_label: str,
     mood_label: str,
     proc_day: int = 1,
     next_person: str = "",
@@ -294,134 +196,137 @@ def make_reminder_card(
     theme_key: str | None = None,
     output_path: str = "/tmp/card.jpg",
 ) -> str:
-    """
-    Собирает карточку 1080x1350: сверху процедурный фон с именем,
-    снизу – панель статистики. Возвращает использованный theme_key.
-    """
-    if theme_key not in THEMES:
-        theme_key = random.choice(THEME_KEYS)
-    theme  = THEMES[theme_key]
-    accent = theme["accent"]
+    try:
+        if theme_key not in THEMES:
+            theme_key = random.choice(THEME_KEYS)
+        theme  = THEMES[theme_key]
+        accent = theme["accent"]
 
-    # 1. Фон
-    bg = generate_background(theme_key, W, BG_H)
+        bg = generate_background(theme_key, W, BG_H)
 
-    img = Image.new("RGB", (W, H), DARK)
-    img.paste(bg, (0, 0))
+        img = Image.new("RGB", (W, H), DARK)
+        img.paste(bg, (0, 0))
 
-    # 2. Затемнение перехода
-    img = img.convert("RGBA")
-    fade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    fd = ImageDraw.Draw(fade)
-    fade_h = 260
-    for y in range(BG_H - fade_h, BG_H):
-        a = int(235 * (y - (BG_H - fade_h)) / fade_h)
-        fd.line([(0, y), (W, y)], fill=(DARK[0], DARK[1], DARK[2], a))
-    fd.rectangle([0, BG_H, W, H], fill=(DARK[0], DARK[1], DARK[2], 255))
-    img.alpha_composite(fade)
-    img = img.convert("RGB")
-    draw = ImageDraw.Draw(img)
+        img = img.convert("RGBA")
+        fade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        fd = ImageDraw.Draw(fade)
+        fade_h = 260
+        for y in range(BG_H - fade_h, BG_H):
+            a = int(235 * (y - (BG_H - fade_h)) / fade_h)
+            fd.line([(0, y), (W, y)], fill=(DARK[0], DARK[1], DARK[2], a))
+        fd.rectangle([0, BG_H, W, H], fill=(DARK[0], DARK[1], DARK[2], 255))
+        img.alpha_composite(fade)
+        img = img.convert("RGB")
+        draw = ImageDraw.Draw(img)
 
-    # 3. Бейдж темы (верхний левый)
-    badge_font = load_font(FONT_BOLD, 26)
-    badge_text = f"[ {theme['title']} ]"
-    bb = draw.textbbox((0, 0), badge_text, font=badge_font)
-    bw, bh = bb[2] - bb[0], bb[3] - bb[1]
-    draw.rectangle(
-        [MARGIN - 12, MARGIN - 10, MARGIN + bw + 12, MARGIN + bh + 14],
-        fill=(15, 15, 20),
-    )
-    draw.text((MARGIN, MARGIN), badge_text, font=badge_font, fill=accent)
+        # бейдж темы
+        badge_font = load_font(FONT_BOLD, 26)
+        badge_text = f"[ {theme['title']} ]"
+        bb = draw.textbbox((0, 0), badge_text, font=badge_font)
+        bw, bh = bb[2] - bb[0], bb[3] - bb[1]
+        draw.rectangle(
+            [MARGIN - 12, MARGIN - 10, MARGIN + bw + 12, MARGIN + bh + 14],
+            fill=(15, 15, 20),
+        )
+        draw.text((MARGIN, MARGIN), badge_text, font=badge_font, fill=accent)
 
-    # время наряда (верхний правый)
-    time_font = load_font(FONT_BOLD, 26)
-    tb = draw.textbbox((0, 0), time_label, font=time_font)
-    tw = tb[2] - tb[0]
-    draw.rectangle(
-        [W - MARGIN - tw - 24, MARGIN - 10, W - MARGIN + 12, MARGIN + bh + 14],
-        fill=(15, 15, 20),
-    )
-    draw.text((W - MARGIN - tw - 12, MARGIN), time_label, font=time_font, fill=WHITE)
+        # время
+        time_font = load_font(FONT_BOLD, 26)
+        tb = draw.textbbox((0, 0), time_label, font=time_font)
+        tw = tb[2] - tb[0]
+        draw.rectangle(
+            [W - MARGIN - tw - 24, MARGIN - 10, W - MARGIN + 12, MARGIN + bh + 14],
+            fill=(15, 15, 20),
+        )
+        draw.text((W - MARGIN - tw - 12, MARGIN), time_label, font=time_font, fill=WHITE)
 
-    # 4. Имя дежурного
-    name_font = load_font(FONT_BOLD, 96)
-    nb = draw.textbbox((0, 0), person, font=name_font)
-    nw, nh = nb[2] - nb[0], nb[3] - nb[1]
-    nx = (W - nw) // 2
-    ny = BG_H - nh - 150
-    _draw_outlined_text(draw, (nx, ny), person, name_font, fill=WHITE, outline_w=3)
+        # имя
+        name_font = load_font(FONT_BOLD, 96)
+        nb = draw.textbbox((0, 0), person, font=name_font)
+        nw, nh = nb[2] - nb[0], nb[3] - nb[1]
+        nx = (W - nw) // 2
+        ny = BG_H - nh - 150
+        _draw_outlined_text(draw, (nx, ny), person, name_font, fill=WHITE, outline_w=3)
 
-    # позиция
-    pos_font = load_font(FONT_REGULAR, 30)
-    pos_text = f"— {position_label} —"
-    px = _centered_x(draw, pos_text, pos_font)
-    py = ny + nh + 18
-    draw.text((px + 2, py + 2), pos_text, font=pos_font, fill=(0, 0, 0))
-    draw.text((px, py), pos_text, font=pos_font, fill=accent)
+        # позиция
+        pos_font = load_font(FONT_REGULAR, 30)
+        pos_text = f"— {position_label} —"
+        px = _centered_x(draw, pos_text, pos_font)
+        py = ny + nh + 18
+        draw.text((px + 2, py + 2), pos_text, font=pos_font, fill=(0, 0, 0))
+        draw.text((px, py), pos_text, font=pos_font, fill=accent)
 
-    # ─────────────────────────────────────────
-    #  ИНФО-ПАНЕЛЬ
-    # ─────────────────────────────────────────
-    text_y = BG_H + 30
-    max_w  = W - 110
+        # инфо-панель
+        text_y = BG_H + 30
+        max_w  = W - 110
 
-    # дата • время • настроение
-    meta_font = load_font(FONT_REGULAR, 24)
-    meta_text = f"{date_label}  •  {mood_label}"
-    h = _draw_centered(draw, meta_text, meta_font, text_y, color=(150, 150, 165), shadow=False)
-    text_y += h + 18
+        meta_font = load_font(FONT_REGULAR, 24)
+        meta_text = f"{date_label}  •  {mood_label}"
+        h = _draw_centered(draw, meta_text, meta_font, text_y, color=(150, 150, 165), shadow=False)
+        text_y += h + 18
 
-    # заголовок дня
-    for fs in (50, 44, 38, 34):
-        title_font = load_font(FONT_BOLD, fs)
-        title_lines = _wrap_text(draw, header_text.upper(), title_font, max_w)
-        if len(title_lines) <= 3:
-            break
-    for line in title_lines:
-        h = _draw_centered(draw, line, title_font, text_y, color=WHITE)
-        text_y += h + 6
-    text_y += 10
+        for fs in (50, 44, 38, 34):
+            title_font = load_font(FONT_BOLD, fs)
+            title_lines = _wrap_text(draw, header_text.upper(), title_font, max_w)
+            if len(title_lines) <= 3:
+                break
+        for line in title_lines:
+            h = _draw_centered(draw, line, title_font, text_y, color=WHITE)
+            text_y += h + 6
+        text_y += 10
 
-    # разделитель
-    draw.line([(90, text_y), (W - 90, text_y)], fill=accent, width=3)
-    text_y += 18
+        draw.line([(90, text_y), (W - 90, text_y)], fill=accent, width=3)
+        text_y += 18
 
-    # тип наряда + прогресс (для процедурки)
-    duty_font  = load_font(FONT_BOLD, 32)
-    duty_title = "СВОДКИ" if duty_type == "svodki" else "ПРОЦЕДУРКА"
-    if duty_type == "proc":
-        filled = round((proc_day / 2) * 12)
-        bar = "[" + "▓" * filled + "░" * (12 - filled) + "]"
-        duty_line = f"{duty_title}  {bar}  ДЕНЬ {proc_day}/2"
-    else:
-        duty_line = f"{duty_title}  •  до {time_label}"
-    h = _draw_centered(draw, duty_line, duty_font, text_y, color=accent)
-    text_y += h + 20
+        duty_font  = load_font(FONT_BOLD, 32)
+        duty_title = "СВОДКИ" if duty_type == "svodki" else "ПРОЦЕДУРКА"
+        if duty_type == "proc":
+            filled = round((proc_day / 2) * 12)
+            bar = "[" + "▓" * filled + "░" * (12 - filled) + "]"
+            duty_line = f"{duty_title}  {bar}  ДЕНЬ {proc_day}/2"
+        else:
+            duty_line = f"{duty_title}  •  до {time_label}"
+        h = _draw_centered(draw, duty_line, duty_font, text_y, color=accent)
+        text_y += h + 20
 
-    # статистика
-    stat_font = load_font(FONT_REGULAR, 26)
-    stat_text = f"нарядов всего: {total_duties}   •   следующий: {next_person} ({next_days}д)"
-    h = _draw_centered(draw, stat_text, stat_font, text_y, color=(175, 175, 190), shadow=False)
-    text_y += h + 24
+        stat_font = load_font(FONT_REGULAR, 26)
+        stat_text = f"нарядов всего: {total_duties}   •   следующий: {next_person} ({next_days}д)"
+        h = _draw_centered(draw, stat_text, stat_font, text_y, color=(175, 175, 190), shadow=False)
+        text_y += h + 24
 
-    draw.line([(150, text_y), (W - 150, text_y)], fill=(55, 55, 65), width=1)
-    text_y += 22
+        draw.line([(150, text_y), (W - 150, text_y)], fill=(55, 55, 65), width=1)
+        text_y += 22
 
-    # концовка
-    end_font  = load_font(FONT_REGULAR, 30)
-    end_lines = _wrap_text(draw, ending_text, end_font, max_w)
-    for line in end_lines:
-        h = _draw_centered(draw, line, end_font, text_y, color=(200, 200, 210), shadow=True, so=2)
-        text_y += h + 6
+        end_font  = load_font(FONT_REGULAR, 30)
+        end_lines = _wrap_text(draw, ending_text, end_font, max_w)
+        for line in end_lines:
+            h = _draw_centered(draw, line, end_font, text_y, color=(200, 200, 210), shadow=True, so=2)
+            text_y += h + 6
 
-    # подпись
-    foot_font = load_font(FONT_BOLD, 18)
-    foot_text = f"• НАРЯД-БОТ × {theme['title']} •"
-    fx = _centered_x(draw, foot_text, foot_font)
-    draw.text((fx, H - MARGIN - 26), foot_text, font=foot_font, fill=(70, 70, 80))
+        foot_font = load_font(FONT_BOLD, 18)
+        foot_text = f"• НАРЯД-БОТ × {theme['title']} •"
+        fx = _centered_x(draw, foot_text, foot_font)
+        draw.text((fx, H - MARGIN - 26), foot_text, font=foot_font, fill=(70, 70, 80))
 
-    # лёгкий шум
-    _draw_noise(img, amount=8)
+        _draw_noise(img, amount=8)
 
-    img.save(output_path, "JPEG", quality=92)
-    return theme_key
+        # сохраняем
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        img.save(output_path, "JPEG", quality=92)
+        print(f"✅ Карточка сохранена: {output_path}")
+        return theme_key
+
+    except Exception as e:
+        print(f"❌ Ошибка при генерации карточки: {e}", file=sys.stderr)
+        # Создаём простую заглушку (текстовое изображение)
+        try:
+            fallback = Image.new("RGB", (W, H), DARK)
+            fallback_draw = ImageDraw.Draw(fallback)
+            fallback_font = load_font(FONT_BOLD, 60)
+            fallback_draw.text((W//2, H//2), "Ошибка генерации", font=fallback_font, fill=WHITE, anchor="mm")
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            fallback.save(output_path, "JPEG")
+            print(f"⚠️ Сохранена заглушка: {output_path}")
+        except Exception as e2:
+            print(f"❌ Критическая ошибка при создании заглушки: {e2}", file=sys.stderr)
+        return theme_key
