@@ -1,22 +1,28 @@
 import io
 import os
 import random
-import urllib.request
-import urllib.parse
 from PIL import Image, ImageDraw, ImageFont
 
 # ══════════════════════════════════════════════
-#  ШРИФТЫ
+#  ШРИФТЫ – расширенный список
 # ══════════════════════════════════════════════
 _FONT_CANDIDATES_BOLD = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
     "/usr/local/share/fonts/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/arial/arialbd.ttf",
+    "/usr/share/fonts/arial/arialbd.ttf",
 ]
 _FONT_CANDIDATES_REG = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     "/usr/local/share/fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/arial/arial.ttf",
+    "/usr/share/fonts/arial/arial.ttf",
 ]
 
 def _first_existing(paths):
@@ -39,242 +45,185 @@ def load_font(path, size):
 # ══════════════════════════════════════════════
 #  РАЗМЕРЫ И БАЗОВЫЕ ЦВЕТА
 # ══════════════════════════════════════════════
-W, H   = 1080, 1350     # 4:5 — хорошо смотрится в Telegram
-BG_H   = 620            # высота зоны AI-арта
+W, H   = 1080, 1350     # 4:5
+BG_H   = 620
 MARGIN = 40
 
 WHITE = (255, 255, 255)
 DARK  = (12, 12, 16)
 
 # ══════════════════════════════════════════════
-#  23 ТЕМАТИКИ: CS2, Dota 2, Genshin + 20 других
-#  title  — подпись на карточке
-#  accent — цвет акцентов/обводок темы
-#  prompts — варианты промптов для AI-фона
+#  23 ТЕМЫ (без изменений)
 # ══════════════════════════════════════════════
 THEMES = {
     "cs2": {
         "title": "CS2",
         "accent": (255, 178, 40),
-        "prompts": [
-            "counter strike 2 dust2 map, tactical fps, smoke grenade, desert ruins, dramatic cinematic lighting, video game concept art",
-            "counter strike 2 mirage bombsite, tactical shooter, sunlit middle eastern architecture, concept art, no text",
-        ],
+        "prompts": [],  # больше не используются
     },
     "dota2": {
         "title": "DOTA 2",
         "accent": (210, 60, 60),
-        "prompts": [
-            "dota 2 ancient battlefield, fantasy temple ruins, glowing magic runes, epic moba concept art, dramatic clouds, no text",
-            "dota 2 radiant base, fantasy forest fortress, glowing green magic particles, epic fantasy concept art",
-        ],
+        "prompts": [],
     },
     "genshin": {
         "title": "GENSHIN IMPACT",
         "accent": (130, 195, 255),
-        "prompts": [
-            "genshin impact style landscape, anime fantasy world, floating islands, vibrant colors, teyvat scenery, studio anime art, no text",
-            "genshin impact style harbor town, anime fantasy architecture, golden hour lighting, vibrant game art",
-        ],
+        "prompts": [],
     },
     "valorant": {
         "title": "VALORANT",
         "accent": (255, 70, 85),
-        "prompts": [
-            "valorant style tactical shooter map, colorful neon accents, modern stylized architecture, video game concept art, no text",
-        ],
+        "prompts": [],
     },
     "minecraft": {
         "title": "MINECRAFT",
         "accent": (110, 205, 90),
-        "prompts": [
-            "minecraft style blocky landscape, voxel art mountains and caves, vibrant pixelated game world, sunset, no text",
-        ],
+        "prompts": [],
     },
     "gta": {
         "title": "GTA",
         "accent": (255, 222, 60),
-        "prompts": [
-            "gta style los santos city at night, neon signs, palm trees, synthwave skyline, open world game art, no text",
-        ],
+        "prompts": [],
     },
     "cyberpunk": {
         "title": "CYBERPUNK",
         "accent": (250, 230, 10),
-        "prompts": [
-            "cyberpunk city at night, neon signs, rain, futuristic skyscrapers, cinematic glow, no text",
-        ],
+        "prompts": [],
     },
     "lol": {
         "title": "LEAGUE OF LEGENDS",
         "accent": (20, 200, 220),
-        "prompts": [
-            "league of legends style fantasy arena, magical forest temple ruins, glowing runes, epic concept art, no text",
-        ],
+        "prompts": [],
     },
     "apex": {
         "title": "APEX LEGENDS",
         "accent": (255, 95, 30),
-        "prompts": [
-            "apex legends style arena, sci-fi battle royale map, futuristic ruins, dramatic orange sky, no text",
-        ],
+        "prompts": [],
     },
     "fortnite": {
         "title": "FORTNITE",
         "accent": (150, 95, 255),
-        "prompts": [
-            "fortnite style colorful island, cartoon battle royale world, vibrant cel-shaded landscape, no text",
-        ],
+        "prompts": [],
     },
     "overwatch": {
         "title": "OVERWATCH",
         "accent": (255, 155, 30),
-        "prompts": [
-            "overwatch style futuristic city, colorful sci-fi architecture, bright stylized concept art, no text",
-        ],
+        "prompts": [],
     },
     "amongus": {
         "title": "AMONG US",
         "accent": (255, 60, 60),
-        "prompts": [
-            "among us style space station interior, cute cartoon spaceship, pastel colors, minimal style, no text",
-        ],
+        "prompts": [],
     },
     "warzone": {
         "title": "CALL OF DUTY",
         "accent": (150, 165, 100),
-        "prompts": [
-            "call of duty warzone style military base, realistic battlefield, smoke and ruins, dramatic overcast sky, no text",
-        ],
+        "prompts": [],
     },
     "pubg": {
         "title": "PUBG",
         "accent": (240, 175, 60),
-        "prompts": [
-            "pubg style battle royale island, realistic military terrain, abandoned buildings, foggy atmosphere, no text",
-        ],
+        "prompts": [],
     },
     "witcher": {
         "title": "THE WITCHER",
         "accent": (205, 170, 95),
-        "prompts": [
-            "witcher style dark fantasy forest, medieval ruins, fog, moody atmosphere, fantasy concept art, no text",
-        ],
+        "prompts": [],
     },
     "eldenring": {
         "title": "ELDEN RING",
         "accent": (230, 195, 115),
-        "prompts": [
-            "elden ring style golden fog castle, dark fantasy gothic architecture, epic scale, dramatic lighting, no text",
-        ],
+        "prompts": [],
     },
     "stardew": {
         "title": "STARDEW VALLEY",
         "accent": (255, 175, 95),
-        "prompts": [
-            "stardew valley style cozy pixel art farm countryside, warm sunset, cute cartoon style, no text",
-        ],
+        "prompts": [],
     },
     "hollowknight": {
         "title": "HOLLOW KNIGHT",
         "accent": (115, 205, 230),
-        "prompts": [
-            "hollow knight style dark underground kingdom, hand drawn insect world, moody blue tones, no text",
-        ],
+        "prompts": [],
     },
     "portal": {
         "title": "PORTAL",
         "accent": (255, 145, 30),
-        "prompts": [
-            "portal style aperture science laboratory, sci-fi clean corridors, glowing orange and blue lights, no text",
-        ],
+        "prompts": [],
     },
     "starwars": {
         "title": "STAR WARS",
         "accent": (255, 222, 105),
-        "prompts": [
-            "star wars style galaxy scene, starships, distant planets, space opera concept art, dramatic stars, no text",
-        ],
+        "prompts": [],
     },
     "marvel": {
         "title": "SUPERHEROES",
         "accent": (235, 45, 45),
-        "prompts": [
-            "comic book style superhero city skyline, dramatic clouds, heroic atmosphere, dynamic concept art, no text",
-        ],
+        "prompts": [],
     },
     "synthwave": {
         "title": "SYNTHWAVE",
         "accent": (255, 60, 180),
-        "prompts": [
-            "synthwave retro 80s grid landscape, neon sun, purple and pink gradient sky, retro futuristic, no text",
-        ],
+        "prompts": [],
     },
     "matrix": {
         "title": "TERMINAL",
         "accent": (60, 255, 110),
-        "prompts": [
-            "matrix style digital rain, green code on black background, cyberspace, hacker aesthetic, no text",
-        ],
+        "prompts": [],
     },
 }
-THEME_KEYS = list(THEMES.keys())  # 23 темы
-
+THEME_KEYS = list(THEMES.keys())
 
 # ══════════════════════════════════════════════
-#  AI-ФОН ЧЕРЕЗ POLLINATIONS (бесплатно, без ключа)
+#  ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ ФОНА (без AI)
 # ══════════════════════════════════════════════
-def fetch_ai_background(theme_key: str, width: int, height: int, timeout: int = 20) -> Image.Image:
-    """
-    Запрашивает фон у image.pollinations.ai по промпту темы.
-    При любой ошибке (нет сети/таймаут/бан) — рисует процедурный
-    градиентный фон в цветах темы, чтобы карточка всё равно вышла.
-    """
-    theme  = THEMES.get(theme_key, THEMES["matrix"])
-    prompt = random.choice(theme["prompts"])
-    seed   = random.randint(1, 999_999)
-    try:
-        encoded = urllib.parse.quote(prompt)
-        url = (
-            f"https://image.pollinations.ai/prompt/{encoded}"
-            f"?width={width}&height={height}&seed={seed}&nologo=true"
-        )
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-        if img.size != (width, height):
-            img = img.resize((width, height), Image.LANCZOS)
-        return img
-    except Exception:
-        return _fallback_background(theme_key, width, height)
-
-
-def _fallback_background(theme_key: str, width: int, height: int) -> Image.Image:
-    """Процедурный градиент + кольца в цветах темы — на случай если AI недоступен."""
+def generate_background(theme_key: str, width: int, height: int) -> Image.Image:
+    """Создаёт красивый процедурный фон в стиле темы."""
     theme  = THEMES.get(theme_key, THEMES["matrix"])
     accent = theme["accent"]
-    img  = Image.new("RGB", (width, height), (10, 10, 14))
+
+    # База – тёмный фон
+    img = Image.new("RGB", (width, height), (8, 8, 12))
     draw = ImageDraw.Draw(img)
 
-    dark_accent = tuple(max(0, c - 200) for c in accent)
+    # 1. Градиент от тёмно-акцентного к чёрному
+    dark_accent = tuple(max(0, c - 180) for c in accent)
     for y in range(height):
         t = y / height
-        r = int(10 + (dark_accent[0] - 10) * t)
-        g = int(10 + (dark_accent[1] - 10) * t)
-        b = int(14 + (dark_accent[2] - 14) * t)
+        r = int(8 + (dark_accent[0] - 8) * t)
+        g = int(8 + (dark_accent[1] - 8) * t)
+        b = int(12 + (dark_accent[2] - 12) * t)
         draw.line([(0, y), (width, y)], fill=(r, g, b))
 
+    # 2. Несколько кругов с акцентным цветом (с прозрачностью через отдельный слой)
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+
     cx, cy = width // 2, int(height * 0.4)
-    for r in range(40, max(width, height), 80):
-        a = max(10, 90 - r // 10)
-        ring = tuple(min(255, c + a) for c in (10, 10, 14))
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=accent, width=1)
+    for r in range(40, max(width, height), 100):
+        alpha = max(20, 120 - r // 10)
+        color = accent + (alpha,)
+        odraw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=random.randint(2, 6))
+
+    # Добавим несколько случайных линий
+    for _ in range(8):
+        x1 = random.randint(0, width)
+        y1 = random.randint(0, height)
+        x2 = random.randint(0, width)
+        y2 = random.randint(0, height)
+        alpha = random.randint(20, 80)
+        color = accent + (alpha,)
+        odraw.line([(x1, y1), (x2, y2)], fill=color, width=random.randint(1, 4))
+
+    # Наложим overlay на основное изображение
+    img = img.convert("RGBA")
+    img.alpha_composite(overlay)
+    img = img.convert("RGB")
+
     return img
 
-
 # ══════════════════════════════════════════════
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ РИСОВАНИЯ
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ РИСОВАНИЯ (без изменений)
 # ══════════════════════════════════════════════
 def _centered_x(draw, text, font):
     bb = draw.textbbox((0, 0), text, font=font)
@@ -326,18 +275,17 @@ def _draw_noise(img: Image.Image, amount: int = 10):
             max(0, min(255, b + d)),
         )
 
-
 # ══════════════════════════════════════════════
-#  ГЛАВНАЯ ФУНКЦИЯ — КАРТОЧКА НАПОМИНАНИЯ
+#  ГЛАВНАЯ ФУНКЦИЯ – КАРТОЧКА НАПОМИНАНИЯ
 # ══════════════════════════════════════════════
 def make_reminder_card(
     duty_type: str,             # "svodki" | "proc"
     person: str,
     position_label: str,        # "Дежурный №1 по сводкам"
-    time_label: str,             # "18:00" / "22:00"
-    header_text: str,            # тематическая фраза дня (без эмодзи)
-    ending_text: str,            # концовка по настроению
-    date_label: str,             # "15.06.2026 • понедельник"
+    time_label: str,            # "18:00" / "22:00"
+    header_text: str,           # тематическая фраза дня
+    ending_text: str,           # концовка
+    date_label: str,            # "15.06.2026 • понедельник"
     mood_label: str,
     proc_day: int = 1,
     next_person: str = "",
@@ -347,22 +295,21 @@ def make_reminder_card(
     output_path: str = "/tmp/card.jpg",
 ) -> str:
     """
-    Собирает карточку 1080x1350: сверху AI-арт по теме с именем
-    дежурного, снизу — панель со всей статистикой по наряду.
-    Возвращает использованный theme_key.
+    Собирает карточку 1080x1350: сверху процедурный фон с именем,
+    снизу – панель статистики. Возвращает использованный theme_key.
     """
     if theme_key not in THEMES:
         theme_key = random.choice(THEME_KEYS)
     theme  = THEMES[theme_key]
     accent = theme["accent"]
 
-    # 1. AI-фон для верхней зоны
-    bg = fetch_ai_background(theme_key, W, BG_H)
+    # 1. Фон
+    bg = generate_background(theme_key, W, BG_H)
 
     img = Image.new("RGB", (W, H), DARK)
     img.paste(bg, (0, 0))
 
-    # 2. Плавное затемнение низа AI-зоны → переход в инфо-панель
+    # 2. Затемнение перехода
     img = img.convert("RGBA")
     fade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     fd = ImageDraw.Draw(fade)
@@ -375,7 +322,7 @@ def make_reminder_card(
     img = img.convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    # 3. Бейдж темы — верхний левый угол
+    # 3. Бейдж темы (верхний левый)
     badge_font = load_font(FONT_BOLD, 26)
     badge_text = f"[ {theme['title']} ]"
     bb = draw.textbbox((0, 0), badge_text, font=badge_font)
@@ -386,7 +333,7 @@ def make_reminder_card(
     )
     draw.text((MARGIN, MARGIN), badge_text, font=badge_font, fill=accent)
 
-    # время наряда — верхний правый угол
+    # время наряда (верхний правый)
     time_font = load_font(FONT_BOLD, 26)
     tb = draw.textbbox((0, 0), time_label, font=time_font)
     tw = tb[2] - tb[0]
@@ -396,7 +343,7 @@ def make_reminder_card(
     )
     draw.text((W - MARGIN - tw - 12, MARGIN), time_label, font=time_font, fill=WHITE)
 
-    # 4. Имя дежурного — крупно, с обводкой для читаемости на любом фоне
+    # 4. Имя дежурного
     name_font = load_font(FONT_BOLD, 96)
     nb = draw.textbbox((0, 0), person, font=name_font)
     nw, nh = nb[2] - nb[0], nb[3] - nb[1]
@@ -404,7 +351,7 @@ def make_reminder_card(
     ny = BG_H - nh - 150
     _draw_outlined_text(draw, (nx, ny), person, name_font, fill=WHITE, outline_w=3)
 
-    # позиция в наряде — под именем, цветом темы
+    # позиция
     pos_font = load_font(FONT_REGULAR, 30)
     pos_text = f"— {position_label} —"
     px = _centered_x(draw, pos_text, pos_font)
@@ -424,7 +371,7 @@ def make_reminder_card(
     h = _draw_centered(draw, meta_text, meta_font, text_y, color=(150, 150, 165), shadow=False)
     text_y += h + 18
 
-    # заголовок дня — подбираем размер под 1-3 строки
+    # заголовок дня
     for fs in (50, 44, 38, 34):
         title_font = load_font(FONT_BOLD, fs)
         title_lines = _wrap_text(draw, header_text.upper(), title_font, max_w)
@@ -435,11 +382,11 @@ def make_reminder_card(
         text_y += h + 6
     text_y += 10
 
-    # разделитель в цвете темы
+    # разделитель
     draw.line([(90, text_y), (W - 90, text_y)], fill=accent, width=3)
     text_y += 18
 
-    # тип наряда + прогресс-бар (для процедурки)
+    # тип наряда + прогресс (для процедурки)
     duty_font  = load_font(FONT_BOLD, 32)
     duty_title = "СВОДКИ" if duty_type == "svodki" else "ПРОЦЕДУРКА"
     if duty_type == "proc":
@@ -451,57 +398,30 @@ def make_reminder_card(
     h = _draw_centered(draw, duty_line, duty_font, text_y, color=accent)
     text_y += h + 20
 
-    # статистика: всего нарядов + следующий дежурный
+    # статистика
     stat_font = load_font(FONT_REGULAR, 26)
     stat_text = f"нарядов всего: {total_duties}   •   следующий: {next_person} ({next_days}д)"
     h = _draw_centered(draw, stat_text, stat_font, text_y, color=(175, 175, 190), shadow=False)
     text_y += h + 24
 
-    # тонкий разделитель
     draw.line([(150, text_y), (W - 150, text_y)], fill=(55, 55, 65), width=1)
     text_y += 22
 
-    # концовка (зависит от настроения дня)
+    # концовка
     end_font  = load_font(FONT_REGULAR, 30)
     end_lines = _wrap_text(draw, ending_text, end_font, max_w)
     for line in end_lines:
         h = _draw_centered(draw, line, end_font, text_y, color=(200, 200, 210), shadow=True, so=2)
         text_y += h + 6
 
-    # подпись внизу карточки
+    # подпись
     foot_font = load_font(FONT_BOLD, 18)
     foot_text = f"• НАРЯД-БОТ × {theme['title']} •"
     fx = _centered_x(draw, foot_text, foot_font)
     draw.text((fx, H - MARGIN - 26), foot_text, font=foot_font, fill=(70, 70, 80))
 
-    # 5. Лёгкий шум для «фотографичности»
+    # лёгкий шум
     _draw_noise(img, amount=8)
 
     img.save(output_path, "JPEG", quality=92)
     return theme_key
-
-
-if __name__ == "__main__":
-    # быстрый локальный тест без сети — форсим фоллбэк-фон
-    import socket
-    _orig = socket.getaddrinfo
-    socket.getaddrinfo = lambda *a, **k: (_ for _ in ()).throw(OSError("no net (test)"))
-    try:
-        for tk in ("cs2", "genshin", "matrix"):
-            out = f"/tmp/card_{tk}.jpg"
-            make_reminder_card(
-                duty_type="proc", person="Игорь",
-                position_label="Дежурный №4 по процедурке",
-                time_label="22:00",
-                header_text="процедурка ждёт. она терпеливая, но не бесконечно",
-                ending_text="вперёд, легенда 🚀",
-                date_label="15.06.2026 • понедельник",
-                mood_label="😏 ироничный",
-                proc_day=1, next_person="Глеба", next_days=6,
-                total_duties=7, theme_key=tk, output_path=out,
-            )
-            print("ok:", out)
-    finally:
-        socket.getaddrinfo = _orig
-PYEOF
-echo "written"
