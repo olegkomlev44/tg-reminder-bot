@@ -22,20 +22,25 @@ from card_generator import make_reminder_card, THEME_KEYS
 #  КОНФИГУРАЦИЯ
 # ══════════════════════════════════════════════
 TOKEN     = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-CHAT_ID   = os.getenv("CHAT_ID",   "YOUR_CHAT_ID_HERE")
+CHAT_ID   = os.getenv("CHAT_ID",   "")
 DATA_FILE = "duty_data.json"
 TIMEZONE  = pytz.timezone("Europe/Moscow")
 
-# Используем общее хранилище для временных файлов
+# Общее хранилище для временных файлов
 SHARED_DIR = os.getenv("SHARED_DIR", "/app/shared")
 TEMP_DIR = os.path.join(SHARED_DIR, "temp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+# Принудительный вывод логов без буферизации
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    force=True  # переопределяет существующие конфигурации
+)
 logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════
-#  СПИСКИ ДЕЖУРНЫХ
+#  СПИСКИ ДЕЖУРНЫХ (без изменений)
 # ══════════════════════════════════════════════
 SVODKI_LIST    = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Слава", "Ильнар"]
 PROCEDURA_LIST = ["Илья", "Слава", "Саша", "Игорь", "Глеба", "Ильнар"]
@@ -56,7 +61,7 @@ WEEKDAY_STYLE = {
 }
 
 # ══════════════════════════════════════════════
-#  ФРАЗЫ И ПРОЧИЕ ДАННЫЕ (сохранены без изменений)
+#  ВСЕ ФРАЗЫ И ПРОЧИЕ ДАННЫЕ (без изменений, сжаты для краткости)
 # ══════════════════════════════════════════════
 SVODKI_HEADERS_BY_DAY = {
     0: ["📋 понедельник. сводки. страдания. погнали", "📋 начало недели, начало боли. твой черёд, дежурный", "📋 пн детектед. наряд активирован. сопротивление бесполезно", "📋 понедельник говорит: подъём. сводки говорят: иди", "📋 новая неделя — те же сводки. ты знал на что шёл"],
@@ -129,30 +134,12 @@ GAMING_ENDINGS = [
 ]
 
 MOODS = {
-    "hyper": {
-        "label": "🚀 гиперактивный",
-        "endings": ["ПОГНАЛИ!! ты лучший!! всё получится!! 🚀🚀🚀", "ВСЁ БУДЕТ ЧЁТКО!! верим!! не сомневаемся!! 💪💪", "ТЫ СУПЕРЗВЕЗДА НАРЯДОВ!! УДАЧИ!! 🌟🌟🌟", "НАРЯД ПРИНЯТ!! ВЫПОЛНЯЙ!! МЫ С ТОБОЙ!! 🎉🎉"],
-    },
-    "tired": {
-        "label": "😴 уставший",
-        "endings": ["ну сделай и ладно. я сам устал уже напоминать", "всё. иди. я полежу пока", "давай. я верю. хотя сил уже нет верить", "сделаешь — хорошо. не сделаешь — ну и бог с ним"],
-    },
-    "serious": {
-        "label": "😤 строгий",
-        "endings": ["наряд — это обязательство. выполни его.", "не нужно слов. просто сделай.", "ты дежурный. это всё что нужно знать.", "отступления нет. выполняй."],
-    },
-    "ironic": {
-        "label": "😏 ироничный",
-        "endings": ["удачи. хотя тут не нужна удача, просто встань и сделай 😐", "ты конечно можешь не идти. но лучше иди", "наряд сам себя не выполнит. к сожалению для тебя", "ну не знаю, может само рассосётся? нет? тогда иди"],
-    },
-    "philosophical": {
-        "label": "🧘 философский",
-        "endings": ["дежурный, как и квант — существует пока его не наблюдают", "уборка — это форма медитации. почти", "каждый наряд приближает тебя к просветлению", "сводки — это метафора ответственности. неси её буквально"],
-    },
-    "gamer": {
-        "label": "🎮 геймерский",
-        "endings": ["go go go, таймер тикает как в CS ⏱", "это твой daily quest, easy mode — не ной", "respawn через 5 сек, успей подготовиться", "ranked матч жизни начался, не фидь наряд"],
-    },
+    "hyper": {"label": "🚀 гиперактивный", "endings": ["ПОГНАЛИ!! ты лучший!! всё получится!! 🚀🚀🚀", "ВСЁ БУДЕТ ЧЁТКО!! верим!! не сомневаемся!! 💪💪", "ТЫ СУПЕРЗВЕЗДА НАРЯДОВ!! УДАЧИ!! 🌟🌟🌟", "НАРЯД ПРИНЯТ!! ВЫПОЛНЯЙ!! МЫ С ТОБОЙ!! 🎉🎉"]},
+    "tired": {"label": "😴 уставший", "endings": ["ну сделай и ладно. я сам устал уже напоминать", "всё. иди. я полежу пока", "давай. я верю. хотя сил уже нет верить", "сделаешь — хорошо. не сделаешь — ну и бог с ним"]},
+    "serious": {"label": "😤 строгий", "endings": ["наряд — это обязательство. выполни его.", "не нужно слов. просто сделай.", "ты дежурный. это всё что нужно знать.", "отступления нет. выполняй."]},
+    "ironic": {"label": "😏 ироничный", "endings": ["удачи. хотя тут не нужна удача, просто встань и сделай 😐", "ты конечно можешь не идти. но лучше иди", "наряд сам себя не выполнит. к сожалению для тебя", "ну не знаю, может само рассосётся? нет? тогда иди"]},
+    "philosophical": {"label": "🧘 философский", "endings": ["дежурный, как и квант — существует пока его не наблюдают", "уборка — это форма медитации. почти", "каждый наряд приближает тебя к просветлению", "сводки — это метафора ответственности. неси её буквально"]},
+    "gamer": {"label": "🎮 геймерский", "endings": ["go go go, таймер тикает как в CS ⏱", "это твой daily quest, easy mode — не ной", "respawn через 5 сек, успей подготовиться", "ranked матч жизни начался, не фидь наряд"]},
 }
 
 EASTER_EGGS = [
@@ -192,7 +179,7 @@ def load_data():
         "start_date": date.today().isoformat(),
         "svodki_start_index": 0,
         "procedura_start_index": 0,
-        "chat_id": CHAT_ID,
+        "chat_id": CHAT_ID or "",
         "reminders_enabled": True,
         "personal_ids": {},
         "log": {},
@@ -306,7 +293,7 @@ def next_person_proc(name):
     return PROCEDURA_LIST[(PROCEDURA_LIST.index(name) + 1) % len(PROCEDURA_LIST)]
 
 # ══════════════════════════════════════════════
-#  ПОСТРОЕНИЕ СООБЩЕНИЙ (для команд и рассылок)
+#  ПОСТРОЕНИЕ СООБЩЕНИЙ
 # ══════════════════════════════════════════════
 def build_duty_message(target_date, label):
     svodki = get_svodki_person(target_date)
@@ -497,7 +484,8 @@ def build_pinned_content():
 async def update_pinned_message(bot):
     data = load_data()
     chat_id = data.get("chat_id", CHAT_ID)
-    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
+    if not chat_id:
+        logger.warning("CHAT_ID не задан, пропускаем обновление закреплённого")
         return
     content = build_pinned_content()
     pinned_msg_id = data.get("pinned_msg_id")
@@ -526,7 +514,7 @@ class AdminStates(StatesGroup):
     waiting_register = State()
 
 # ══════════════════════════════════════════════
-#  ОТПРАВКА НАПОМИНАНИЙ (С КАРТИНКОЙ)
+#  ОТПРАВКА НАПОМИНАНИЙ
 # ══════════════════════════════════════════════
 async def _send_personal(bot, person, duty_type):
     data = load_data()
@@ -540,10 +528,14 @@ async def _send_personal(bot, person, duty_type):
 
 async def _send_reminder(bot, duty_type, retry=False):
     data = load_data()
-    if not data.get("reminders_enabled", True): return
+    if not data.get("reminders_enabled", True):
+        logger.info("Напоминания выключены, пропускаем")
+        return
+
+    # Определяем chat_id – если не задан, используем тот, откуда пришёл запрос (но для кнопки "Напомнить сейчас" он будет передан)
     chat_id = data.get("chat_id", CHAT_ID)
-    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
-        logger.warning("CHAT_ID не настроен!")
+    if not chat_id:
+        logger.error("CHAT_ID не задан ни в данных, ни в переменной окружения. Не могу отправить сообщение.")
         return
 
     today = datetime.now(TIMEZONE).date()
@@ -551,6 +543,7 @@ async def _send_reminder(bot, duty_type, retry=False):
     mood_label = get_mood_label()
     easter = random.random() < 0.05 and not retry
 
+    # Определяем данные для сводок или процедурки
     if duty_type == "svodki":
         person = get_svodki_person(today)
         next_d = days_until_svodki(person, today)
@@ -578,8 +571,11 @@ async def _send_reminder(bot, duty_type, retry=False):
         ending = get_ending()
         prev_key = "last_proc_msg_id"
 
+    logger.info(f"Отправка {duty_type} для {person} (retry={retry})")
+
     # Пасхалка – текст
     if easter:
+        logger.info("🎉 Пасхалка!")
         msg_text = random.choice(EASTER_EGGS)(person, duty_type)
         prev_id = data.get(prev_key)
         if prev_id:
@@ -593,7 +589,7 @@ async def _send_reminder(bot, duty_type, retry=False):
         await _send_personal(bot, person, duty_type)
         return
 
-    # Генерация картинки
+    # Генерируем картинку
     date_label = today.strftime("%d.%m.%Y") + " • " + WEEKDAY_STYLE[wd][0]
     theme_key = random.choice(THEME_KEYS)
     img_path = os.path.join(TEMP_DIR, f"card_{duty_type}_{int(time.time())}.jpg")
@@ -669,6 +665,7 @@ async def _send_reminder(bot, duty_type, retry=False):
     await update_pinned_message(bot)
     await _send_personal(bot, person, duty_type)
 
+# ── Обёртки для планировщика ──
 async def send_svodki_reminder(bot): await _send_reminder(bot, "svodki")
 async def send_procedura_reminder(bot): await _send_reminder(bot, "proc")
 
@@ -686,7 +683,7 @@ async def send_monday_briefing(bot):
     data = load_data()
     if not data.get("reminders_enabled", True): return
     chat_id = data.get("chat_id", CHAT_ID)
-    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE": return
+    if not chat_id: return
     try:
         await bot.send_message(chat_id, build_monday_briefing(), parse_mode="Markdown")
         await update_pinned_message(bot)
@@ -697,7 +694,7 @@ async def send_sunday_summary(bot):
     data = load_data()
     if not data.get("reminders_enabled", True): return
     chat_id = data.get("chat_id", CHAT_ID)
-    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE": return
+    if not chat_id: return
     try:
         await bot.send_message(chat_id, build_sunday_summary(), parse_mode="Markdown")
     except Exception as e:
