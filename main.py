@@ -9,6 +9,8 @@ import time
 import traceback
 import urllib.parse
 import aiohttp
+import io
+from PIL import Image
 from google import genai
 from google.genai import types as genai_types  # Импортируем типы ИИ безопасно
 # Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
@@ -908,6 +910,66 @@ async def cmd_settings(message: types.Message):
     mood_lbl = get_mood_label()
     await message.answer(f"⚙️ *настройки*\n━━━━━━━━━━━━━━━━━━━━\n📍 чат: `{chat_txt}`\n🔔 напоминания: {enabled}\n🤷‍♀️ сводки сегодня: {sv_em} *{sv_now}*\n⚡️ процедурка сегодня: {pr_em} *{pr_now}*\n🪪 зарегистрировано: *{reg_count}* чел.\n🎭 настроение бота: *{mood_lbl}*\n━━━━━━━━━━━━━━━━━━━━", parse_mode="Markdown", reply_markup=settings_keyboard(data))
 
+async def handle_photo(message: types.Message):
+    if not gemini_client: return
+
+    bot_user = await message.bot.me()
+    is_reply = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
+    
+    # Чтобы бот не спамил в общих чатах, реагируем только если:
+    # 1. Это реплай на сообщение бота
+    # 2. К фотке добавили текстовую подпись
+    # 3. Это личная переписка с ботом
+    if not (is_reply or message.caption or message.chat.type == 'private'):
+        return
+
+    # Показываем статус, что бот "печатает"
+    await message.bot.send_chat_action(message.chat.id, "typing")
+    status_msg = await message.reply("👀 Сканирую пиксели...")
+
+    try:
+        # Телеграм присылает несколько размеров фото, берем самое большое (последнее в списке)
+        photo = message.photo[-1]
+        
+        # Скачиваем файл прямо в оперативную память, не засоряя жесткий диск хостинга
+        file_info = await message.bot.get_file(photo.file_id)
+        downloaded_file = await message.bot.download_file(file_info.file_path)
+        
+        # Превращаем байты в объект картинки, который понимает Google
+        image = Image.open(downloaded_file)
+
+        # Берем текст пользователя или ставим дефолтный вопрос
+        user_text = message.caption if message.caption else "Что ты видишь на этой картинке? Опиши коротко, в своем саркастичном и гиковском стиле."
+        
+        # Системная инструкция, чтобы он не выпадал из роли
+        system_prompt = (
+            "Ты — дерзкий, ироничный ИИ-надзиратель. "
+            "Проанализируй картинку и ответь пользователю. "
+            "Сохраняй саркастичный, геймерский тон. Если скинули фотку убранной комнаты — оцени качество уборки как строгий прапорщик."
+        )
+        
+        # Отправляем в Gemini картинку и текст ОДНОВРЕМЕННО
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[image, user_text],
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_prompt
+            )
+        )
+
+        await message.reply(response.text)
+        
+    except Exception as e:
+        logger.error(f"Ошибка анализа фото Gemini: {e}")
+        await message.reply("❌ Мои оптические сенсоры сбоят. Либо картинка слишком шакальная, либо сервера гугла лежат.")
+    finally:
+        # Убираем сообщение "Сканирую пиксели..."
+        try:
+            await status_msg.delete()
+        except:
+            pass
+
+
 async def cmd_getchatid(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     sent = await message.answer(f"📍 *id этого чата:*\n`{message.chat.id}`\n\nскопируй и вставь в настройки", parse_mode="Markdown")
@@ -1179,6 +1241,8 @@ async def main():
     dp.message.register(cmd_settings, F.text == "⚙️ Настройки")
     dp.message.register(process_chat_id, AdminStates.waiting_chat_id)
     dp.message.register(process_register, AdminStates.waiting_register)
+    # Регистрируем зрение (ловит сообщения с типом photo)
+    dp.message.register(handle_photo, F.photo)
     # ВОТ СЮДА: регистрируем ИИ-болталку последней, чтобы она перехватывала обычный текст
     dp.message.register(handle_ai_chat, F.text)
     dp.message.register(cmd_getchatid, Command("chatid"))
