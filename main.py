@@ -7,6 +7,8 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.parse
+import aiohttp
 from google import genai
 from google.genai import types as genai_types  # Импортируем типы ИИ безопасно
 # Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
@@ -912,46 +914,41 @@ async def cmd_getchatid(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 30)
     
 async def cmd_generate_image(message: types.Message):
-    if not gemini_client: return
-
+    # Удаляем команду пользователя
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
 
     prompt = message.text.replace("/img", "").strip()
     if not prompt:
-        sent = await message.answer("🎨 Напиши, что нарисовать. \nПример: `/img киберпанк город в неоновых лучах, высокая детализация`", parse_mode="Markdown")
+        sent = await message.answer("🎨 Напиши, что нарисовать (лучше на английском).\nПример: `/img Pudge hooking Juggernaut, realistic, Unreal Engine 5`", parse_mode="Markdown")
         await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
         return
 
-    status_msg = await message.answer("🎨 Заряжаю нейросети, рисую... (это займёт пару секунд)")
+    status_msg = await message.answer("🎨 Заряжаю нейронные шестеренки, рисую... (займет 5-10 секунд)")
 
     try:
-        result = await gemini_client.aio.models.generate_images(
-            model='imagen-3.0-generate-001',
-            prompt=prompt,
-            config=genai_types.GenerateImagesConfig(
-                number_of_images=1,
-                output_mime_type="image/jpeg",
-                aspect_ratio="1:1"
-            )
-        )
+        # Кодируем текст для URL и добавляем случайный сид, чтобы картинки не кешировались
+        safe_prompt = urllib.parse.quote(prompt)
+        seed = random.randint(1, 9999999)
+        url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=1024&nologo=true&seed={seed}"
 
-        generated_image = result.generated_images[0]
-        image_bytes = generated_image.image.image_bytes
-        
-        photo = BufferedInputFile(image_bytes, filename="gemini_art.jpg")
-        await message.answer_photo(photo, caption=f"🎨 {prompt}")
-        
+        # Скачиваем картинку напрямую с сервера генерации
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    image_bytes = await resp.read()
+                    photo = BufferedInputFile(image_bytes, filename="pollinations_art.jpg")
+                    await message.answer_photo(photo, caption=f"🎨 {prompt}")
+                else:
+                    await message.answer(f"❌ Сервер художников сейчас перегружен (ошибка {resp.status})")
+
     except Exception as e:
-        logger.error(f"Ошибка генерации картинки Gemini: {e}")
-        # Выводим реальную ошибку прямо в Телеграм:
-        await message.answer(f"❌ Ошибка Google API:\n`{e}`")
+        logger.error(f"Ошибка бесплатной генерации картинки: {e}")
+        await message.answer(f"❌ Что-то пошло не так: `{e}`")
     finally:
-
         try:
             await status_msg.delete()
         except:
             pass
-
 
 # ── НАСТРОЙКИ ──
 async def callback_toggle_reminders(callback: types.CallbackQuery):
