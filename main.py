@@ -911,19 +911,17 @@ async def cmd_getchatid(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     sent = await message.answer(f"📍 *id этого чата:*\n`{message.chat.id}`\n\nскопируй и вставь в настройки", parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 30)
-    async def cmd_generate_image(message: types.Message):
+    
+async def cmd_generate_image(message: types.Message):
     if not gemini_client: return
-
     # 1. Удаляем команду пользователя для чистоты чата
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
-
     # 2. Вытаскиваем текст запроса (всё, что написано после /img)
     prompt = message.text.replace("/img", "").strip()
     if not prompt:
         sent = await message.answer("🎨 Напиши, что нарисовать. \nПример: `/img киберпанк город в неоновых лучах, высокая детализация`", parse_mode="Markdown")
         await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
         return
-
     # 3. Отправляем сообщение-заглушку, чтобы юзер знал, что процесс пошёл
     status_msg = await message.answer("🎨 Заряжаю нейросети, рисую... (это займёт пару секунд)")
 
