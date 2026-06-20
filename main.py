@@ -914,34 +914,31 @@ async def cmd_getchatid(message: types.Message):
     
 async def cmd_generate_image(message: types.Message):
     if not gemini_client: return
-    # 1. Удаляем команду пользователя для чистоты чата
+
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
-    # 2. Вытаскиваем текст запроса (всё, что написано после /img)
+
     prompt = message.text.replace("/img", "").strip()
     if not prompt:
         sent = await message.answer("🎨 Напиши, что нарисовать. \nПример: `/img киберпанк город в неоновых лучах, высокая детализация`", parse_mode="Markdown")
         await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
         return
-    # 3. Отправляем сообщение-заглушку, чтобы юзер знал, что процесс пошёл
+
     status_msg = await message.answer("🎨 Заряжаю нейросети, рисую... (это займёт пару секунд)")
 
     try:
-        # 4. Стучимся в Google Imagen 3
         result = await gemini_client.aio.models.generate_images(
             model='imagen-3.0-generate-001',
             prompt=prompt,
             config=genai_types.GenerateImagesConfig(
                 number_of_images=1,
                 output_mime_type="image/jpeg",
-                aspect_ratio="1:1" # Можно сделать "16:9" или "9:16"
+                aspect_ratio="1:1"
             )
         )
 
-        # 5. Достаём байты готовой картинки
         generated_image = result.generated_images[0]
         image_bytes = generated_image.image.image_bytes
         
-        # 6. Отправляем в Telegram
         photo = BufferedInputFile(image_bytes, filename="gemini_art.jpg")
         await message.answer_photo(photo, caption=f"🎨 {prompt}")
         
@@ -949,12 +946,10 @@ async def cmd_generate_image(message: types.Message):
         logger.error(f"Ошибка генерации картинки Gemini: {e}")
         await message.answer("❌ Не вышло сгенерировать. Возможно, запрос заблокирован цензурой Google или API барахлит.")
     finally:
-        # 7. Удаляем сообщение "Рисую..."
         try:
             await status_msg.delete()
         except:
             pass
-
 
 
 # ── НАСТРОЙКИ ──
