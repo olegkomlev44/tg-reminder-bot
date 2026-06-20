@@ -7,6 +7,9 @@ import sys
 import tempfile
 import time
 import traceback
+from google import genai
+# Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
+gemini_client = genai.Client() 
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -63,6 +66,11 @@ TOKEN     = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID   = os.getenv("CHAT_ID",   "YOUR_CHAT_ID_HERE")
 DATA_FILE = os.path.join(BASE_DIR, "duty_data.json")
 TIMEZONE  = pytz.timezone("Europe/Moscow")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+if not gemini_client:
+    logger.warning("🟡 GEMINI_API_KEY не задан, AI-функции отключены")
+
 
 # Папка для временных картинок. Раньше тут было захардкожено "/app/shared/temp" —
 # это путь, который существует только при ОЧЕНЬ конкретной Docker-сборке
@@ -105,6 +113,53 @@ WEEKDAY_STYLE = {
     5: ("суббота",     "🥳",  "🎉", "🎉"),
     6: ("воскресенье", "💀",  "🌙", "🌙"),
 }
+
+# ══════════════════════════════════════════════
+#  GEMINI AI ИНТЕГРАЦИЯ
+# ══════════════════════════════════════════════
+async def get_ai_header(person, duty_type):
+    if not gemini_client: return None
+    
+    duty_name = "сводки" if duty_type == "svodki" else "процедурку"
+    prompt = f"Напиши ОДНУ короткую, смешную и дерзкую фразу (максимум 7-8 слов), чтобы напомнить дежурному по имени {person} выполнить наряд: {duty_name}. Начни с эмодзи. Без кавычек. Можно использовать отсылки к CS2, Dota 2 или Genshin Impact."
+    
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        return response.text.strip() if response.text else None
+    except Exception as e:
+        logger.error(f"Ошибка Gemini при генерации заголовка: {e}")
+        return None
+
+async def handle_ai_chat(message: types.Message):
+    if not gemini_client: return
+    
+    # Игнорируем команды и системные кнопки меню
+    if message.text.startswith('/') or message.text in ["📋 Наряд сегодня", "📅 Наряд завтра", "📊 Расписание на неделю", "📓 Журнал", "🔔 Напомнить сейчас", "⚙️ Настройки"]:
+        return
+
+    # Отвечаем ТОЛЬКО если это реплай на сообщение самого бота
+    bot_user = await message.bot.me()
+    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
+    
+    if not is_reply_to_bot: return
+
+    # Показываем статус "печатает..."
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    prompt = f"Ты — саркастичный, дерзкий, но справедливый Telegram-бот надзиратель. Твоя задача — следить за тем, чтобы команда вовремя выполняла наряды (сводки и уборку). Тебе написал дежурный: «{message.text}». Ответь ему коротко, дерзко, с юмором. Иногда можешь вкинуть геймерскую отсылку. Максимум 1-2 предложения."
+
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        await message.reply(response.text)
+    except Exception as e:
+        logger.error(f"Ошибка Gemini в чате: {e}")
+        await message.reply("Мой нейронный модуль перегрелся от ваших отмазок. Иди лучше дело делай. 🤖")
 
 # ══════════════════════════════════════════════
 #  ФРАЗЫ И ПРОЧИЕ ДАННЫЕ (сохранены без изменений)
@@ -612,7 +667,14 @@ async def _send_reminder(bot, duty_type, retry=False):
         proc_day = 1
         headers_pool = SVODKI_HEADERS_BY_DAY[wd] + GAMING_HEADERS_SVODKI
         retry_pool = RETRY_PREFIX + RETRY_PREFIX_GAMING
-        header = random.choice(retry_pool) if retry else random.choice(headers_pool)
+        # Генерируем фразу через ИИ, если это не повторное напоминание
+        header = None
+        if not retry:
+            header = await get_ai_header(person, duty_type)
+        # Если ИИ сломался, ключа нет или это повтор — берём из старых списков
+        if not header:
+            header = random.choice(retry_pool) if retry else random.choice(headers_pool)
+
         ending = get_ending()
         prev_key = "last_svodki_msg_id"
     else:
@@ -625,7 +687,14 @@ async def _send_reminder(bot, duty_type, retry=False):
         time_label = "22:00"
         headers_pool = PROC_HEADERS_BY_DAY[wd] + GAMING_HEADERS_PROC
         retry_pool = RETRY_PREFIX + RETRY_PREFIX_GAMING
-        header = random.choice(retry_pool) if retry else random.choice(headers_pool)
+        # Генерируем фразу через ИИ, если это не повторное напоминание
+        header = None
+        if not retry:
+            header = await get_ai_header(person, duty_type)
+        # Если ИИ сломался, ключа нет или это повтор — берём из старых списков
+        if not header:
+            header = random.choice(retry_pool) if retry else random.choice(headers_pool)
+
         ending = get_ending()
         prev_key = "last_proc_msg_id"
 
@@ -1035,6 +1104,11 @@ async def main():
     dp.callback_query.register(callback_show_procedura_list, F.data == "show_procedura_list")
     dp.callback_query.register(callback_back_settings, F.data == "back_settings")
     dp.callback_query.register(callback_back_main, F.data == "back_main")
+    dp.message.register(cmd_settings, F.text == "⚙️ Настройки")
+    dp.message.register(process_chat_id, AdminStates.waiting_chat_id)
+    dp.message.register(process_register, AdminStates.waiting_register)
+    # ВОТ СЮДА: регистрируем ИИ-болталку последней, чтобы она перехватывала обычный текст
+    dp.message.register(handle_ai_chat, F.text)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(send_svodki_reminder, CronTrigger(hour=18, minute=0, timezone=TIMEZONE), args=[bot])
