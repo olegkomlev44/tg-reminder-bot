@@ -10,12 +10,11 @@ import traceback
 from google import genai
 from google.genai import types as genai_types  # Импортируем типы ИИ безопасно
 # Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
-gemini_client = genai.Client() 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile
+gemini_client = genai.Client()
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -1154,6 +1153,7 @@ async def main():
 
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
+    dp.message.register(cmd_generate_image, Command("img"))
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
     dp.message.register(cmd_tomorrow, F.text == "📅 Наряд завтра")
     dp.message.register(cmd_week, F.text == "📊 Расписание на неделю")
@@ -1184,7 +1184,6 @@ async def main():
     dp.message.register(handle_ai_chat, F.text)
     dp.message.register(cmd_getchatid, Command("chatid"))
     # Регистрация генератора картинок
-    dp.message.register(cmd_generate_image, Command("img"))
     dp.message.register(handle_ai_chat, F.text) # Эта строка должна остаться самой последней!
 
 
