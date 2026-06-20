@@ -912,7 +912,7 @@ async def cmd_getchatid(message: types.Message):
     sent = await message.answer(f"📍 *id этого чата:*\n`{message.chat.id}`\n\nскопируй и вставь в настройки", parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 30)
 
-    async def cmd_generate_image(message: types.Message):
+async def cmd_generate_image(message: types.Message):
     if not gemini_client: return
 
     # 1. Удаляем команду пользователя для чистоты чата
