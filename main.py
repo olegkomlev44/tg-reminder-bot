@@ -8,6 +8,7 @@ import tempfile
 import time
 import traceback
 from google import genai
+from google.genai import types as genai_types  # Импортируем типы ИИ безопасно
 # Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
 gemini_client = genai.Client() 
 from datetime import datetime, date, timedelta
@@ -117,7 +118,17 @@ WEEKDAY_STYLE = {
 # ══════════════════════════════════════════════
 #  GEMINI AI ИНТЕГРАЦИЯ
 # ══════════════════════════════════════════════
+USER_CHATS = {}
+
+AI_SYSTEM_PROMPT = (
+    "Ты — дерзкий, ироничный, но очень умный ИИ-ассистент в Telegram-чате. "
+    "Отвечай на вопросы максимально подробно и полезно. "
+    "Сохраняй свой саркастичный, геймерский и гиковский тон. "
+    "Если вопрос глупый — можешь слегка подколоть, но ответ всё равно дай."
+)
+
 async def get_ai_header(person, duty_type):
+    # Эта функция остается без изменений
     if not gemini_client: return None
     
     duty_name = "сводки" if duty_type == "svodki" else "процедурку"
@@ -136,30 +147,51 @@ async def get_ai_header(person, duty_type):
 async def handle_ai_chat(message: types.Message):
     if not gemini_client: return
     
-    # Игнорируем команды и системные кнопки меню
+    # Игнорируем команды и кнопки меню
     if message.text.startswith('/') or message.text in ["📋 Наряд сегодня", "📅 Наряд завтра", "📊 Расписание на неделю", "📓 Журнал", "🔔 Напомнить сейчас", "⚙️ Настройки"]:
         return
 
-    # Отвечаем ТОЛЬКО если это реплай на сообщение самого бота
+    # Отвечаем, только если реплайнули самого бота
     bot_user = await message.bot.me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
     
     if not is_reply_to_bot: return
 
-    # Показываем статус "печатает..."
     await message.bot.send_chat_action(message.chat.id, "typing")
 
-    prompt = f"Ты — саркастичный, дерзкий, но справедливый Telegram-бот надзиратель. Твоя задача — следить за тем, чтобы команда вовремя выполняла наряды (сводки и уборку). Тебе написал дежурный: «{message.text}». Ответь ему коротко, дерзко, с юмором. Иногда можешь вкинуть геймерскую отсылку. Максимум 1-2 предложения."
+    user_id = message.from_user.id
+
+    # Создаем сессию, если её нет
+    if user_id not in USER_CHATS:
+        # Включаем встроенный поиск в Google (Google Search Grounding)
+        config = genai_types.GenerateContentConfig(
+            system_instruction=AI_SYSTEM_PROMPT,
+            tools=[{"google_search": {}}] 
+        )
+        USER_CHATS[user_id] = gemini_client.aio.chats.create(
+            model='gemini-2.5-flash',
+            config=config
+        )
+
+    chat_session = USER_CHATS[user_id]
+
+    # Достаем актуальных дежурных из твоего расписания
+    today = date.today()
+    sv_today = get_svodki_person(today)
+    pr_today = get_procedura_person(today)
+
+    # Формируем скрытый контекст для нейросети
+    hidden_context = f"[Системная справка: сегодня дежурный по сводкам — {sv_today}, дежурный по процедурке — {pr_today}.] "
+    full_message = hidden_context + message.text
 
     try:
-        response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
+        # Отправляем сообщение вместе с подмешанными данными
+        response = await chat_session.send_message(full_message)
         await message.reply(response.text)
     except Exception as e:
         logger.error(f"Ошибка Gemini в чате: {e}")
-        await message.reply("Мой нейронный модуль перегрелся от ваших отмазок. Иди лучше дело делай. 🤖")
+        USER_CHATS.pop(user_id, None)
+        await message.reply("Мои процессоры перегрелись от поиска ответов. Я сбросил кэш, давай начнем тему заново. 🤖")
 
 # ══════════════════════════════════════════════
 #  ФРАЗЫ И ПРОЧИЕ ДАННЫЕ (сохранены без изменений)
