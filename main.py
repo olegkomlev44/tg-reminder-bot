@@ -867,9 +867,24 @@ async def daily_pinned_update(bot):
 #  ХЕНДЛЕРЫ
 # ══════════════════════════════════════════════
 async def cmd_start(message: types.Message):
-    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1) # <-- Добавили удаление
-    sent = await message.answer("👋 *йоу! я бот-напоминалка нарядов*\n\nкаждый день шлю:\n• *18:00* — кто тащит сводки\n• *22:00* — кто убирает процедурку\n• пн *9:00* — расписание на всю неделю\n• вс *20:00* — итоги недели + mvp\n\nу меня есть *настроение* — каждый день разное 🎭\nоформление напоминаний рандомное: то табло как в CS, то квест как в Genshin, то терминал разработчика 🖥\nиногда случаются *пасхалки* — следи за напоминаниями 👀\nстарые напоминания удаляются автоматически 🗑\nзакреплённое сообщение обновляется каждый день 📌\n\nпоехали 👇", parse_mode="Markdown", reply_markup=main_keyboard())
+    # Удаляем команду пользователя
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+    
+    start_text = (
+        "👋 *Йоу! Я твой кибер-надзиратель и ИИ-бро в одном лице.*\n\n"
+        "*Что я умею:*\n"
+        "🧹 *Следить за нарядами:* сводки в 18:00, процедурка в 22:00.\n"
+        "🤖 *Быть умным:* сделай реплай на моё сообщение, и я отвечу на любой вопрос (от сборки ПК до меты в Доте).\n"
+        "🃏 *Делать мемы:* скинь фотку с подписью `/meme`, и я наложу смешной текст.\n"
+        "🎨 *Рисовать:* напиши `/img <что нарисовать>`, и я сгенерирую картинку.\n\n"
+        "Я всё вижу, всё помню. Погнали! 👇"
+    )
+    
+    sent = await message.answer(start_text, parse_mode="Markdown", reply_markup=main_keyboard())
+    
+    # Удаляем стартовое сообщение бота через 60 секунд, чтобы не висело в чате
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 60)
+
 
 async def cmd_today(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
