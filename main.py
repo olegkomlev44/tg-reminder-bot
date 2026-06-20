@@ -926,7 +926,7 @@ async def cmd_generate_image(message: types.Message):
 
     try:
         result = await gemini_client.aio.models.generate_images(
-            model='imagen-3.0-generate-002',
+            model='imagen-3.0-generate-001',
             prompt=prompt,
             config=genai_types.GenerateImagesConfig(
                 number_of_images=1,
