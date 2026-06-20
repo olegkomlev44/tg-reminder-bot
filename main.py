@@ -761,32 +761,39 @@ async def daily_pinned_update(bot):
 #  ХЕНДЛЕРЫ
 # ══════════════════════════════════════════════
 async def cmd_start(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1) # <-- Добавили удаление
     sent = await message.answer("👋 *йоу! я бот-напоминалка нарядов*\n\nкаждый день шлю:\n• *18:00* — кто тащит сводки\n• *22:00* — кто убирает процедурку\n• пн *9:00* — расписание на всю неделю\n• вс *20:00* — итоги недели + mvp\n\nу меня есть *настроение* — каждый день разное 🎭\nоформление напоминаний рандомное: то табло как в CS, то квест как в Genshin, то терминал разработчика 🖥\nиногда случаются *пасхалки* — следи за напоминаниями 👀\nстарые напоминания удаляются автоматически 🗑\nзакреплённое сообщение обновляется каждый день 📌\n\nпоехали 👇", parse_mode="Markdown", reply_markup=main_keyboard())
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 60)
 
 async def cmd_today(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     sent = await message.answer(build_duty_message(date.today(), "сегодня"), parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 300)
 
 async def cmd_tomorrow(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     sent = await message.answer(build_duty_message(date.today() + timedelta(days=1), "завтра"), parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 300)
 
 async def cmd_week(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     sent = await message.answer(build_week_schedule(), parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 300)
 
 async def cmd_log(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     sent = await message.answer(build_log_message(), parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 120)
 
 async def cmd_remind_now(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     sent = await message.answer("🔔 *погнали, отправляю в чат...*", parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
     await _send_reminder(message.bot, "svodki")
     await _send_reminder(message.bot, "proc")
 
 async def cmd_settings(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     data = load_data()
     enabled = "✅ включены" if data.get("reminders_enabled", True) else "❌ выключены"
     chat_txt = data.get("chat_id", "не настроен")
@@ -799,35 +806,9 @@ async def cmd_settings(message: types.Message):
     await message.answer(f"⚙️ *настройки*\n━━━━━━━━━━━━━━━━━━━━\n📍 чат: `{chat_txt}`\n🔔 напоминания: {enabled}\n🤷‍♀️ сводки сегодня: {sv_em} *{sv_now}*\n⚡️ процедурка сегодня: {pr_em} *{pr_now}*\n🪪 зарегистрировано: *{reg_count}* чел.\n🎭 настроение бота: *{mood_lbl}*\n━━━━━━━━━━━━━━━━━━━━", parse_mode="Markdown", reply_markup=settings_keyboard(data))
 
 async def cmd_getchatid(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     sent = await message.answer(f"📍 *id этого чата:*\n`{message.chat.id}`\n\nскопируй и вставь в настройки", parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 30)
-
-# ── ПОДТВЕРЖДЕНИЕ ──
-async def callback_done(callback: types.CallbackQuery):
-    duty_type = callback.data.split(":")[1]
-    today = date.today()
-    data = load_data()
-    log = data.setdefault("log", {})
-    entry = log.setdefault(today.isoformat(), {})
-    person = get_svodki_person(today) if duty_type == "svodki" else get_procedura_person(today)
-    field = "svodki" if duty_type == "svodki" else "proc"
-    entry[field] = person
-    data["log"] = log
-    data.get("pending_retry", {}).pop(duty_type, None)
-    save_data(data)
-    increment_count(person, field)
-    reply_pool = DONE_REPLIES + DONE_REPLIES_GAMING
-    await callback.answer(random.choice(reply_pool), show_alert=False)
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await update_pinned_message(callback.bot)
-
-async def callback_retry(callback: types.CallbackQuery):
-    duty_type = callback.data.split(":")[1]
-    data = load_data()
-    data.setdefault("pending_retry", {})[duty_type] = date.today().isoformat()
-    save_data(data)
-    await callback.answer("⏰ окей, напомню через 15 минут", show_alert=False)
-    await callback.message.edit_reply_markup(reply_markup=None)
 
 # ── НАСТРОЙКИ ──
 async def callback_toggle_reminders(callback: types.CallbackQuery):
