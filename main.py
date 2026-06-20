@@ -943,6 +943,33 @@ async def callback_back_main(callback: types.CallbackQuery):
     await callback.message.answer("🏠 главное меню", reply_markup=main_keyboard())
     await callback.answer()
 
+# ── ПОДТВЕРЖДЕНИЕ ──
+async def callback_done(callback: types.CallbackQuery):
+    duty_type = callback.data.split(":")[1]
+    today = date.today()
+    data = load_data()
+    log = data.setdefault("log", {})
+    entry = log.setdefault(today.isoformat(), {})
+    person = get_svodki_person(today) if duty_type == "svodki" else get_procedura_person(today)
+    field = "svodki" if duty_type == "svodki" else "proc"
+    entry[field] = person
+    data["log"] = log
+    data.get("pending_retry", {}).pop(duty_type, None)
+    save_data(data)
+    increment_count(person, field)
+    reply_pool = DONE_REPLIES + DONE_REPLIES_GAMING
+    await callback.answer(random.choice(reply_pool), show_alert=False)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await update_pinned_message(callback.bot)
+
+async def callback_retry(callback: types.CallbackQuery):
+    duty_type = callback.data.split(":")[1]
+    data = load_data()
+    data.setdefault("pending_retry", {})[duty_type] = date.today().isoformat()
+    save_data(data)
+    await callback.answer("⏰ окей, напомню через 15 минут", show_alert=False)
+    await callback.message.edit_reply_markup(reply_markup=None)
+
 # ══════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════
