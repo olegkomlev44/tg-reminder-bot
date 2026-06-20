@@ -9,8 +9,9 @@ import time
 import traceback
 import urllib.parse
 import aiohttp
+from PIL import Image, ImageDraw, ImageFont
 import io
-from PIL import Image
+import textwrap
 from google import genai
 from google.genai import types as genai_types  # Импортируем типы ИИ безопасно
 # Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
@@ -910,6 +911,112 @@ async def cmd_settings(message: types.Message):
     mood_lbl = get_mood_label()
     await message.answer(f"⚙️ *настройки*\n━━━━━━━━━━━━━━━━━━━━\n📍 чат: `{chat_txt}`\n🔔 напоминания: {enabled}\n🤷‍♀️ сводки сегодня: {sv_em} *{sv_now}*\n⚡️ процедурка сегодня: {pr_em} *{pr_now}*\n🪪 зарегистрировано: *{reg_count}* чел.\n🎭 настроение бота: *{mood_lbl}*\n━━━━━━━━━━━━━━━━━━━━", parse_mode="Markdown", reply_markup=settings_keyboard(data))
 
+async def cmd_meme(message: types.Message):
+    if not gemini_client: return
+
+    # Удаляем команду юзера
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+
+    # Ищем фотку: либо в самом сообщении (caption), либо в реплае на чужую фотку
+    photo = None
+    if message.photo:
+        photo = message.photo[-1]
+    elif message.reply_to_message and message.reply_to_message.photo:
+        photo = message.reply_to_message.photo[-1]
+
+    if not photo:
+        sent = await message.answer("🖼 Отправь фотку с подписью `/meme` или сделай реплай `/meme` на любую фотку в чате.", parse_mode="Markdown")
+        await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
+        return
+
+    status_msg = await message.reply("🃏 Анализирую картинку, придумываю панчлайн...")
+
+    try:
+        # 1. Скачиваем фото в оперативную память
+        file_info = await message.bot.get_file(photo.file_id)
+        downloaded_file = await message.bot.download_file(file_info.file_path)
+        img = Image.open(downloaded_file).convert("RGB")
+        
+        # 2. Просим Gemini придумать смешной текст из двух строк
+        prompt = (
+            "Ты — создатель мемов. Посмотри на эту картинку и придумай для неё смешной, дерзкий мем "
+            "в стиле геймеров (особенно CS2, Dota 2, Genshin Impact) или суровых айтишников. "
+            "Выдай СТРОГО две строки текста, разделенные знаком |. "
+            "Первая строка — верхний текст мема. Вторая строка — нижний текст. "
+            "Не пиши ничего кроме этих двух строк."
+        )
+        
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[img, prompt]
+        )
+        
+        # Парсим ответ
+        meme_text = response.text.replace('"', '').replace('\n', '').strip()
+        if "|" in meme_text:
+            top_text, bottom_text = meme_text.split("|", 1)
+        else:
+            top_text = ""
+            bottom_text = meme_text
+            
+        top_text = top_text.strip().upper()
+        bottom_text = bottom_text.strip().upper()
+
+        # 3. Рисуем текст на картинке
+        draw = ImageDraw.Draw(img)
+        font_path = os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf")
+        
+        try:
+            # Размер шрифта подстраивается под ширину фото
+            font_size = max(int(img.width / 12), 20)
+            font = ImageFont.truetype(font_path, font_size)
+        except IOError:
+            font = ImageFont.load_default()
+
+        def draw_meme_text(text, is_bottom=False):
+            if not text: return
+            lines = textwrap.wrap(text, width=22) # Разбиваем длинный текст на строки
+            stroke_width = max(int(font_size / 15), 2)
+            
+            # Считаем высоту всего блока, чтобы выровнять снизу
+            total_h = 0
+            line_heights = []
+            for line in lines:
+                bbox = font.getbbox(line)
+                lh = bbox[3] - bbox[1] + 10
+                line_heights.append(lh)
+                total_h += lh
+            
+            # Координата Y для начала рисования
+            current_y = (img.height - total_h - 20) if is_bottom else 20
+            
+            for line, lh in zip(lines, line_heights):
+                # anchor="ma" выравнивает текст ровно по центру горизонтали
+                draw.text((img.width / 2, current_y), line, font=font, fill="white", 
+                          stroke_width=stroke_width, stroke_fill="black", anchor="ma")
+                current_y += lh
+
+        draw_meme_text(top_text, is_bottom=False)
+        draw_meme_text(bottom_text, is_bottom=True)
+
+        # 4. Сохраняем результат в байты и отправляем в чат
+        out_bytes = io.BytesIO()
+        img.save(out_bytes, format="JPEG", quality=95)
+        out_bytes.seek(0)
+        
+        photo_out = BufferedInputFile(out_bytes.read(), filename="meme.jpg")
+        await message.answer_photo(photo_out)
+        
+    except Exception as e:
+        logger.error(f"Ошибка создания мема: {e}")
+        await message.reply("❌ Мой внутренний мемолог сломался. Слишком сложная пикча.")
+    finally:
+        try:
+            await status_msg.delete()
+        except:
+            pass
+
+
 async def handle_photo(message: types.Message):
     if not gemini_client: return
 
@@ -1215,6 +1322,7 @@ async def main():
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
     dp.message.register(cmd_generate_image, Command("img"))
+    dp.message.register(cmd_meme, Command("meme"))
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
     dp.message.register(cmd_tomorrow, F.text == "📅 Наряд завтра")
     dp.message.register(cmd_week, F.text == "📊 Расписание на неделю")
