@@ -926,7 +926,7 @@ async def cmd_generate_image(message: types.Message):
 
     try:
         result = await gemini_client.aio.models.generate_images(
-            model='imagen-3.0-generate-001',
+            model='imagen-3.0-generate-002',
             prompt=prompt,
             config=genai_types.GenerateImagesConfig(
                 number_of_images=1,
@@ -943,8 +943,10 @@ async def cmd_generate_image(message: types.Message):
         
     except Exception as e:
         logger.error(f"Ошибка генерации картинки Gemini: {e}")
-        await message.answer("❌ Не вышло сгенерировать. Возможно, запрос заблокирован цензурой Google или API барахлит.")
+        # Выводим реальную ошибку прямо в Телеграм:
+        await message.answer(f"❌ Ошибка Google API:\n`{e}`")
     finally:
+
         try:
             await status_msg.delete()
         except:
