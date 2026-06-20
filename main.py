@@ -3,7 +3,10 @@ import logging
 import json
 import os
 import random
+import sys
+import tempfile
 import time
+import traceback
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -15,32 +18,75 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 
-# Импорт генератора карточек
-from card_generator import make_reminder_card, THEME_KEYS
+# ══════════════════════════════════════════════
+#  ЛОГИРОВАНИЕ — настраиваем САМЫМ ПЕРВЫМ ДЕЛОМ,
+#  до любого кода, который может упасть. Иначе при ошибке на старте
+#  (например, нет прав на создание папки) в логах хостинга не видно
+#  вообще ничего — именно это и было причиной "тишины в логах".
+# ══════════════════════════════════════════════
+try:
+    # На некоторых хостингах stdout оборачивается в блочную буферизацию,
+    # из-за которой print/logger.info может не долетать до панели логов
+    # часами — принудительно включаем построчную буферизацию.
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
+logger = logging.getLogger(__name__)
+logger.info("🟡 main.py запускается...")
+
+# Папка, где реально лежит этот файл — на неё ВСЕГДА есть права на запись,
+# независимо от того, как именно хостинг развернул проект (Docker/native).
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Импорт генератора карточек — оборачиваем в try/except, чтобы при сбое
+# (например, не скопировалась папка fonts/) сразу было видно конкретную
+# причину в логах, а не молчаливое падение всего бота.
+try:
+    from card_generator import make_reminder_card, THEME_KEYS
+    logger.info(f"🟢 card_generator импортирован, тем доступно: {len(THEME_KEYS)}")
+except Exception:
+    logger.error("🔴 НЕ УДАЛОСЬ ИМПОРТИРОВАТЬ card_generator.py:\n" + traceback.format_exc())
+    raise
 
 # ══════════════════════════════════════════════
 #  КОНФИГУРАЦИЯ
 # ══════════════════════════════════════════════
 TOKEN     = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-CHAT_ID   = os.getenv("CHAT_ID",   "")
-DATA_FILE = "duty_data.json"
+CHAT_ID   = os.getenv("CHAT_ID",   "YOUR_CHAT_ID_HERE")
+DATA_FILE = os.path.join(BASE_DIR, "duty_data.json")
 TIMEZONE  = pytz.timezone("Europe/Moscow")
 
-# Общее хранилище для временных файлов
-SHARED_DIR = os.getenv("SHARED_DIR", "/app/shared")
-TEMP_DIR = os.path.join(SHARED_DIR, "temp")
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-# Принудительный вывод логов без буферизации
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    force=True  # переопределяет существующие конфигурации
-)
-logger = logging.getLogger(__name__)
+# Папка для временных картинок. Раньше тут было захардкожено "/app/shared/temp" —
+# это путь, который существует только при ОЧЕНЬ конкретной Docker-сборке
+# (WORKDIR /app + смонтированный shared-volume). На многих хостингах, включая
+# нативный (без Dockerfile) режим BotHost, такой папки просто нет, и создать
+# её нельзя (нет прав на запись в корень файловой системы) — из-за этого
+# процесс падал на старте ДО логирования, и казалось, что бот вообще не работает.
+# Теперь используем папку рядом со скриптом, а если и туда вдруг нельзя
+# писать — откатываемся на системную temp-папку, которая есть всегда.
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
+try:
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    _test_path = os.path.join(TEMP_DIR, ".write_test")
+    with open(_test_path, "w") as _f:
+        _f.write("ok")
+    os.remove(_test_path)
+    logger.info(f"🟢 временная папка для картинок: {TEMP_DIR}")
+except Exception as e:
+    logger.warning(f"🟡 не удалось использовать {TEMP_DIR} ({e}), переключаюсь на системную temp-папку")
+    TEMP_DIR = tempfile.gettempdir()
+    logger.info(f"🟢 временная папка для картинок: {TEMP_DIR}")
 
 # ══════════════════════════════════════════════
-#  СПИСКИ ДЕЖУРНЫХ (без изменений)
+#  СПИСКИ ДЕЖУРНЫХ
 # ══════════════════════════════════════════════
 SVODKI_LIST    = ["Саша", "Олег", "Максим", "Игорь", "Илья", "Глеба", "Слава", "Ильнар"]
 PROCEDURA_LIST = ["Илья", "Слава", "Саша", "Игорь", "Глеба", "Ильнар"]
@@ -61,7 +107,7 @@ WEEKDAY_STYLE = {
 }
 
 # ══════════════════════════════════════════════
-#  ВСЕ ФРАЗЫ И ПРОЧИЕ ДАННЫЕ (без изменений, сжаты для краткости)
+#  ФРАЗЫ И ПРОЧИЕ ДАННЫЕ (сохранены без изменений)
 # ══════════════════════════════════════════════
 SVODKI_HEADERS_BY_DAY = {
     0: ["📋 понедельник. сводки. страдания. погнали", "📋 начало недели, начало боли. твой черёд, дежурный", "📋 пн детектед. наряд активирован. сопротивление бесполезно", "📋 понедельник говорит: подъём. сводки говорят: иди", "📋 новая неделя — те же сводки. ты знал на что шёл"],
@@ -134,12 +180,30 @@ GAMING_ENDINGS = [
 ]
 
 MOODS = {
-    "hyper": {"label": "🚀 гиперактивный", "endings": ["ПОГНАЛИ!! ты лучший!! всё получится!! 🚀🚀🚀", "ВСЁ БУДЕТ ЧЁТКО!! верим!! не сомневаемся!! 💪💪", "ТЫ СУПЕРЗВЕЗДА НАРЯДОВ!! УДАЧИ!! 🌟🌟🌟", "НАРЯД ПРИНЯТ!! ВЫПОЛНЯЙ!! МЫ С ТОБОЙ!! 🎉🎉"]},
-    "tired": {"label": "😴 уставший", "endings": ["ну сделай и ладно. я сам устал уже напоминать", "всё. иди. я полежу пока", "давай. я верю. хотя сил уже нет верить", "сделаешь — хорошо. не сделаешь — ну и бог с ним"]},
-    "serious": {"label": "😤 строгий", "endings": ["наряд — это обязательство. выполни его.", "не нужно слов. просто сделай.", "ты дежурный. это всё что нужно знать.", "отступления нет. выполняй."]},
-    "ironic": {"label": "😏 ироничный", "endings": ["удачи. хотя тут не нужна удача, просто встань и сделай 😐", "ты конечно можешь не идти. но лучше иди", "наряд сам себя не выполнит. к сожалению для тебя", "ну не знаю, может само рассосётся? нет? тогда иди"]},
-    "philosophical": {"label": "🧘 философский", "endings": ["дежурный, как и квант — существует пока его не наблюдают", "уборка — это форма медитации. почти", "каждый наряд приближает тебя к просветлению", "сводки — это метафора ответственности. неси её буквально"]},
-    "gamer": {"label": "🎮 геймерский", "endings": ["go go go, таймер тикает как в CS ⏱", "это твой daily quest, easy mode — не ной", "respawn через 5 сек, успей подготовиться", "ranked матч жизни начался, не фидь наряд"]},
+    "hyper": {
+        "label": "🚀 гиперактивный",
+        "endings": ["ПОГНАЛИ!! ты лучший!! всё получится!! 🚀🚀🚀", "ВСЁ БУДЕТ ЧЁТКО!! верим!! не сомневаемся!! 💪💪", "ТЫ СУПЕРЗВЕЗДА НАРЯДОВ!! УДАЧИ!! 🌟🌟🌟", "НАРЯД ПРИНЯТ!! ВЫПОЛНЯЙ!! МЫ С ТОБОЙ!! 🎉🎉"],
+    },
+    "tired": {
+        "label": "😴 уставший",
+        "endings": ["ну сделай и ладно. я сам устал уже напоминать", "всё. иди. я полежу пока", "давай. я верю. хотя сил уже нет верить", "сделаешь — хорошо. не сделаешь — ну и бог с ним"],
+    },
+    "serious": {
+        "label": "😤 строгий",
+        "endings": ["наряд — это обязательство. выполни его.", "не нужно слов. просто сделай.", "ты дежурный. это всё что нужно знать.", "отступления нет. выполняй."],
+    },
+    "ironic": {
+        "label": "😏 ироничный",
+        "endings": ["удачи. хотя тут не нужна удача, просто встань и сделай 😐", "ты конечно можешь не идти. но лучше иди", "наряд сам себя не выполнит. к сожалению для тебя", "ну не знаю, может само рассосётся? нет? тогда иди"],
+    },
+    "philosophical": {
+        "label": "🧘 философский",
+        "endings": ["дежурный, как и квант — существует пока его не наблюдают", "уборка — это форма медитации. почти", "каждый наряд приближает тебя к просветлению", "сводки — это метафора ответственности. неси её буквально"],
+    },
+    "gamer": {
+        "label": "🎮 геймерский",
+        "endings": ["go go go, таймер тикает как в CS ⏱", "это твой daily quest, easy mode — не ной", "respawn через 5 сек, успей подготовиться", "ranked матч жизни начался, не фидь наряд"],
+    },
 }
 
 EASTER_EGGS = [
@@ -179,7 +243,7 @@ def load_data():
         "start_date": date.today().isoformat(),
         "svodki_start_index": 0,
         "procedura_start_index": 0,
-        "chat_id": CHAT_ID or "",
+        "chat_id": CHAT_ID,
         "reminders_enabled": True,
         "personal_ids": {},
         "log": {},
@@ -293,7 +357,7 @@ def next_person_proc(name):
     return PROCEDURA_LIST[(PROCEDURA_LIST.index(name) + 1) % len(PROCEDURA_LIST)]
 
 # ══════════════════════════════════════════════
-#  ПОСТРОЕНИЕ СООБЩЕНИЙ
+#  ПОСТРОЕНИЕ СООБЩЕНИЙ (для команд и рассылок)
 # ══════════════════════════════════════════════
 def build_duty_message(target_date, label):
     svodki = get_svodki_person(target_date)
@@ -484,8 +548,7 @@ def build_pinned_content():
 async def update_pinned_message(bot):
     data = load_data()
     chat_id = data.get("chat_id", CHAT_ID)
-    if not chat_id:
-        logger.warning("CHAT_ID не задан, пропускаем обновление закреплённого")
+    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
         return
     content = build_pinned_content()
     pinned_msg_id = data.get("pinned_msg_id")
@@ -514,7 +577,7 @@ class AdminStates(StatesGroup):
     waiting_register = State()
 
 # ══════════════════════════════════════════════
-#  ОТПРАВКА НАПОМИНАНИЙ
+#  ОТПРАВКА НАПОМИНАНИЙ (С КАРТИНКОЙ)
 # ══════════════════════════════════════════════
 async def _send_personal(bot, person, duty_type):
     data = load_data()
@@ -528,14 +591,10 @@ async def _send_personal(bot, person, duty_type):
 
 async def _send_reminder(bot, duty_type, retry=False):
     data = load_data()
-    if not data.get("reminders_enabled", True):
-        logger.info("Напоминания выключены, пропускаем")
-        return
-
-    # Определяем chat_id – если не задан, используем тот, откуда пришёл запрос (но для кнопки "Напомнить сейчас" он будет передан)
+    if not data.get("reminders_enabled", True): return
     chat_id = data.get("chat_id", CHAT_ID)
-    if not chat_id:
-        logger.error("CHAT_ID не задан ни в данных, ни в переменной окружения. Не могу отправить сообщение.")
+    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
+        logger.warning("CHAT_ID не настроен!")
         return
 
     today = datetime.now(TIMEZONE).date()
@@ -543,7 +602,6 @@ async def _send_reminder(bot, duty_type, retry=False):
     mood_label = get_mood_label()
     easter = random.random() < 0.05 and not retry
 
-    # Определяем данные для сводок или процедурки
     if duty_type == "svodki":
         person = get_svodki_person(today)
         next_d = days_until_svodki(person, today)
@@ -571,11 +629,8 @@ async def _send_reminder(bot, duty_type, retry=False):
         ending = get_ending()
         prev_key = "last_proc_msg_id"
 
-    logger.info(f"Отправка {duty_type} для {person} (retry={retry})")
-
     # Пасхалка – текст
     if easter:
-        logger.info("🎉 Пасхалка!")
         msg_text = random.choice(EASTER_EGGS)(person, duty_type)
         prev_id = data.get(prev_key)
         if prev_id:
@@ -589,7 +644,7 @@ async def _send_reminder(bot, duty_type, retry=False):
         await _send_personal(bot, person, duty_type)
         return
 
-    # Генерируем картинку
+    # Генерация картинки
     date_label = today.strftime("%d.%m.%Y") + " • " + WEEKDAY_STYLE[wd][0]
     theme_key = random.choice(THEME_KEYS)
     img_path = os.path.join(TEMP_DIR, f"card_{duty_type}_{int(time.time())}.jpg")
@@ -665,7 +720,6 @@ async def _send_reminder(bot, duty_type, retry=False):
     await update_pinned_message(bot)
     await _send_personal(bot, person, duty_type)
 
-# ── Обёртки для планировщика ──
 async def send_svodki_reminder(bot): await _send_reminder(bot, "svodki")
 async def send_procedura_reminder(bot): await _send_reminder(bot, "proc")
 
@@ -683,7 +737,7 @@ async def send_monday_briefing(bot):
     data = load_data()
     if not data.get("reminders_enabled", True): return
     chat_id = data.get("chat_id", CHAT_ID)
-    if not chat_id: return
+    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE": return
     try:
         await bot.send_message(chat_id, build_monday_briefing(), parse_mode="Markdown")
         await update_pinned_message(bot)
@@ -694,7 +748,7 @@ async def send_sunday_summary(bot):
     data = load_data()
     if not data.get("reminders_enabled", True): return
     chat_id = data.get("chat_id", CHAT_ID)
-    if not chat_id: return
+    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE": return
     try:
         await bot.send_message(chat_id, build_sunday_summary(), parse_mode="Markdown")
     except Exception as e:
@@ -911,7 +965,39 @@ async def callback_back_main(callback: types.CallbackQuery):
 # ══════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════
+def _startup_selftest():
+    """Генерирует тестовую карточку прямо на старте, чтобы в логах сразу
+    было видно, работает ли Pillow/шрифты на этом хостинге, не дожидаясь
+    18:00 или 22:00."""
+    test_path = os.path.join(TEMP_DIR, "_selftest.jpg")
+    try:
+        make_reminder_card(
+            duty_type="svodki",
+            person="Тест",
+            position_label="самопроверка при старте",
+            time_label="00:00",
+            header_text="проверка генератора картинок",
+            ending_text="всё ок",
+            date_label=datetime.now(TIMEZONE).strftime("%d.%m.%Y"),
+            mood_label="проверка",
+            theme_key=random.choice(THEME_KEYS),
+            output_path=test_path,
+        )
+        size = os.path.getsize(test_path)
+        logger.info(f"✅ САМОПРОВЕРКА КАРТИНОК ПРОЙДЕНА: {test_path} ({size} байт)")
+    except Exception:
+        logger.error("❌ САМОПРОВЕРКА КАРТИНОК НЕ ПРОЙДЕНА:\n" + traceback.format_exc())
+    finally:
+        try:
+            os.remove(test_path)
+        except Exception:
+            pass
+
+
 async def main():
+    logger.info("🟡 инициализация бота...")
+    _startup_selftest()
+
     bot = Bot(token=TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
@@ -960,4 +1046,15 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    except Exception:
+        # Если что-то всё-таки уронило бота на старте — печатаем полный
+        # traceback и в logger, и напрямую в stdout/stderr, чтобы это
+        # гарантированно попало в панель логов хостинга, какой бы она ни была.
+        tb = traceback.format_exc()
+        logger.critical("🔴 БОТ УПАЛ С НЕОБРАБОТАННОЙ ОШИБКОЙ:\n" + tb)
+        print("🔴 БОТ УПАЛ С НЕОБРАБОТАННОЙ ОШИБКОЙ:\n" + tb, file=sys.stderr, flush=True)
+        sys.exit(1)

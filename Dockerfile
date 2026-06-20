@@ -1,11 +1,16 @@
 FROM python:3.11-slim
 
-# Отключаем буферизацию логов Python, чтобы они сразу шли в консоль Bothost
-ENV PYTHONUNBUFFERED=1
-
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+# Логи сразу пишутся в stdout без буферизации — иначе на некоторых
+# хостингах panel логов может вообще ничего не показывать в реальном времени.
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONIOENCODING=UTF-8
+
+# Системные шрифты ставим как дополнительную подстраховку — основной шрифт
+# для карточек уже лежит в репозитории в папке fonts/ и работает даже без этого.
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
