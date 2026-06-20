@@ -932,7 +932,6 @@ async def cmd_meme(message: types.Message):
     # Удаляем команду юзера
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
 
-    # Ищем фотку: либо в самом сообщении (caption), либо в реплае на чужую фотку
     photo = None
     if message.photo:
         photo = message.photo[-1]
@@ -944,21 +943,29 @@ async def cmd_meme(message: types.Message):
         await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
         return
 
-    status_msg = await message.reply("🃏 Анализирую картинку, придумываю панчлайн...")
+    status_msg = await message.reply("⬛️ Делаю из этого демотиватор...")
 
     try:
-        # 1. Скачиваем фото в оперативную память
+        # 1. Скачиваем фото 
         file_info = await message.bot.get_file(photo.file_id)
         downloaded_file = await message.bot.download_file(file_info.file_path)
         img = Image.open(downloaded_file).convert("RGB")
         
-        # 2. Просим Gemini придумать смешной текст из двух строк
+        # Приводим картинку к единой ширине 800px, чтобы шрифты всегда смотрелись пропорционально
+        target_width = 800
+        if img.width != target_width:
+            ratio = target_width / img.width
+            new_height = int(img.height * ratio)
+            img = img.resize((target_width, new_height), Image.Resampling.LANCZOS)
+        
+        # 2. Просим Gemini придумать текст для демотиватора
         prompt = (
-            "Ты — создатель мемов. Посмотри на эту картинку и придумай для неё смешной, дерзкий мем "
-            "в стиле геймеров (особенно CS2, Dota 2, Genshin Impact) или суровых айтишников. "
+            "Ты — создатель мемов. Посмотри на эту картинку и придумай для неё подпись "
+            "в стиле классического 'демотиватора'. Тематика: айтишники, геймеры (CS2, Dota 2, Genshin), наряды по офису. "
             "Выдай СТРОГО две строки текста, разделенные знаком |. "
-            "Первая строка — верхний текст мема. Вторая строка — нижний текст. "
-            "Не пиши ничего кроме этих двух строк."
+            "Первая строка — короткий заголовок (1-3 слова). "
+            "Вторая строка — смешное или философское пояснение. "
+            "Не пиши ничего кроме этих двух строк, никаких лишних символов."
         )
         
         response = await gemini_client.aio.models.generate_content(
@@ -966,65 +973,93 @@ async def cmd_meme(message: types.Message):
             contents=[img, prompt]
         )
         
-        # Парсим ответ
+        # Парсим текст
         meme_text = response.text.replace('"', '').replace('\n', '').strip()
         if "|" in meme_text:
             top_text, bottom_text = meme_text.split("|", 1)
         else:
-            top_text = ""
-            bottom_text = meme_text
+            top_text = meme_text
+            bottom_text = ""
             
-        top_text = top_text.strip().upper()
-        bottom_text = bottom_text.strip().upper()
+        top_text = top_text.strip().upper()  # Заголовок всегда капсом
+        bottom_text = bottom_text.strip()
 
-        # 3. Рисуем текст на картинке
-        draw = ImageDraw.Draw(img)
-        font_path = os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf")
+        # 3. Настраиваем шрифты
+        font_title_path = os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf")
+        font_sub_path = os.path.join(BASE_DIR, "fonts", "DejaVuSans.ttf")
         
         try:
-            # Размер шрифта подстраивается под ширину фото
-            font_size = max(int(img.width / 12), 20)
-            font = ImageFont.truetype(font_path, font_size)
+            font_title = ImageFont.truetype(font_title_path, 60)
+            font_sub = ImageFont.truetype(font_sub_path, 30)
         except IOError:
-            font = ImageFont.load_default()
+            font_title = ImageFont.load_default()
+            font_sub = ImageFont.load_default()
 
-        def draw_meme_text(text, is_bottom=False):
-            if not text: return
-            lines = textwrap.wrap(text, width=22) # Разбиваем длинный текст на строки
-            stroke_width = max(int(font_size / 15), 2)
-            
-            # Считаем высоту всего блока, чтобы выровнять снизу
-            total_h = 0
-            line_heights = []
-            for line in lines:
-                bbox = font.getbbox(line)
-                lh = bbox[3] - bbox[1] + 10
-                line_heights.append(lh)
-                total_h += lh
-            
-            # Координата Y для начала рисования
-            current_y = (img.height - total_h - 20) if is_bottom else 20
-            
-            for line, lh in zip(lines, line_heights):
-                # anchor="ma" выравнивает текст ровно по центру горизонтали
-                draw.text((img.width / 2, current_y), line, font=font, fill="white", 
-                          stroke_width=stroke_width, stroke_fill="black", anchor="ma")
-                current_y += lh
+        # Разбиваем текст на строки, если он слишком длинный
+        title_lines = textwrap.wrap(top_text, width=25)
+        sub_lines = textwrap.wrap(bottom_text, width=55)
 
-        draw_meme_text(top_text, is_bottom=False)
-        draw_meme_text(bottom_text, is_bottom=True)
+        # Вычисляем высоту текста, чтобы понять, какого размера делать черный фон
+        dummy_draw = ImageDraw.Draw(Image.new("RGB", (1,1)))
+        
+        text_area_height = 40 # Верхний отступ до текста
+        for line in title_lines:
+            bbox = font_title.getbbox(line)
+            text_area_height += (bbox[3] - bbox[1]) + 10
+            
+        text_area_height += 20 # Расстояние между заголовком и подписью
+        
+        for line in sub_lines:
+            bbox = font_sub.getbbox(line)
+            text_area_height += (bbox[3] - bbox[1]) + 10
+            
+        text_area_height += 50 # Нижний отступ (padding)
 
-        # 4. Сохраняем результат в байты и отправляем в чат
+        # 4. Создаем черное полотно (Демотиватор)
+        border_x = 70
+        border_top = 70
+        
+        bg_width = img.width + border_x * 2
+        bg_height = img.height + border_top + text_area_height
+        
+        background = Image.new('RGB', (bg_width, bg_height), color='black')
+        
+        # Вставляем фотку
+        background.paste(img, (border_x, border_top))
+        
+        # Рисуем белую рамку вокруг фотки (классика демотиваторов)
+        draw = ImageDraw.Draw(background)
+        draw.rectangle(
+            [border_x - 4, border_top - 4, border_x + img.width + 3, border_top + img.height + 3],
+            outline='white', width=3
+        )
+
+        # 5. Печатаем текст
+        current_y = border_top + img.height + 40
+        
+        for line in title_lines:
+            draw.text((bg_width / 2, current_y), line, font=font_title, fill="white", anchor="ma")
+            bbox = font_title.getbbox(line)
+            current_y += (bbox[3] - bbox[1]) + 10
+            
+        current_y += 20
+        
+        for line in sub_lines:
+            draw.text((bg_width / 2, current_y), line, font=font_sub, fill="white", anchor="ma")
+            bbox = font_sub.getbbox(line)
+            current_y += (bbox[3] - bbox[1]) + 10
+
+        # 6. Отправляем в чат
         out_bytes = io.BytesIO()
-        img.save(out_bytes, format="JPEG", quality=95)
+        background.save(out_bytes, format="JPEG", quality=95)
         out_bytes.seek(0)
         
-        photo_out = BufferedInputFile(out_bytes.read(), filename="meme.jpg")
+        photo_out = BufferedInputFile(out_bytes.read(), filename="demotivator.jpg")
         await message.answer_photo(photo_out)
         
     except Exception as e:
-        logger.error(f"Ошибка создания мема: {e}")
-        await message.reply("❌ Мой внутренний мемолог сломался. Слишком сложная пикча.")
+        logger.error(f"Ошибка создания демотиватора: {e}")
+        await message.reply(f"❌ Нейроны перегрелись: {e}")
     finally:
         try:
             await status_msg.delete()
