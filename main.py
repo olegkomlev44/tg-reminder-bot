@@ -147,7 +147,50 @@ async def get_ai_header(person, duty_type):
     except Exception as e:
         logger.error(f"Ошибка Gemini при генерации заголовка: {e}")
         return None
-        
+
+async def get_weather_advice():
+    if not gemini_client: return None
+    
+    prompt = (
+        "Узнай актуальную погоду прямо сейчас в городе Одинцово (температура, осадки, ветер). "
+        "Напиши 2-3 коротких предложения с саркастичным советом дежурному, "
+        "какую 'броню' или шмот надевать для похода на улицу со сводками. "
+        "Стиль: геймерский/айтишный, немного токсичный. Минимум лишних символов."
+    )
+    
+    try:
+        # Разрешаем нейросети сходить в реальный интернет
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-1.5-flash', 
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                tools=[{"google_search": {}}]
+            )
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Ошибка погоды: {e}")
+        return None
+
+async def cmd_weather(message: types.Message):
+    if not gemini_client: return
+    # Удаляем команду юзера
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+
+    status_msg = await message.answer("☁️ Запускаю метео-дрона в Одинцово (гуглю погоду)...")
+
+    text = await get_weather_advice()
+    
+    try:
+        await status_msg.delete()
+    except:
+        pass
+
+    if text:
+        await message.answer(f"☁️ *Метео-радар:*\n{text}", parse_mode="Markdown")
+    else:
+        await message.answer("❌ Метеостанция не отвечает. Выходи на свой страх и риск.")
+
 async def handle_ai_chat(message: types.Message):
     if not gemini_client: return
     
@@ -741,6 +784,11 @@ async def _send_reminder(bot, duty_type, retry=False):
         save_data(data)
         await update_pinned_message(bot)
         await _send_personal(bot, person, duty_type)
+            # ☁️ АВТОМАТИЧЕСКАЯ ПОГОДА ДЛЯ СВОДОК
+    if duty_type == "svodki" and not retry:
+        weather_text = await get_weather_advice()
+        if weather_text:
+            await bot.send_message(chat_id, f"☁️ *Обстановка на улице:*\n{weather_text}", parse_mode="Markdown")
         return
 
     # Генерация картинки
@@ -1406,6 +1454,8 @@ async def main():
     dp.message.register(cmd_pollinations, Command("poll"))
     dp.message.register(cmd_imagen, Command("imagen"))
     dp.message.register(cmd_meme, Command("meme"))
+    # ДОБАВЛЯЕМ ПОГОДУ:
+    dp.message.register(cmd_weather, Command("pogoda"))
 
     # 2. Затем регистрируем все текстовые кнопки меню
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
