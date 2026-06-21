@@ -147,7 +147,6 @@ async def get_ai_header(person, duty_type):
     except Exception as e:
         logger.error(f"Ошибка Gemini при генерации заголовка: {e}")
         return None
-
         
 async def handle_ai_chat(message: types.Message):
     if not gemini_client: return
@@ -170,7 +169,7 @@ async def handle_ai_chat(message: types.Message):
             tools=[{"google_search": {}}] 
         )
         USER_CHATS[user_id] = gemini_client.aio.chats.create(
-            model='gemini-3.5-flash', # <--- Обновили модель
+            model='gemini-3.5-flash', # <--- Ставим твою 3.5 Flash!
             config=config
         )
 
@@ -189,7 +188,7 @@ async def handle_ai_chat(message: types.Message):
     except Exception as e:
         logger.error(f"Ошибка Gemini в чате: {e}")
         USER_CHATS.pop(user_id, None)
-        # <--- Теперь выводим точную причину сбоя
+        # Выводим РЕАЛЬНУЮ причину сбоя прямо в чат!
         await message.reply(f"❌ Ошибка Google API (Чат):\n`{e}`")
 
 # ══════════════════════════════════════════════
@@ -1393,7 +1392,6 @@ def _startup_selftest():
         except Exception:
             pass
 
-
 async def main():
     logger.info("🟡 инициализация бота...")
     _startup_selftest()
@@ -1402,20 +1400,26 @@ async def main():
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
+    # 1. Сначала регистрируем ВСЕ команды (через слэш)
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
     dp.message.register(cmd_pollinations, Command("poll"))
     dp.message.register(cmd_imagen, Command("imagen"))
     dp.message.register(cmd_meme, Command("meme"))
+
+    # 2. Затем регистрируем все текстовые кнопки меню
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
     dp.message.register(cmd_tomorrow, F.text == "📅 Наряд завтра")
     dp.message.register(cmd_week, F.text == "📊 Расписание на неделю")
     dp.message.register(cmd_log, F.text == "📓 Журнал")
     dp.message.register(cmd_remind_now, F.text == "🔔 Напомнить сейчас")
     dp.message.register(cmd_settings, F.text == "⚙️ Настройки")
+
+    # 3. Регистрируем состояния (FSM) для ввода данных
     dp.message.register(process_chat_id, AdminStates.waiting_chat_id)
     dp.message.register(process_register, AdminStates.waiting_register)
 
+    # 4. Регистрируем все callback-кнопки (инлайн)
     dp.callback_query.register(callback_done, F.data.startswith("done:"))
     dp.callback_query.register(callback_retry, F.data.startswith("retry:"))
     dp.callback_query.register(callback_toggle_reminders, F.data == "toggle_reminders")
@@ -1430,17 +1434,12 @@ async def main():
     dp.callback_query.register(callback_show_procedura_list, F.data == "show_procedura_list")
     dp.callback_query.register(callback_back_settings, F.data == "back_settings")
     dp.callback_query.register(callback_back_main, F.data == "back_main")
-    dp.message.register(cmd_settings, F.text == "⚙️ Настройки")
-    dp.message.register(process_chat_id, AdminStates.waiting_chat_id)
-    dp.message.register(process_register, AdminStates.waiting_register)
-    # Регистрируем зрение (ловит сообщения с типом photo)
-    dp.message.register(handle_photo, F.photo)
-    # ВОТ СЮДА: регистрируем ИИ-болталку последней, чтобы она перехватывала обычный текст
-    dp.message.register(handle_ai_chat, F.text)
-    dp.message.register(cmd_getchatid, Command("chatid"))
-    # Регистрация генератора картинок
-    dp.message.register(handle_ai_chat, F.text) # Эта строка должна остаться самой последней!
 
+    # 5. Регистрируем зрение для фоток
+    dp.message.register(handle_photo, F.photo)
+
+    # 6. В САМОМ КОНЦЕ регистрируем ИИ-болталку (она ловит любой оставшийся текст)
+    dp.message.register(handle_ai_chat, F.text)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(send_svodki_reminder, CronTrigger(hour=18, minute=0, timezone=TIMEZONE), args=[bot])
