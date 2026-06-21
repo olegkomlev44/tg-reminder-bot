@@ -141,7 +141,7 @@ async def get_ai_header(person, duty_type):
     
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.5-flash',
             contents=prompt
         )
         return response.text.strip() if response.text else None
