@@ -133,7 +133,6 @@ AI_SYSTEM_PROMPT = (
 )
 
 async def get_ai_header(person, duty_type):
-    # Эта функция остается без изменений
     if not gemini_client: return None
     
     duty_name = "сводки" if duty_type == "svodki" else "процедурку"
@@ -141,7 +140,7 @@ async def get_ai_header(person, duty_type):
     
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-3.5-flash', # <--- Обновили модель
             contents=prompt
         )
         return response.text.strip() if response.text else None
@@ -149,14 +148,13 @@ async def get_ai_header(person, duty_type):
         logger.error(f"Ошибка Gemini при генерации заголовка: {e}")
         return None
 
+        
 async def handle_ai_chat(message: types.Message):
     if not gemini_client: return
     
-    # Игнорируем команды и кнопки меню
     if message.text.startswith('/') or message.text in ["📋 Наряд сегодня", "📅 Наряд завтра", "📊 Расписание на неделю", "📓 Журнал", "🔔 Напомнить сейчас", "⚙️ Настройки"]:
         return
 
-    # Отвечаем, только если реплайнули самого бота
     bot_user = await message.bot.me()
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
     
@@ -166,37 +164,33 @@ async def handle_ai_chat(message: types.Message):
 
     user_id = message.from_user.id
 
-    # Создаем сессию, если её нет
     if user_id not in USER_CHATS:
-        # Включаем встроенный поиск в Google (Google Search Grounding)
         config = genai_types.GenerateContentConfig(
             system_instruction=AI_SYSTEM_PROMPT,
             tools=[{"google_search": {}}] 
         )
         USER_CHATS[user_id] = gemini_client.aio.chats.create(
-            model='gemini-3.5-flash',
+            model='gemini-3.5-flash', # <--- Обновили модель
             config=config
         )
 
     chat_session = USER_CHATS[user_id]
 
-    # Достаем актуальных дежурных из твоего расписания
     today = date.today()
     sv_today = get_svodki_person(today)
     pr_today = get_procedura_person(today)
 
-    # Формируем скрытый контекст для нейросети
     hidden_context = f"[Системная справка: сегодня дежурный по сводкам — {sv_today}, дежурный по процедурке — {pr_today}.] "
     full_message = hidden_context + message.text
 
     try:
-        # Отправляем сообщение вместе с подмешанными данными
         response = await chat_session.send_message(full_message)
         await message.reply(response.text)
     except Exception as e:
         logger.error(f"Ошибка Gemini в чате: {e}")
         USER_CHATS.pop(user_id, None)
-        await message.reply("Мои процессоры перегрелись от поиска ответов. Я сбросил кэш, давай начнем тему заново. 🤖")
+        # <--- Теперь выводим точную причину сбоя
+        await message.reply(f"❌ Ошибка Google API (Чат):\n`{e}`")
 
 # ══════════════════════════════════════════════
 #  ФРАЗЫ И ПРОЧИЕ ДАННЫЕ (сохранены без изменений)
