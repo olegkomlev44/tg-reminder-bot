@@ -1132,42 +1132,81 @@ async def cmd_getchatid(message: types.Message):
     sent = await message.answer(f"📍 *id этого чата:*\n`{message.chat.id}`\n\nскопируй и вставь в настройки", parse_mode="Markdown")
     await auto_delete_later(message.bot, message.chat.id, sent.message_id, 30)
     
-async def cmd_generate_image(message: types.Message):
-    # Удаляем команду пользователя
+async def cmd_pollinations(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
 
-    prompt = message.text.replace("/img", "").strip()
+    prompt = message.text.replace("/poll", "").strip()
     if not prompt:
-        sent = await message.answer("🎨 Напиши, что нарисовать (лучше на английском).\nПример: `/img Pudge hooking Juggernaut, realistic, Unreal Engine 5`", parse_mode="Markdown")
+        sent = await message.answer("🎨 Напиши, что нарисовать.\nПример: `/poll cyberpunk city in neon lights`", parse_mode="Markdown")
         await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
         return
 
-    status_msg = await message.answer("🎨 Заряжаю нейронные шестеренки, рисую... (займет 5-10 секунд)")
+    status_msg = await message.answer("🎨 Рисую через Pollinations (бесплатно, без лимитов)...")
 
     try:
-        # Кодируем текст для URL и добавляем случайный сид, чтобы картинки не кешировались
         safe_prompt = urllib.parse.quote(prompt)
         seed = random.randint(1, 9999999)
         url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=1024&nologo=true&seed={seed}"
 
-        # Скачиваем картинку напрямую с сервера генерации
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 if resp.status == 200:
                     image_bytes = await resp.read()
                     photo = BufferedInputFile(image_bytes, filename="pollinations_art.jpg")
-                    await message.answer_photo(photo, caption=f"🎨 {prompt}")
+                    await message.answer_photo(photo, caption=f"🎨 **Pollinations:** {prompt}", parse_mode="Markdown")
                 else:
-                    await message.answer(f"❌ Сервер художников сейчас перегружен (ошибка {resp.status})")
+                    await message.answer(f"❌ Сервер Pollinations перегружен (ошибка {resp.status})")
 
     except Exception as e:
-        logger.error(f"Ошибка бесплатной генерации картинки: {e}")
+        logger.error(f"Ошибка Pollinations: {e}")
         await message.answer(f"❌ Что-то пошло не так: `{e}`")
     finally:
         try:
             await status_msg.delete()
         except:
             pass
+
+async def cmd_imagen(message: types.Message):
+    if not gemini_client: return
+
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+
+    prompt = message.text.replace("/imagen", "").strip()
+    if not prompt:
+        sent = await message.answer("✨ Напиши, что нарисовать мощной нейросетью.\nПример: `/imagen фотореалистичный космонавт на Марсе`", parse_mode="Markdown")
+        await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
+        return
+
+    status_msg = await message.answer("✨ Заряжаю Google Imagen 4 Ultra...")
+
+    try:
+        # Внимание: если гугл выдаст 404, проверь точное название модели в документации
+        # Возможно, оно пишется как 'imagen-4.0-ultra-generate-001' или похоже
+        result = await gemini_client.aio.models.generate_images(
+            model='imagen-4.0-ultra-generate', 
+            prompt=prompt,
+            config=genai_types.GenerateImagesConfig(
+                number_of_images=1,
+                output_mime_type="image/jpeg",
+                aspect_ratio="1:1"
+            )
+        )
+
+        generated_image = result.generated_images[0]
+        image_bytes = generated_image.image.image_bytes
+        
+        photo = BufferedInputFile(image_bytes, filename="imagen_art.jpg")
+        await message.answer_photo(photo, caption=f"✨ **Imagen 4:** {prompt}", parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Ошибка генерации картинки Imagen: {e}")
+        await message.answer(f"❌ Ошибка Google API:\n`{e}`")
+    finally:
+        try:
+            await status_msg.delete()
+        except:
+            pass
+
 
 # ── НАСТРОЙКИ ──
 async def callback_toggle_reminders(callback: types.CallbackQuery):
@@ -1371,7 +1410,8 @@ async def main():
 
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
-    dp.message.register(cmd_generate_image, Command("img"))
+    dp.message.register(cmd_pollinations, Command("poll"))
+    dp.message.register(cmd_imagen, Command("imagen"))
     dp.message.register(cmd_meme, Command("meme"))
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
     dp.message.register(cmd_tomorrow, F.text == "📅 Наряд завтра")
