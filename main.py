@@ -142,7 +142,7 @@ async def get_ai_header(person, duty_type):
     
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-3.5-flash', # <--- Обновили модель
+            model='gemini-2.5-flash', # <--- Обновили модель
             contents=prompt
         )
         return response.text.strip() if response.text else None
@@ -163,7 +163,7 @@ async def get_weather_advice():
     try:
         # Разрешаем нейросети сходить в реальный интернет
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-1.5-flash', 
+            model='gemini-2.5-flash', 
             contents=prompt,
             config=genai_types.GenerateContentConfig(
                 tools=[{"google_search": {}}]
@@ -214,7 +214,7 @@ async def handle_ai_chat(message: types.Message):
             tools=[{"google_search": {}}] 
         )
         USER_CHATS[user_id] = gemini_client.aio.chats.create(
-            model='gemini-3.5-flash', # <--- Ставим твою 3.5 Flash!
+            model='gemini-2.5-flash', # <--- Ставим твою 3.5 Flash!
             config=config
         )
 
