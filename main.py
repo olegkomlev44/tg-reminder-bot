@@ -214,7 +214,7 @@ async def handle_ai_chat(message: types.Message):
             tools=[{"google_search": {}}] 
         )
         USER_CHATS[user_id] = gemini_client.aio.chats.create(
-            model='gemini-2.5-flash', # <--- Ставим твою 3.5 Flash!
+            model='gemini-3.5-flash', # <--- Ставим твою 3.5 Flash!
             config=config
         )
 
