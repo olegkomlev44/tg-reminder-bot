@@ -1362,6 +1362,40 @@ async def cmd_meme(message: types.Message):
         except:
             pass
 
+async def cmd_tldr(message: types.Message):
+    if not gemini_client: return
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+
+    if len(CHAT_HISTORY) < 10:
+        sent = await message.answer("🥱 Чат слишком мертвый, даже обсуждать нечего. Нафлудите еще хоть немного.")
+        await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
+        return
+
+    status_msg = await message.answer("🧠 Читаю ваш бред за последнее время...")
+
+    chat_log = "\n".join(CHAT_HISTORY)
+    prompt = (
+        "Ты — токсичный зумер-бот. Вот лог последних сообщений из чата:\n\n"
+        f"{chat_log}\n\n"
+        "Сделай краткую выжимку (TL;DR) этого бреда. Что обсуждали, кто какую хуйню сморозил, кто кринжанул. "
+        "Пиши саркастично, используй разговорный мат и зумерский сленг (скуф, база, имба, нормис). "
+        "Максимум 3-4 предложения. Высмей участников чата."
+    )
+
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt
+        )
+        await message.answer(f"📜 *Саммари чата:*\n\n{response.text.strip()}", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Ошибка TL;DR: {e}")
+        await message.answer(f"❌ Нейроны перегрелись читать этот кринж:\n`{e}`")
+    finally:
+        try:
+            await status_msg.delete()
+        except:
+            pass
 
 async def handle_photo(message: types.Message):
     if not gemini_client: return
