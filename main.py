@@ -1149,6 +1149,75 @@ async def cmd_settings(message: types.Message):
     mood_lbl = get_mood_label()
     await message.answer(f"⚙️ *настройки*\n━━━━━━━━━━━━━━━━━━━━\n📍 чат: `{chat_txt}`\n🔔 напоминания: {enabled}\n🤷‍♀️ сводки сегодня: {sv_em} *{sv_now}*\n⚡️ процедурка сегодня: {pr_em} *{pr_now}*\n🪪 зарегистрировано: *{reg_count}* чел.\n🎭 настроение бота: *{mood_lbl}*\n━━━━━━━━━━━━━━━━━━━━", parse_mode="Markdown", reply_markup=settings_keyboard(data))
 
+async def handle_ai_chat(message: types.Message):
+    if not gemini_client: return
+    
+    # Игнорируем команды бота и кнопки меню
+    if message.text and (message.text.startswith('/') or message.text in ["📋 Наряд сегодня", "📅 Наряд завтра", "📊 Расписание на неделю", "📓 Журнал", "🔔 Напомнить сейчас", "⚙️ Настройки"]):
+        return
+
+    # ФИЧА 14: Записываем ВСЕ сообщения в историю для дайджеста
+    if message.text:
+        user_name = message.from_user.first_name or "Кто-то"
+        CHAT_HISTORY.append(f"{user_name}: {message.text}")
+
+    bot_user = await message.bot.me()
+    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot_user.id
+    
+    if not is_reply_to_bot: 
+        # ФИЧА 4: ПЕРСОНАЛЬНЫЙ ХЕЙТЕР (Шанс 5% доебаться до сообщения)
+        # Если хочешь, чтобы он отвечал чаще, поменяй 0.05 на 0.10 (10%)
+        if message.text and random.random() < 0.05:
+            await message.bot.send_chat_action(message.chat.id, "typing")
+            prompt = (
+                f"Пользователь {message.from_user.first_name} написал в чат: «{message.text}». "
+                "Жестко, токсично и смешно затролль его за это сообщение. "
+                "Используй зумерский сленг (кринж, скуф, база, дед инсайд) и органичный мат. "
+                "Отвечай коротко, 1-2 предложения, как токсичный кореш. Без приветствий."
+            )
+            try:
+                roast_resp = await gemini_client.aio.models.generate_content(
+                    model='gemini-1.5-flash',
+                    contents=prompt
+                )
+                if roast_resp.text:
+                    await message.reply(roast_resp.text.strip())
+            except Exception as e:
+                logger.error(f"Ошибка хейтера: {e}")
+        return
+
+    # Если это реплай боту — общаемся как обычно
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    user_id = message.from_user.id
+
+    if user_id not in USER_CHATS:
+        config = genai_types.GenerateContentConfig(
+            system_instruction=AI_SYSTEM_PROMPT,
+            tools=[{"google_search": {}}] 
+        )
+        USER_CHATS[user_id] = gemini_client.aio.chats.create(
+            model='gemini-1.5-flash',
+            config=config
+        )
+
+    chat_session = USER_CHATS[user_id]
+
+    today = date.today()
+    sv_today = get_svodki_person(today)
+    pr_today = get_procedura_person(today)
+
+    hidden_context = f"[Системная справка: сегодня дежурный по сводкам — {sv_today}, дежурный по процедурке — {pr_today}.] "
+    full_message = hidden_context + message.text
+
+    try:
+        response = await chat_session.send_message(full_message)
+        await message.reply(response.text)
+    except Exception as e:
+        logger.error(f"Ошибка Gemini в чате: {e}")
+        USER_CHATS.pop(user_id, None)
+        await message.reply(f"❌ Ошибка Google API (Чат):\n`{e}`")
+
 async def cmd_meme(message: types.Message):
     if not gemini_client: return
 
@@ -1636,6 +1705,7 @@ async def main():
     dp.message.register(cmd_pollinations, Command("poll"))
     dp.message.register(cmd_imagen, Command("imagen"))
     dp.message.register(cmd_meme, Command("meme"))
+    dp.message.register(cmd_tldr, Command("tldr"))
     # ДОБАВЛЯЕМ ПОГОДУ:
     dp.message.register(cmd_weather, Command("pogoda"))
 
