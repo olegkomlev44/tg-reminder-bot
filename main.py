@@ -16,6 +16,10 @@ from google import genai
 from google.genai import types as genai_types  # Импортируем типы ИИ безопасно
 # Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
 gemini_client = genai.Client()
+from collections import deque
+# Хранилище для Дайджеста (запоминает последние 150 сообщений)
+CHAT_HISTORY = deque(maxlen=150)
+
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
