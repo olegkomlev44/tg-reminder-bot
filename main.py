@@ -1327,7 +1327,7 @@ async def callback_download_music(callback: types.CallbackQuery):
             performer=track['artist'],
             title=track['title'],
             # Исправлено: если жанра нет, напишет "Неизвестен"
-            caption=f"🔥 Скачано через твоего ИИ-бро\n🎵 Жанр: {track.get('genre', 'Неизвестен')}",
+            caption=f"Dj Бах\n🎵 Жанр: {track.get('genre', 'Неизвестен')}",
             reply_markup=keyboard
         )
 
