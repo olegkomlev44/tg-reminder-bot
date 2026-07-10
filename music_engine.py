@@ -48,7 +48,6 @@ class MusicEngine:
     async def search_sc(self, query: str, limit: int = 5, offset: int = 0):
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
-            # Добавили offset для пагинации
             params = {"q": query, "limit": limit, "offset": offset, "client_id": cid, "app_version": "1735820463"}
             try:
                 async with session.get(f"{SC_API}/search/tracks", params=params, headers=SC_HEADERS) as resp:
@@ -59,7 +58,7 @@ class MusicEngine:
                         if not t.get("streamable"): continue
                         dur = t.get("duration", 0)
                         results.append({
-                            "id": t.get("id"),
+                            "id": str(t.get("id")),
                             "title": t.get("title", "Unknown"),
                             "artist": t.get("user", {}).get("username", "Unknown"),
                             "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
@@ -67,8 +66,38 @@ class MusicEngine:
                     return results
             except: return []
 
+    async def get_charts(self, limit: int = 5, offset: int = 0):
+        """Новая функция: получение популярных треков (чарты)"""
+        async with aiohttp.ClientSession() as session:
+            cid = await self.get_valid_cid(session)
+            params = {
+                "kind": "top",
+                "genre": "soundcloud:genres:all-music",
+                "limit": limit,
+                "offset": offset,
+                "client_id": cid
+            }
+            try:
+                async with session.get(f"{SC_API}/charts", params=params, headers=SC_HEADERS) as resp:
+                    if resp.status != 200: return []
+                    data = await resp.json()
+                    results = []
+                    for item in data.get("collection", []):
+                        t = item.get("track", {})
+                        if not t.get("streamable"): continue
+                        dur = t.get("duration", 0)
+                        results.append({
+                            "id": str(t.get("id")),
+                            "title": t.get("title", "Unknown"),
+                            "artist": t.get("user", {}).get("username", "Unknown"),
+                            "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
+                        })
+                    return results
+            except Exception as e:
+                logger.error(f"Chart error: {e}")
+                return []
+
     async def get_track_details(self, track_id: str) -> dict | None:
-        """Получает детали трека по track_id через SoundCloud API."""
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             url = f"https://api-v2.soundcloud.com/tracks/{track_id}?client_id={cid}"
