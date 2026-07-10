@@ -45,8 +45,7 @@ class MusicEngine:
     def invalidate_cid(self):
         self.dynamic_cid = None
 
-    async def search_sc(self, query: str, limit: int = 5):
-        async def search_sc(self, query: str, limit: int = 5, offset: int = 0):
+    async def search_sc(self, query: str, limit: int = 5, offset: int = 0):
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             # Добавили offset для пагинации
