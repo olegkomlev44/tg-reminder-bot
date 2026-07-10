@@ -1962,11 +1962,17 @@ async def main():
     dp.callback_query.register(callback_music_recs, F.data.startswith("rec_sc:"))
     async def callback_music_page(callback: types.CallbackQuery):
     # Данные приходят в виде mus_pg:запрос:номер_страницы
-    _, query, page = callback.data.split(":")
+    # Обязательно добавь отступ в 4 пробела перед этим кодом
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
+    _, query, page = parts
     await show_music_page(callback, query, int(page))
+    # ...
+    dp.callback_query.register(callback_music_page, F.data.startswith("mus_pg:"))
+    # ...
 
-# И в main() добавь регистрацию:
-dp.callback_query.register(callback_music_page, F.data.startswith("mus_pg:"))
+
 
 
 
