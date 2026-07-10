@@ -1326,9 +1326,11 @@ async def callback_download_music(callback: types.CallbackQuery):
             audio=audio_file,
             performer=track['artist'],
             title=track['title'],
-            caption=f"🔥 Скачано через твоего ИИ-бро\n🎵 Жанр: {track['genre']}",
+            # Исправлено: если жанра нет, напишет "Неизвестен"
+            caption=f"🔥 Скачано через твоего ИИ-бро\n🎵 Жанр: {track.get('genre', 'Неизвестен')}",
             reply_markup=keyboard
         )
+
         await status_msg.delete()
     except Exception as e:
         logger.error(f"Ошибка отправки аудио: {e}")
