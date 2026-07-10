@@ -1348,7 +1348,8 @@ async def callback_music_fav(callback: types.CallbackQuery):
         await callback.answer("❌ Трек сгорел в серверах SC", show_alert=True)
         return
         
-    success = save_music_fav(callback.fromuser.id if hasattr(callback, "fromuser") else callback.fromuser.id, {
+    # ИСПРАВЛЕНО: используем callback.from_user.id
+    success = save_music_fav(callback.from_user.id, {
         "id": track_id,
         "title": track['title'],
         "artist": track['artist']
