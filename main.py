@@ -13,11 +13,16 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import textwrap
 from aiogram.types import BufferedInputFile
-from music_engine import music_engine # Импортируем наш новый движок
-from google import genai
-from google.genai import types as genai_types  # Импортируем типы ИИ безопасно
-# Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
-gemini_client = genai.Client()
+from music_engine import music_engine, add_id3_tags  # движок + утилиты
+try:
+    from google import genai
+    from google.genai import types as genai_types
+    gemini_client = genai.Client()  # требует env GEMINI_API_KEY
+except Exception as _gemini_err:
+    genai = None
+    genai_types = None
+    gemini_client = None
+    logging.getLogger(__name__).warning(f'Gemini недоступен: {_gemini_err}')
 from collections import deque
 # Хранилище для Дайджеста (запоминает последние 150 сообщений)
 CHAT_HISTORY = deque(maxlen=150)
@@ -1244,7 +1249,6 @@ async def handle_ai_chat(message: types.Message):
 # ══════════════════════════════════════════════
 #  МУЗЫКАЛЬНЫЙ БЛОК (ПОИСК, СКАЧИВАНИЕ, ИЗБРАННОЕ)
 # ══════════════════════════════════════════════
-from music_engine import music_engine, add_id3_tags
 
 async def cmd_music_find(message: types.Message):
     if not gemini_client: return
@@ -1919,6 +1923,7 @@ async def main():
     # ДОБАВЛЯЕМ ПОГОДУ:
     dp.message.register(cmd_weather, Command("pogoda"))
 
+    
     # 2. Затем регистрируем все текстовые кнопки меню
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
     dp.message.register(cmd_tomorrow, F.text == "📅 Наряд завтра")
