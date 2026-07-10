@@ -1254,8 +1254,10 @@ async def cmd_music_find(message: types.Message):
     buttons = []
     for t in tracks:
         btn_text = f"🎵 {t['artist']} — {t['title']} [{t['duration']}]"
-        # Передаем ID трека в callback_data (ограничение Telegram - 64 байта)
-        cb_data = f"dl_sc:{t['id'][:40]}" 
+        # ИСПРАВЛЕНИЕ: сначала переводим ID в строку (текст), а потом обрезаем
+        track_id_str = str(t['id'])
+        cb_data = f"dl_sc:{track_id_str[:40]}" 
+        
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
