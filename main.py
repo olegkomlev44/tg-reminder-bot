@@ -1374,7 +1374,7 @@ async def callback_music_recs(callback: types.CallbackQuery):
     
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt
         )
         await callback.message.reply(f"🧠 *ИИ-Рекомендации по вайбу:*\n\n{response.text}", parse_mode="Markdown")
