@@ -1251,40 +1251,43 @@ async def handle_ai_chat(message: types.Message):
 # ══════════════════════════════════════════════
 
 async def cmd_music_find(message: types.Message):
-    if not gemini_client: return
-    
-    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
-
     query = message.text.replace("/find", "").strip()
     if not query:
-        sent = await message.answer("🎧 Напиши, что найти. Пример: `/find Rammstein Sonne`", parse_mode="Markdown")
-        await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
+        await message.answer("🎧 Что ищем? Пример: `/find Rammstein`", parse_mode="Markdown")
         return
+    # Сразу вызываем функцию генерации страницы (страница 0)
+    await show_music_page(message, query, 0)
 
-    status_msg = await message.answer(f"🔎 Ищу трек «{query}»...")
-
-    tracks = await music_engine.search_sc(query, limit=5)
+async def show_music_page(message_or_callback, query, page):
+    limit = 5
+    offset = page * limit
+    tracks = await music_engine.search_sc(query, limit=limit, offset=offset)
     
-    try:
-        await status_msg.delete()
-    except:
-        pass
-
     if not tracks:
-        await message.answer(f"❌ Ничего не найдено по запросу «{query}»")
+        await message_or_callback.answer("❌ Больше треков не найдено.")
         return
 
     buttons = []
     for t in tracks:
-        btn_text = f"🎵 {t['artist']} — {t['title']} [{t['duration']}]"
-        # Переводим ID в строку и обрезаем, чтобы не сломать инлайн-кнопку
-        track_id_str = str(t['id'])
-        cb_data = f"dl_sc:{track_id_str[:40]}" 
-        
+        btn_text = f"🎵 {t['artist']} — {t['title']}"
+        cb_data = f"dl_sc:{t['id']}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
     
+    # Кнопки навигации
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mus_pg:{query}:{page-1}"))
+    nav_buttons.append(InlineKeyboardButton(text=f"стр. {page+1}", callback_data="ignore"))
+    nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"mus_pg:{query}:{page+1}"))
+    buttons.append(nav_buttons)
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer(f"🎧 *Результаты поиска:*\n_Нажми на трек, чтобы скачать_", reply_markup=keyboard, parse_mode="Markdown")
+    text = f"🎧 *Поиск:* «{query}» (стр. {page+1})"
+    
+    if isinstance(message_or_callback, types.CallbackQuery):
+        await message_or_callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    else:
+        await message_or_callback.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def callback_download_music(callback: types.CallbackQuery):
@@ -1956,6 +1959,14 @@ async def main():
     dp.callback_query.register(callback_download_music, F.data.startswith("dl_sc:"))
     dp.callback_query.register(callback_music_fav, F.data.startswith("fav_sc:"))
     dp.callback_query.register(callback_music_recs, F.data.startswith("rec_sc:"))
+    async def callback_music_page(callback: types.CallbackQuery):
+    # Данные приходят в виде mus_pg:запрос:номер_страницы
+    _, query, page = callback.data.split(":")
+    await show_music_page(callback, query, int(page))
+
+# И в main() добавь регистрацию:
+dp.callback_query.register(callback_music_page, F.data.startswith("mus_pg:"))
+
 
 
     # 5. Регистрируем зрение для фоток
