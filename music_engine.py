@@ -147,7 +147,7 @@ class MusicEngine:
                 logger.error(f"🔴 Ошибка скачивания трека: {e}")
         return None
 
-    async def get_track_details(self, track_id: str) -> dict | None:
+        async def get_track_details(self, track_id: str) -> dict | None:
         """Получает детали трека по track_id через SoundCloud API."""
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
@@ -161,6 +161,8 @@ class MusicEngine:
                     if r.status != 200:
                         return None
                     data = await r.json()
+                    
+                    # Пытаемся достать stream_url
                     media = data.get("media", {})
                     transcodings = media.get("transcodings", [])
                     stream_url = None
@@ -171,6 +173,7 @@ class MusicEngine:
                             break
                     if not stream_url and transcodings:
                         stream_url = transcodings[0].get("url")
+                    
                     real_url = None
                     if stream_url:
                         try:
@@ -184,8 +187,11 @@ class MusicEngine:
                                     real_url = sdata.get("url")
                         except Exception:
                             pass
+                            
                     user = data.get("user", {})
                     artwork = (data.get("artwork_url") or "").replace("large", "t500x500")
+                    
+                    # ВОТ ЭТА ЧАСТЬ САМАЯ ВАЖНАЯ:
                     return {
                         "id":          str(data.get("id", "")),
                         "title":       data.get("title", "Unknown"),
@@ -194,10 +200,12 @@ class MusicEngine:
                         "stream_url":  real_url,
                         "artwork_url": artwork,
                         "permalink":   data.get("permalink_url", ""),
+                        "genre":       data.get("genre") or "Неизвестен" # Добавили жанр!
                     }
             except Exception as e:
                 logger.error(f"get_track_details error: {e}")
                 return None
+
 
     async def download_file(self, url: str | None) -> bytes | None:
         """Скачивает файл по URL и возвращает байты. None при ошибке."""
