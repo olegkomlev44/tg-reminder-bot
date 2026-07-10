@@ -46,9 +46,11 @@ class MusicEngine:
         self.dynamic_cid = None
 
     async def search_sc(self, query: str, limit: int = 5):
+        async def search_sc(self, query: str, limit: int = 5, offset: int = 0):
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
-            params = {"q": query, "limit": limit, "client_id": cid, "app_version": "1735820463"}
+            # Добавили offset для пагинации
+            params = {"q": query, "limit": limit, "offset": offset, "client_id": cid, "app_version": "1735820463"}
             try:
                 async with session.get(f"{SC_API}/search/tracks", params=params, headers=SC_HEADERS) as resp:
                     if resp.status != 200: return []
