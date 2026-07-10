@@ -1185,7 +1185,7 @@ async def handle_ai_chat(message: types.Message):
             )
             try:
                 roast_resp = await gemini_client.aio.models.generate_content(
-                    model='gemini-1.5-flash',
+                    model='gemini-2.5-flash',
                     contents=prompt
                 )
                 if roast_resp.text:
@@ -1471,7 +1471,7 @@ async def cmd_tldr(message: types.Message):
 
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt
         )
         await message.answer(f"📜 *Саммари чата:*\n\n{response.text.strip()}", parse_mode="Markdown")
