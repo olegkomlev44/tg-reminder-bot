@@ -569,6 +569,21 @@ def get_total_duties(name):
     counts = data.get("duty_counts", {}).get(name, {})
     return counts.get("svodki", 0) + counts.get("proc", 0)
 
+def save_music_fav(user_id, track_info):
+    data = load_data()
+    favs = data.setdefault("music_favs", {})
+    user_favs = favs.setdefault(str(user_id), [])
+    
+    # Проверяем, нет ли уже такого трека (защита от дублей)
+    if not any(t['id'] == track_info['id'] for t in user_favs):
+        user_favs.append(track_info)
+        save_data(data)
+        return True
+    return False
+
+def get_music_favs(user_id):
+    return load_data().get("music_favs", {}).get(str(user_id), [])
+
 # ══════════════════════════════════════════════
 #  НАСТРОЕНИЕ ДНЯ
 # ══════════════════════════════════════════════
@@ -1226,6 +1241,11 @@ async def handle_ai_chat(message: types.Message):
         USER_CHATS.pop(user_id, None)
         await message.reply(f"❌ Ошибка Google API (Чат):\n`{e}`")
 
+# ══════════════════════════════════════════════
+#  МУЗЫКАЛЬНЫЙ БЛОК (ПОИСК, СКАЧИВАНИЕ, ИЗБРАННОЕ)
+# ══════════════════════════════════════════════
+from music_engine import music_engine, add_id3_tags
+
 async def cmd_music_find(message: types.Message):
     if not gemini_client: return
     
@@ -1250,11 +1270,10 @@ async def cmd_music_find(message: types.Message):
         await message.answer(f"❌ Ничего не найдено по запросу «{query}»")
         return
 
-    # Создаем инлайн клавиатуру с найденными треками
     buttons = []
     for t in tracks:
         btn_text = f"🎵 {t['artist']} — {t['title']} [{t['duration']}]"
-        # ИСПРАВЛЕНИЕ: сначала переводим ID в строку (текст), а потом обрезаем
+        # Переводим ID в строку и обрезаем, чтобы не сломать инлайн-кнопку
         track_id_str = str(t['id'])
         cb_data = f"dl_sc:{track_id_str[:40]}" 
         
@@ -1263,54 +1282,116 @@ async def cmd_music_find(message: types.Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer(f"🎧 *Результаты поиска:*\n_Нажми на трек, чтобы скачать_", reply_markup=keyboard, parse_mode="Markdown")
 
+
 async def callback_download_music(callback: types.CallbackQuery):
     track_id = callback.data.split(":")[1]
     
-    await callback.answer("⬇️ Скачиваю трек... Это займет пару секунд.", show_alert=False)
-    status_msg = await callback.message.answer("⏳ Загружаю аудиофайл с серверов...")
+    await callback.answer("⬇️ Вшиваю обложку и качаю трек...", show_alert=False)
+    status_msg = await callback.message.answer("⏳ Собираю битрейт и теги...")
 
-    # 1. Получаем ссылку на mp3
-    stream_url = await music_engine.get_sc_stream_url(track_id)
-    if not stream_url:
+    # 1. Получаем всю инфу о треке
+    track = await music_engine.get_track_details(track_id)
+    if not track or not track['stream_url']:
         await status_msg.edit_text("❌ Ошибка: не удалось получить поток трека.")
         return
 
-    # 2. Скачиваем трек в оперативную память
-    audio_bytes = await music_engine.download_track(stream_url)
+    # 2. Скачиваем аудио и HD-обложку параллельно
+    audio_bytes, cover_bytes = await asyncio.gather(
+        music_engine.download_file(track['stream_url']),
+        music_engine.download_file(track['artwork_url'])
+    )
+
     if not audio_bytes:
         await status_msg.edit_text("❌ Ошибка при скачивании файла.")
         return
 
-    # 3. Отправляем в чат
-    try:
-        # Пытаемся вытащить имя артиста и трека из текста кнопки
-        btn_text = ""
-        for row in callback.message.reply_markup.inline_keyboard:
-            for btn in row:
-                if btn.callback_data == callback.data:
-                    btn_text = btn.text
-                    break
-        
-        # Парсим текст кнопки "🎵 Artist — Title [03:00]"
-        performer, title = "Unknown", "Unknown"
-        if "—" in btn_text:
-            parts = btn_text.replace("🎵 ", "").split("—")
-            performer = parts[0].strip()
-            title = parts[1].rsplit("[", 1)[0].strip()
+    # 3. Вшиваем ID3-теги и обложку прямо в память
+    audio_bytes = add_id3_tags(audio_bytes, track['title'], track['artist'], cover_bytes)
 
-        audio_file = BufferedInputFile(audio_bytes, filename=f"{title}.mp3")
-        
+    # 4. Создаем кнопки под скачанным аудиофайлом
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="❤️ В избранное", callback_data=f"fav_sc:{track_id}"),
+            InlineKeyboardButton(text="🧠 Что еще послушать?", callback_data=f"rec_sc:{track_id}")
+        ]
+    ])
+
+    try:
+        audio_file = BufferedInputFile(audio_bytes, filename=f"{track['title']}.mp3")
         await callback.message.answer_audio(
             audio=audio_file,
-            performer=performer,
-            title=title,
-            caption="🔥 Скачано через твоего ИИ-бро"
+            performer=track['artist'],
+            title=track['title'],
+            caption=f"🔥 Скачано через твоего ИИ-бро\n🎵 Жанр: {track['genre']}",
+            reply_markup=keyboard
         )
         await status_msg.delete()
     except Exception as e:
         logger.error(f"Ошибка отправки аудио: {e}")
-        await status_msg.edit_text(f"❌ Нейроны не справились с отправкой файла: {e}")
+        await status_msg.edit_text(f"❌ Нейроны не справились: {e}")
 
+
+async def callback_music_fav(callback: types.CallbackQuery):
+    track_id = callback.data.split(":")[1]
+    track = await music_engine.get_track_details(track_id)
+    
+    if not track:
+        await callback.answer("❌ Трек сгорел в серверах SC", show_alert=True)
+        return
+        
+    success = save_music_fav(callback.fromuser.id if hasattr(callback, "from_user") else callback.from_user.id, {
+        "id": track_id,
+        "title": track['title'],
+        "artist": track['artist']
+    })
+    
+    if success:
+        await callback.answer("❤️ Сохранено! Пиши /my_music чтобы послушать.", show_alert=True)
+    else:
+        await callback.answer("🤡 Ты уже добавил этот трек, нормис.", show_alert=True)
+
+
+async def callback_music_recs(callback: types.CallbackQuery):
+    track_id = callback.data.split(":")[1]
+    await callback.answer("🧠 Нейросеть анализирует вайб...", show_alert=False)
+    
+    track = await music_engine.get_track_details(track_id)
+    if not track:
+        return
+        
+    prompt = (
+        f"Пользователь скачал трек: {track['artist']} — {track['title']} (Жанр: {track['genre']}). "
+        "Посоветуй 5 реально годных, похожих по стилю и вайбу треков. "
+        "Отвечай коротко, в стиле токсичного зумерского бота (используй сленг типа база, имба, нормис). "
+        "Выдай просто нумерованный список: Исполнитель - Трек."
+    )
+    
+    try:
+        response = await gemini_client.aio.models.generate_content(
+            model='gemini-3.5-flash',
+            contents=prompt
+        )
+        await callback.message.reply(f"🧠 *ИИ-Рекомендации по вайбу:*\n\n{response.text}", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Ошибка реков: {e}")
+        await callback.message.reply("❌ Процессоры перегрелись, рекомендации отменяются.")
+
+
+async def cmd_my_music(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+    
+    favs = get_music_favs(message.from_user.id)
+    if not favs:
+        sent = await message.answer("💀 Твой плейлист пуст как твоя личная жизнь. Нажми ❤️ под любым скачанным треком.")
+        await auto_delete_later(message.bot, message.chat.id, sent.message_id, 15)
+        return
+        
+    lines = ["🎧 *Твоя база (Избранное):*"]
+    for i, f in enumerate(favs, 1):
+        lines.append(f"{i}. *{f['artist']}* — {f['title']}")
+        
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+ 
 async def cmd_meme(message: types.Message):
     if not gemini_client: return
 
@@ -1834,7 +1915,7 @@ async def main():
     dp.message.register(cmd_meme, Command("meme"))
     dp.message.register(cmd_tldr, Command("tldr"))
     dp.message.register(cmd_music_find, Command("find"))
-
+    dp.message.register(cmd_my_music, Command("my_music"))
     # ДОБАВЛЯЕМ ПОГОДУ:
     dp.message.register(cmd_weather, Command("pogoda"))
 
@@ -1866,6 +1947,8 @@ async def main():
     dp.callback_query.register(callback_back_settings, F.data == "back_settings")
     dp.callback_query.register(callback_back_main, F.data == "back_main")
     dp.callback_query.register(callback_download_music, F.data.startswith("dl_sc:"))
+    dp.callback_query.register(callback_music_fav, F.data.startswith("fav_sc:"))
+    dp.callback_query.register(callback_music_recs, F.data.startswith("rec_sc:"))
 
 
     # 5. Регистрируем зрение для фоток
