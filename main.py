@@ -12,6 +12,8 @@ import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 import io
 import textwrap
+from aiogram.types import BufferedInputFile
+from music_engine import music_engine # Импортируем наш новый движок
 from google import genai
 from google.genai import types as genai_types  # Импортируем типы ИИ безопасно
 # Инициализируем клиента (ключ автоматически подтянется из переменных окружения, если назвать его GEMINI_API_KEY)
@@ -1222,6 +1224,89 @@ async def handle_ai_chat(message: types.Message):
         USER_CHATS.pop(user_id, None)
         await message.reply(f"❌ Ошибка Google API (Чат):\n`{e}`")
 
+async def cmd_music_find(message: types.Message):
+    if not gemini_client: return
+    
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+
+    query = message.text.replace("/find", "").strip()
+    if not query:
+        sent = await message.answer("🎧 Напиши, что найти. Пример: `/find Rammstein Sonne`", parse_mode="Markdown")
+        await auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
+        return
+
+    status_msg = await message.answer(f"🔎 Ищу трек «{query}»...")
+
+    tracks = await music_engine.search_sc(query, limit=5)
+    
+    try:
+        await status_msg.delete()
+    except:
+        pass
+
+    if not tracks:
+        await message.answer(f"❌ Ничего не найдено по запросу «{query}»")
+        return
+
+    # Создаем инлайн клавиатуру с найденными треками
+    buttons = []
+    for t in tracks:
+        btn_text = f"🎵 {t['artist']} — {t['title']} [{t['duration']}]"
+        # Передаем ID трека в callback_data (ограничение Telegram - 64 байта)
+        cb_data = f"dl_sc:{t['id'][:40]}" 
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer(f"🎧 *Результаты поиска:*\n_Нажми на трек, чтобы скачать_", reply_markup=keyboard, parse_mode="Markdown")
+
+async def callback_download_music(callback: types.CallbackQuery):
+    track_id = callback.data.split(":")[1]
+    
+    await callback.answer("⬇️ Скачиваю трек... Это займет пару секунд.", show_alert=False)
+    status_msg = await callback.message.answer("⏳ Загружаю аудиофайл с серверов...")
+
+    # 1. Получаем ссылку на mp3
+    stream_url = await music_engine.get_sc_stream_url(track_id)
+    if not stream_url:
+        await status_msg.edit_text("❌ Ошибка: не удалось получить поток трека.")
+        return
+
+    # 2. Скачиваем трек в оперативную память
+    audio_bytes = await music_engine.download_track(stream_url)
+    if not audio_bytes:
+        await status_msg.edit_text("❌ Ошибка при скачивании файла.")
+        return
+
+    # 3. Отправляем в чат
+    try:
+        # Пытаемся вытащить имя артиста и трека из текста кнопки
+        btn_text = ""
+        for row in callback.message.reply_markup.inline_keyboard:
+            for btn in row:
+                if btn.callback_data == callback.data:
+                    btn_text = btn.text
+                    break
+        
+        # Парсим текст кнопки "🎵 Artist — Title [03:00]"
+        performer, title = "Unknown", "Unknown"
+        if "—" in btn_text:
+            parts = btn_text.replace("🎵 ", "").split("—")
+            performer = parts[0].strip()
+            title = parts[1].rsplit("[", 1)[0].strip()
+
+        audio_file = BufferedInputFile(audio_bytes, filename=f"{title}.mp3")
+        
+        await callback.message.answer_audio(
+            audio=audio_file,
+            performer=performer,
+            title=title,
+            caption="🔥 Скачано через твоего ИИ-бро"
+        )
+        await status_msg.delete()
+    except Exception as e:
+        logger.error(f"Ошибка отправки аудио: {e}")
+        await status_msg.edit_text(f"❌ Нейроны не справились с отправкой файла: {e}")
+
 async def cmd_meme(message: types.Message):
     if not gemini_client: return
 
@@ -1744,6 +1829,8 @@ async def main():
     dp.message.register(cmd_imagen, Command("imagen"))
     dp.message.register(cmd_meme, Command("meme"))
     dp.message.register(cmd_tldr, Command("tldr"))
+    dp.message.register(cmd_music_find, Command("find"))
+
     # ДОБАВЛЯЕМ ПОГОДУ:
     dp.message.register(cmd_weather, Command("pogoda"))
 
@@ -1774,6 +1861,8 @@ async def main():
     dp.callback_query.register(callback_show_procedura_list, F.data == "show_procedura_list")
     dp.callback_query.register(callback_back_settings, F.data == "back_settings")
     dp.callback_query.register(callback_back_main, F.data == "back_main")
+    dp.callback_query.register(callback_download_music, F.data.startswith("dl_sc:"))
+
 
     # 5. Регистрируем зрение для фоток
     dp.message.register(handle_photo, F.photo)
