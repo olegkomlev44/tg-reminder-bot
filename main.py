@@ -153,7 +153,7 @@ async def get_ai_header(person, duty_type):
     prompt = f"Напиши ОДНУ короткую, смешную и дерзкую фразу (максимум 7-8 слов), чтобы напомнить дежурному по имени {person} выполнить наряд: {duty_name}. Начни с эмодзи. Без кавычек. Можно использовать отсылки к CS2, Dota 2 или Genshin Impact."
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt
         )
         return response.text.strip() if response.text else None
@@ -171,7 +171,7 @@ async def get_weather_advice():
     )
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-3.5-flash', 
+            model='gemini-2.5-flash', 
             contents=prompt,
             config=genai_types.GenerateContentConfig(tools=[{"google_search": {}}])
         )
@@ -852,7 +852,7 @@ async def handle_ai_chat(message: types.Message):
             )
             try:
                 roast_resp = await gemini_client.aio.models.generate_content(
-                    model='gemini-3.5-flash',
+                    model='gemini-2.5-flash',
                     contents=prompt
                 )
                 if roast_resp.text:
@@ -870,7 +870,7 @@ async def handle_ai_chat(message: types.Message):
             tools=[{"google_search": {}}] 
         )
         USER_CHATS[user_id] = gemini_client.aio.chats.create(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             config=config
         )
 
@@ -1035,7 +1035,7 @@ async def callback_music_recs(callback: types.CallbackQuery):
     )
     try:
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt
         )
         await callback.message.reply(f"🧠 *ИИ-Рекомендации по вайбу:*\n\n{response.text}", parse_mode="Markdown")
@@ -1087,7 +1087,7 @@ async def cmd_meme(message: types.Message):
             "Не пиши ничего кроме этих двух строк, никаких лишних символов."
         )
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=[img, prompt]
         )
         meme_text = response.text.replace('"', '').replace('\n', '').strip()
@@ -1169,7 +1169,7 @@ async def cmd_tldr(message: types.Message):
         "Максимум 3-4 предложения. Высмей участников чата."
     )
     try:
-        response = await gemini_client.aio.models.generate_content(model='gemini-3.5-flash', contents=prompt)
+        response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         await message.answer(f"📜 *Саммари чата:*\n\n{response.text.strip()}", parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Ошибка TL;DR: {e}")
@@ -1201,7 +1201,7 @@ async def handle_photo(message: types.Message):
             "Сохраняй саркастичный, геймерский тон. Если скинули фотку убранной комнаты — оцени качество уборки как строгий прапорщик."
         )
         response = await gemini_client.aio.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=[image, user_text],
             config=genai_types.GenerateContentConfig(system_instruction=system_prompt)
         )
