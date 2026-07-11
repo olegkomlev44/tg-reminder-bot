@@ -1034,7 +1034,7 @@ async def send_track_to_user(target_obj, track_id: str):
     clean_genre = re.sub(r'[^a-zA-Zа-яА-Я0-9\s]', '', genre_raw).strip().replace(" ", "_").lower()
     genre_tag = f"#{clean_genre}" if clean_genre and clean_genre != 'неизвестен' else "#music"
 
-        explicit = get_explicit_tag(track['title'])
+    explicit = get_explicit_tag(track['title'])
     
     # 2. ФОРМИРУЕМ текст с уже готовым хештегом и тегом Explicit
     caption = (
