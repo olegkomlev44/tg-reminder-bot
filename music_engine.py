@@ -73,13 +73,16 @@ class MusicEngine:
             params = {
                 "kind": "top",
                 "genre": "soundcloud:genres:all-music",
+                "high_tier_only": "false",  # Обязательный параметр для API v2 (без него чарты не отдаются)
                 "limit": limit,
                 "offset": offset,
                 "client_id": cid
             }
             try:
                 async with session.get(f"{SC_API}/charts", params=params, headers=SC_HEADERS) as resp:
-                    if resp.status != 200: return []
+                    if resp.status != 200: 
+                        logger.error(f"Charts API returned {resp.status}")
+                        return []
                     data = await resp.json()
                     results = []
                     for item in data.get("collection", []):
@@ -107,10 +110,18 @@ class MusicEngine:
                     data = await r.json()
                     
                     stream_url = None
+                    # ИЩЕМ ИМЕННО PROGRESSIVE! Если взять HLS, скачается текстовый m3u8 плейлист (битый mp3)
                     for tr in data.get("media", {}).get("transcodings", []):
-                        if tr.get("format", {}).get("mime_type") == "audio/mpeg":
+                        if tr.get("format", {}).get("protocol") == "progressive":
                             stream_url = tr.get("url")
                             break
+                    
+                    # Если progressive нет (бывает редко), пытаемся дёрнуть дефолтный стрим
+                    if not stream_url:
+                        for tr in data.get("media", {}).get("transcodings", []):
+                            if tr.get("format", {}).get("mime_type") == "audio/mpeg":
+                                stream_url = tr.get("url")
+                                break
                     
                     real_url = None
                     if stream_url:
@@ -136,9 +147,13 @@ class MusicEngine:
         if not url: return None
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(url, headers=SC_HEADERS) as r:
+                # ВАЖНО: Убираем SC_HEADERS для скачивания самого файла с CDN!
+                # Amazon CloudFront (где лежат файлы) блокирует запросы с заголовками от soundcloud.com.
+                async with session.get(url) as r:
                     return await r.read() if r.status == 200 else None
-            except: return None
+            except Exception as e: 
+                logger.error(f"File download error: {e}")
+                return None
 
 music_engine = MusicEngine()
 
