@@ -985,9 +985,9 @@ async def callback_music_page(callback: types.CallbackQuery):
     _, mode, query, page = parts
     query = "" if query == "none" else query
     await show_music_page(callback, mode, query, int(page))
-
+    
 async def send_track_to_user(target_obj, track_id: str):
-    """Универсальная функция отправки (для кнопок и инлайна). Поддерживает кэш и очередь."""
+    """Универсальная функция отправки. Поддерживает кэш, очередь и умные обложки."""
     is_callback = isinstance(target_obj, types.CallbackQuery)
     message = target_obj.message if is_callback else target_obj
 
@@ -1028,18 +1028,33 @@ async def send_track_to_user(target_obj, track_id: str):
             )
             return
         except Exception:
-            pass # Кэш протух, качаем заново
+            pass 
 
     status_msg = await message.answer("⏳ `[░░░░░░░░░░] 0% — Инициализация...`", parse_mode="Markdown")
     anim_task = asyncio.create_task(animate_loading(status_msg))
     
     async with DOWNLOAD_SEMAPHORE:
+        # УМНЫЕ ОБЛОЖКИ: Каскадный поиск
+        # 1. Пробуем найти студийную обложку в iTunes
+        final_cover_url = await music_engine.fetch_itunes_cover(track['artist'], track['title'])
+        
+        # 2. Если нет - берем родную из SoundCloud
+        if not final_cover_url:
+            final_cover_url = track.get('artwork_url')
+            
+        # 3. Если обложки нет вообще или это дефолтная заглушка — Генерим нейросетью!
+        if not final_cover_url or "default_avatar" in final_cover_url:
+            # Делаем промпт для ИИ, чтобы картинка подходила по вайбу (и добавляем рандомный seed)
+            safe_prompt = urllib.parse.quote(f"cool abstract aesthetic music album cover for {track['artist']} genre {track.get('genre', 'music')} without any text")
+            seed = random.randint(1, 999999)
+            final_cover_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1000&height=1000&nologo=true&seed={seed}"
+
         audio_bytes, cover_bytes = await asyncio.gather(
             music_engine.download_file(track['stream_url']),
-            music_engine.download_file(track['artwork_url'])
+            music_engine.download_file(final_cover_url)
         )
         
-        anim_task.cancel() # Останавливаем анимацию загрузки!
+        anim_task.cancel() 
 
         if not audio_bytes:
             await status_msg.edit_text("❌ Ошибка при скачивании файла.")
@@ -1055,12 +1070,16 @@ async def send_track_to_user(target_obj, track_id: str):
         )
 
         audio_bytes = add_id3_tags(audio_bytes, track['title'], track['artist'], cover_bytes)
+        
+        # Добавляем обложку как thumbnail, чтобы в ТГ она тоже красиво отображалась
         audio_file = BufferedInputFile(audio_bytes, filename=f"{track['title']}.mp3")
+        thumb_file = BufferedInputFile(cover_bytes, filename="cover.jpg") if cover_bytes else None
 
         try:
             sent_audio = await message.answer_audio(
                 audio=audio_file, performer=track['artist'], title=track['title'],
-                caption=caption, parse_mode="Markdown", reply_markup=keyboard
+                caption=caption, parse_mode="Markdown", reply_markup=keyboard,
+                thumbnail=thumb_file
             )
             save_cached_file_id(track_id, sent_audio.audio.file_id)
             await status_msg.delete()
