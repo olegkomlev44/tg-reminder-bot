@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import os
+import re
 import random
 import sys
 import tempfile
@@ -26,7 +27,14 @@ except Exception as _gemini_err:
 from collections import deque
 
 CHAT_HISTORY = deque(maxlen=150)
+    # Если кэша нет - запускаем анимацию и ставим в очередь (Фича 3)
+    status_msg = await message.answer("⏳ `[░░░░░░░░░░] 0% — Инициализация...`", parse_mode="Markdown")
+    anim_task = asyncio.create_task(animate_loading(status_msg))
+    
+async with DOWNLOAD_SEMAPHORE:
+
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(6) # Ограничитель: макс. 6 трека качаются одновременно
+
 
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, types, F
@@ -365,6 +373,21 @@ def get_procedura_idx(target_date):
     return (data["procedura_start_index"] + (target_date - start).days // 2) % len(PROCEDURA_LIST)
 
 def get_procedura_person(target_date): return PROCEDURA_LIST[get_procedura_idx(target_date)]
+
+async def animate_loading(message: types.Message):
+    """Интерактивная анимация прогресс-бара"""
+    frames = [
+        "⏳ `[▓░░░░░░░░░] 10% — Поиск потока...`",
+        "⏳ `[▓▓▓░░░░░░░] 30% — Извлечение битрейта...`",
+        "⏳ `[▓▓▓▓▓▓░░░░] 60% — Скачивание...`",
+        "⏳ `[▓▓▓▓▓▓▓▓░░] 80% — Вшиваем метаданные...`",
+        "⏳ `[▓▓▓▓▓▓▓▓▓▓] 99% — Подготовка к отправке...`"
+    ]
+    for frame in frames:
+        try:
+            await message.edit_text(frame, parse_mode="Markdown")
+            await asyncio.sleep(1.2)
+        except: pass
 
 def get_duty_day_number(target_date):
     data = load_data()
@@ -909,9 +932,9 @@ async def handle_ai_chat(message: types.Message):
         await message.reply(f"❌ Ошибка Google API (Чат):\n`{e}`")
 
 
-# ══════════════════════════════════════════════
-#  МУЗЫКА (ТЕПЕРЬ С ПАГИНАЦИЕЙ И ЧАРТАМИ)
-# ══════════════════════════════════════════════
+# ═════════════════════════════════════════════
+#  МУЗЫКА
+# ═════════════════════════════════════════════
 
 async def cmd_music_find(message: types.Message):
     query = message.text.replace("/find", "").strip()
@@ -948,14 +971,20 @@ async def show_music_page(message_or_callback, mode, query, page):
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
     
     nav_buttons = []
-    # Обрезаем query для callback_data (ограничение API Telegram 64 байта)
     safe_query = query[:25] if query else "none"
 
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mus_pg:{mode}:{safe_query}:{page-1}"))
-    nav_buttons.append(InlineKeyboardButton(text=f"стр. {page+1}", callback_data="ignore"))
-    nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"mus_pg:{mode}:{safe_query}:{page+1}"))
+        nav_buttons.append(InlineKeyboardButton(text="⏪", callback_data=f"mus_pg:{mode}:{safe_query}:{page-1}"))
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text=f"{page}", callback_data=f"mus_pg:{mode}:{safe_query}:{page-1}"))
+        
+    nav_buttons.append(InlineKeyboardButton(text=f"· {page+1} ·", callback_data="ignore"))
+    
+    nav_buttons.append(InlineKeyboardButton(text=f"{page+2}", callback_data=f"mus_pg:{mode}:{safe_query}:{page+1}"))
+    nav_buttons.append(InlineKeyboardButton(text="⏩", callback_data=f"mus_pg:{mode}:{safe_query}:{page+1}"))
+    
     buttons.append(nav_buttons)
+
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     
@@ -995,11 +1024,30 @@ async def send_track_to_user(target_obj, track_id: str):
         [InlineKeyboardButton(text="📝 Текст песни", callback_data=f"lyrics:{track_id}")]
     ])
 
-    caption = (
-        f"🎧 *{track['artist']} — {track['title']}*\n\n"
-        f"🎼 *Жанр:* {track.get('genre', 'Неизвестен')}\n"
-        f"⚡️ *Источник:* SoundCloud"
-    )
+    # Делаем кликабельный хештег из жанра (Фича 5)
+    genre_raw = track.get('genre', 'Неизвестен')
+    clean_genre = re.sub(r'[^a-zA-Zа-яА-Я0-9\s]', '', genre_raw).strip().replace(" ", "_").lower()
+    genre_tag = f"#{clean_genre}" if clean_genre and clean_genre != 'неизвестен' else "#music"
+
+            audio_bytes, cover_bytes = await asyncio.gather(
+            music_engine.download_file(track['stream_url']),
+            music_engine.download_file(track['artwork_url'])
+        )
+        anim_task.cancel() # Останавливаем анимацию загрузки!
+
+        if not audio_bytes:
+            await status_msg.edit_text("❌ Ошибка при скачивании файла.")
+            return
+            
+        # Метаданные для гиков (Фича 10)
+        mb_size = round(len(audio_bytes) / (1024 * 1024), 2)
+        geek_data = f"\n|| 💽 ID: {track_id} | 📦 {mb_size} MB | ⚙️ ~128 kbps ||"
+
+        caption = (
+            f"🎧 *{track['artist']} — {track['title']}*\n\n"
+            f"🎼 *Жанр:* {genre_tag}\n"
+            f"⚡️ *Источник:* SoundCloud{geek_data}"
+        )
 
     # 1. Отдаем моментально из кэша
     if cached_file_id:
@@ -1057,7 +1105,12 @@ async def callback_lyrics(callback: types.CallbackQuery):
         await callback.answer("❌ Текст для этого трека не найден.", show_alert=True)
         return
         
-    safe_lyrics = lyrics[:3900] + ("\n\n[...]" if len(lyrics) > 3900 else "")
+    # Выделяем [Припев], [Verse 1] и т.д. жирным шрифтом
+    safe_lyrics = re.sub(r'(\[.*?\])', r'*\1*', lyrics)
+    # Красивые разделители между куплетами
+    safe_lyrics = safe_lyrics.replace('\r\n\r\n', '\n\n').replace('\n\n', '\n\n❖ ❖ ❖\n\n')
+    
+    safe_lyrics = safe_lyrics[:3900] + ("\n\n[...]" if len(safe_lyrics) > 3900 else "")
     await callback.message.answer(f"📝 *{track['artist']} — {track['title']}*\n\n{safe_lyrics}", parse_mode="Markdown")
 
 async def callback_music_recs(callback: types.CallbackQuery):
@@ -1118,12 +1171,18 @@ async def cmd_my_music(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     favs = get_music_favs(message.from_user.id)
     if not favs:
-        sent = await message.answer("💀 Твой плейлист пуст как твоя личная жизнь. Нажми ❤️ под любым скачанным треком.")
+        sent = await message.answer("💀 Твой плейлист пуст. Нажми ❤️ под любым скачанным треком.")
         await auto_delete_later(message.bot, message.chat.id, sent.message_id, 15)
         return
-    lines = ["🎧 *Твоя база (Избранное):*"]
+        
+    lines = ["🎧 *Твоя база (Избранное):*\n```text"]
     for i, f in enumerate(favs, 1):
-        lines.append(f"{i}. *{f['artist']}* — {f['title']}")
+        num = str(i).zfill(2)
+        # Ограничиваем длину артиста, чтобы таблица не ломалась
+        artist_trunc = f['artist'][:12] + '...' if len(f['artist']) > 15 else f['artist']
+        lines.append(f"{num} | {artist_trunc:<15} | {f['title']}")
+    lines.append("```")
+    
     await message.answer("\n".join(lines), parse_mode="Markdown")
 
 async def inline_music_search(inline_query: types.InlineQuery):
@@ -1138,10 +1197,14 @@ async def inline_music_search(inline_query: types.InlineQuery):
         deep_link = f"https://t.me/{bot_user.username}?start=track_{t['id']}"
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Скачать трек", url=deep_link)]])
         results.append(
+        fallback_img = "https://i.imgur.com/8mX1wGg.png"
+        thumb = t.get('artwork_url') if t.get('artwork_url') else fallback_img
+        results.append(
             InlineQueryResultArticle(
                 id=str(t['id']),
                 title=f"{t['artist']} — {t['title']}",
                 description=f"Длительность: {t['duration']}",
+                thumbnail_url=thumb,
                 input_message_content=InputTextMessageContent(
                     message_text=f"🎧 Я нашел трек: *{t['artist']}* — {t['title']}\n\nЧтобы послушать и скачать, перейди в бота:",
                     parse_mode="Markdown"
@@ -1149,6 +1212,7 @@ async def inline_music_search(inline_query: types.InlineQuery):
                 reply_markup=keyboard
             )
         )
+        
     await inline_query.answer(results, cache_time=300)
 
 async def cmd_meme(message: types.Message):
