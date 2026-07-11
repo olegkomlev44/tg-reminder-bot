@@ -158,6 +158,26 @@ class MusicEngine:
                 async with session.get(url) as r:
                     return await r.read() if r.status == 200 else None
             except: return None
+                
+    async def fetch_itunes_cover(self, artist: str, title: str) -> str | None:
+        """Поиск официальной обложки альбома в iTunes (высокое качество)"""
+        # Чистим название от (Remix), (Bassboosted) и тд, чтобы iTunes лучше искал
+        clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
+        query = urllib.parse.quote(f"{artist} {clean_title}")
+        url = f"https://itunes.apple.com/search?term={query}&entity=song&limit=1"
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, timeout=3) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('resultCount', 0) > 0:
+                            img = data['results'][0].get('artworkUrl100', '')
+                            # Меняем мелкую картинку на HD качество
+                            return img.replace('100x100bb', '1000x1000bb')
+            except Exception as e:
+                logger.error(f"iTunes cover error: {e}")
+        return None
 
     async def fetch_lyrics(self, artist: str, title: str) -> str | None:
         """Поиск текста песни по API LRCLIB"""
