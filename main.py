@@ -1126,7 +1126,7 @@ async def cmd_my_music(message: types.Message):
         lines.append(f"{i}. *{f['artist']}* — {f['title']}")
     await message.answer("\n".join(lines), parse_mode="Markdown")
 
- async def inline_music_search(inline_query: types.InlineQuery):
+async def inline_music_search(inline_query: types.InlineQuery):
     query = inline_query.query.strip()
     if not query: return
     
