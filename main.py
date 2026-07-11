@@ -13,7 +13,7 @@ import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 import io
 import textwrap
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InlineQueryResultArticle, InputTextMessageContent
 from music_engine import music_engine, add_id3_tags  
 try:
     from google import genai
@@ -26,20 +26,14 @@ except Exception as _gemini_err:
     logging.getLogger(__name__).warning(f'Gemini недоступен: {_gemini_err}')
 from collections import deque
 
+# Хранилище для Дайджеста и ограничитель потоков скачивания
 CHAT_HISTORY = deque(maxlen=150)
-    # Если кэша нет - запускаем анимацию и ставим в очередь (Фича 3)
-    status_msg = await message.answer("⏳ `[░░░░░░░░░░] 0% — Инициализация...`", parse_mode="Markdown")
-    anim_task = asyncio.create_task(animate_loading(status_msg))
-    
-async with DOWNLOAD_SEMAPHORE:
-
-DOWNLOAD_SEMAPHORE = asyncio.Semaphore(6) # Ограничитель: макс. 6 трека качаются одновременно
-
+DOWNLOAD_SEMAPHORE = asyncio.Semaphore(6)
 
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile, InlineQueryResultArticle, InputTextMessageContent
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -201,7 +195,6 @@ async def cmd_weather(message: types.Message):
     else:
         await message.answer("❌ Метеостанция не отвечает. Выходи на свой страх и риск.")
 
-# Массивы пасхалок и сообщений (оставляю как были)
 SVODKI_HEADERS_BY_DAY = {
     0: ["📋 понедельник. сводки. страдания. погнали", "📋 начало недели, начало боли. твой черёд, дежурный", "📋 пн детектед. наряд активирован. сопротивление бесполезно"],
     1: ["📋 вторник. скучный день, но сводки яркие", "📋 не понедельник, но тоже не пятница. зато сводки"],
@@ -261,15 +254,12 @@ EASTER_EGGS = [
 
 DONE_REPLIES = ["✅ красава! записал, можешь выдыхать 🛋", "✅ зафиксировал. команда тобой гордится (наверное)"]
 DONE_REPLIES_GAMING = ["✅ ACE! сделано чисто, без вопросов 🎯", "✅ +50 XP начислено, левел ап скоро 🆙"]
-
 RETRY_PREFIX = ["⏰ эй, ты там живой? повторяю:", "⏰ второй звонок, не игнорируй:"]
 RETRY_PREFIX_GAMING = ["⏰ [RESPAWN] таймер истёк, возвращаю в игру:", "⏰ retry — round 2. вот снова:"]
-
 PERSONAL_SVODKI = ["эй {name} 👋 сегодня твои сводки. не забудь, ладно?"]
 PERSONAL_SVODKI_GAMING = ["{name}, твой quest активен: «Donesi Svodki». награда — спокойствие 🎮"]
 PERSONAL_PROC = ["эй {name} 🧹 вечером процедурка на тебе. не забей"]
 PERSONAL_PROC_GAMING = ["{name}, твой ultimate — уборка процедурки. cast его 🧹"]
-
 MONDAY_INTROS = ["☀️ доброе утро, страдальцы. новая неделя — новые наряды:"]
 SUNDAY_INTROS = ["🏆 итоги недели. кто вообще старался:"]
 
@@ -277,9 +267,10 @@ def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # Убеждаемся, что тумблер ИИ есть
             if "ai_random_replies_enabled" not in data:
                 data["ai_random_replies_enabled"] = True
+            if "track_cache" not in data:
+                data["track_cache"] = {}
             return data
             
     data = {
@@ -288,7 +279,7 @@ def load_data():
         "procedura_start_index": 0,
         "chat_id": CHAT_ID,
         "reminders_enabled": True,
-        "ai_random_replies_enabled": True, # Дефолт - случайные ответы ВКЛЮЧЕНЫ
+        "ai_random_replies_enabled": True,
         "personal_ids": {},
         "log": {},
         "pending_retry": {},
@@ -298,6 +289,7 @@ def load_data():
         "daily_mood": {},
         "last_svodki_msg_id": None,
         "last_proc_msg_id": None,
+        "track_cache": {}
     }
     save_data(data)
     return data
@@ -306,7 +298,6 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ДОБАВЬ ЭТИ ДВЕ ФУНКЦИИ СРАЗУ ПОСЛЕ def save_data(data):
 def get_cached_file_id(track_id):
     return load_data().get("track_cache", {}).get(str(track_id))
 
@@ -375,7 +366,6 @@ def get_procedura_idx(target_date):
 def get_procedura_person(target_date): return PROCEDURA_LIST[get_procedura_idx(target_date)]
 
 async def animate_loading(message: types.Message):
-    """Интерактивная анимация прогресс-бара"""
     frames = [
         "⏳ `[▓░░░░░░░░░] 10% — Поиск потока...`",
         "⏳ `[▓▓▓░░░░░░░] 30% — Извлечение битрейта...`",
@@ -788,14 +778,12 @@ async def send_sunday_summary(bot):
 async def daily_pinned_update(bot): await update_pinned_message(bot)
 
 async def cmd_start(message: types.Message):
-    # --- ДОБАВЛЕНО ДЛЯ INLINE ПОИСКА ---
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("track_"):
         track_id = args[1].replace("track_", "")
         await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
         await send_track_to_user(message, track_id)
         return
-    # -----------------------------------
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     start_text = (
         "👋 *Йоу! Я твой кибер-надзиратель и ИИ-кореш в одном лице.*\n\n"
@@ -882,7 +870,6 @@ async def handle_ai_chat(message: types.Message):
     ai_random_replies = data.get("ai_random_replies_enabled", True)
 
     if not is_reply_to_bot: 
-        # Шанс снижен до 2% и есть проверка настроек
         if ai_random_replies and message.text and random.random() < 0.02:
             await message.bot.send_chat_action(message.chat.id, "typing")
             prompt = (
@@ -984,7 +971,6 @@ async def show_music_page(message_or_callback, mode, query, page):
     nav_buttons.append(InlineKeyboardButton(text="⏩", callback_data=f"mus_pg:{mode}:{safe_query}:{page+1}"))
     
     buttons.append(nav_buttons)
-
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     
@@ -1024,32 +1010,16 @@ async def send_track_to_user(target_obj, track_id: str):
         [InlineKeyboardButton(text="📝 Текст песни", callback_data=f"lyrics:{track_id}")]
     ])
 
-    # Делаем кликабельный хештег из жанра (Фича 5)
     genre_raw = track.get('genre', 'Неизвестен')
     clean_genre = re.sub(r'[^a-zA-Zа-яА-Я0-9\s]', '', genre_raw).strip().replace(" ", "_").lower()
     genre_tag = f"#{clean_genre}" if clean_genre and clean_genre != 'неизвестен' else "#music"
 
-            audio_bytes, cover_bytes = await asyncio.gather(
-            music_engine.download_file(track['stream_url']),
-            music_engine.download_file(track['artwork_url'])
-        )
-        anim_task.cancel() # Останавливаем анимацию загрузки!
+    caption = (
+        f"🎧 *{track['artist']} — {track['title']}*\n\n"
+        f"🎼 *Жанр:* {genre_tag}\n"
+        f"⚡️ *Источник:* SoundCloud"
+    )
 
-        if not audio_bytes:
-            await status_msg.edit_text("❌ Ошибка при скачивании файла.")
-            return
-            
-        # Метаданные для гиков (Фича 10)
-        mb_size = round(len(audio_bytes) / (1024 * 1024), 2)
-        geek_data = f"\n|| 💽 ID: {track_id} | 📦 {mb_size} MB | ⚙️ ~128 kbps ||"
-
-        caption = (
-            f"🎧 *{track['artist']} — {track['title']}*\n\n"
-            f"🎼 *Жанр:* {genre_tag}\n"
-            f"⚡️ *Источник:* SoundCloud{geek_data}"
-        )
-
-    # 1. Отдаем моментально из кэша
     if cached_file_id:
         try:
             await message.answer_audio(
@@ -1060,20 +1030,29 @@ async def send_track_to_user(target_obj, track_id: str):
         except Exception:
             pass # Кэш протух, качаем заново
 
-    # 2. Если кэша нет - ставим в очередь
-    status_msg = await message.answer("⏳ Встал в очередь на скачивание (лимит 3 потока)...")
+    status_msg = await message.answer("⏳ `[░░░░░░░░░░] 0% — Инициализация...`", parse_mode="Markdown")
+    anim_task = asyncio.create_task(animate_loading(status_msg))
     
     async with DOWNLOAD_SEMAPHORE:
-        await status_msg.edit_text("⬇️ Качаю битрейт и вшиваю обложку...")
-        
         audio_bytes, cover_bytes = await asyncio.gather(
             music_engine.download_file(track['stream_url']),
             music_engine.download_file(track['artwork_url'])
         )
+        
+        anim_task.cancel() # Останавливаем анимацию загрузки!
 
         if not audio_bytes:
             await status_msg.edit_text("❌ Ошибка при скачивании файла.")
             return
+
+        mb_size = round(len(audio_bytes) / (1024 * 1024), 2)
+        geek_data = f"\n|| 💽 ID: {track_id} | 📦 {mb_size} MB | ⚙️ ~128 kbps ||"
+
+        caption = (
+            f"🎧 *{track['artist']} — {track['title']}*\n\n"
+            f"🎼 *Жанр:* {genre_tag}\n"
+            f"⚡️ *Источник:* SoundCloud{geek_data}"
+        )
 
         audio_bytes = add_id3_tags(audio_bytes, track['title'], track['artist'], cover_bytes)
         audio_file = BufferedInputFile(audio_bytes, filename=f"{track['title']}.mp3")
@@ -1105,9 +1084,7 @@ async def callback_lyrics(callback: types.CallbackQuery):
         await callback.answer("❌ Текст для этого трека не найден.", show_alert=True)
         return
         
-    # Выделяем [Припев], [Verse 1] и т.д. жирным шрифтом
     safe_lyrics = re.sub(r'(\[.*?\])', r'*\1*', lyrics)
-    # Красивые разделители между куплетами
     safe_lyrics = safe_lyrics.replace('\r\n\r\n', '\n\n').replace('\n\n', '\n\n❖ ❖ ❖\n\n')
     
     safe_lyrics = safe_lyrics[:3900] + ("\n\n[...]" if len(safe_lyrics) > 3900 else "")
@@ -1128,7 +1105,7 @@ async def callback_music_recs(callback: types.CallbackQuery):
     )
     
     try:
-        response = await gemini_client.aio.models.generate_content(model='gemini-3.5-flash', contents=prompt)
+        response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         clean_text = response.text.replace("```json", "").replace("```", "").strip()
         recs_list = json.loads(clean_text)
         
@@ -1178,7 +1155,6 @@ async def cmd_my_music(message: types.Message):
     lines = ["🎧 *Твоя база (Избранное):*\n```text"]
     for i, f in enumerate(favs, 1):
         num = str(i).zfill(2)
-        # Ограничиваем длину артиста, чтобы таблица не ломалась
         artist_trunc = f['artist'][:12] + '...' if len(f['artist']) > 15 else f['artist']
         lines.append(f"{num} | {artist_trunc:<15} | {f['title']}")
     lines.append("```")
@@ -1196,9 +1172,10 @@ async def inline_music_search(inline_query: types.InlineQuery):
     for t in tracks:
         deep_link = f"https://t.me/{bot_user.username}?start=track_{t['id']}"
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Скачать трек", url=deep_link)]])
-        results.append(
+        
         fallback_img = "https://i.imgur.com/8mX1wGg.png"
         thumb = t.get('artwork_url') if t.get('artwork_url') else fallback_img
+        
         results.append(
             InlineQueryResultArticle(
                 id=str(t['id']),
@@ -1417,7 +1394,7 @@ async def cmd_imagen(message: types.Message):
     status_msg = await message.answer("✨ Заряжаю Google Imagen 4 Ultra...")
     try:
         result = await gemini_client.aio.models.generate_images(
-            model='imagen-4.0-ultra', 
+            model='imagen-4.0-ultra-generate', 
             prompt=prompt,
             config=genai_types.GenerateImagesConfig(
                 number_of_images=1,
@@ -1637,7 +1614,7 @@ async def main():
     dp = Dispatcher(storage=storage)
 
     dp.inline_query.register(inline_music_search)
-    # 1. Регистрация всех команд
+    
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
     dp.message.register(cmd_pollinations, Command("poll"))
@@ -1645,11 +1622,10 @@ async def main():
     dp.message.register(cmd_meme, Command("meme"))
     dp.message.register(cmd_tldr, Command("tldr"))
     dp.message.register(cmd_music_find, Command("find"))
-    dp.message.register(cmd_charts, Command("charts")) # Новая команда для чартов
+    dp.message.register(cmd_charts, Command("charts"))
     dp.message.register(cmd_my_music, Command("my_music"))
     dp.message.register(cmd_weather, Command("pogoda"))
     
-    # 2. Регистрация кнопок меню
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
     dp.message.register(cmd_tomorrow, F.text == "📅 Наряд завтра")
     dp.message.register(cmd_week, F.text == "📊 Расписание на неделю")
@@ -1657,15 +1633,13 @@ async def main():
     dp.message.register(cmd_remind_now, F.text == "🔔 Напомнить сейчас")
     dp.message.register(cmd_settings, F.text == "⚙️ Настройки")
 
-    # 3. FSM
     dp.message.register(process_chat_id, AdminStates.waiting_chat_id)
     dp.message.register(process_register, AdminStates.waiting_register)
 
-    # 4. Все inline callback-кнопки (ПАГИНАЦИЯ ТЕПЕРЬ ТУТ)
     dp.callback_query.register(callback_done, F.data.startswith("done:"))
     dp.callback_query.register(callback_retry, F.data.startswith("retry:"))
     dp.callback_query.register(callback_toggle_reminders, F.data == "toggle_reminders")
-    dp.callback_query.register(callback_toggle_ai_replies, F.data == "toggle_ai_replies") # Новый тумблер
+    dp.callback_query.register(callback_toggle_ai_replies, F.data == "toggle_ai_replies")
     dp.callback_query.register(callback_set_chat, F.data == "set_chat")
     dp.callback_query.register(callback_register_personal, F.data == "register_personal")
     dp.callback_query.register(callback_update_pinned, F.data == "update_pinned")
@@ -1680,14 +1654,10 @@ async def main():
     dp.callback_query.register(callback_download_music, F.data.startswith("dl_sc:"))
     dp.callback_query.register(callback_music_fav, F.data.startswith("fav_sc:"))
     dp.callback_query.register(callback_music_recs, F.data.startswith("rec_sc:"))
-    dp.callback_query.register(callback_music_page, F.data.startswith("mus_pg:")) # Починенная пагинация
+    dp.callback_query.register(callback_music_page, F.data.startswith("mus_pg:"))
     dp.callback_query.register(callback_lyrics, F.data.startswith("lyrics:"))
 
-
-    # 5. Обработка фото
     dp.message.register(handle_photo, F.photo)
-
-    # 6. Текстовый хендлер (болталка ИИ)
     dp.message.register(handle_ai_chat, F.text)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
