@@ -1869,6 +1869,11 @@ async def main():
     dp.callback_query.register(callback_music_recs, F.data.startswith("rec_sc:"))
     dp.callback_query.register(callback_music_page, F.data.startswith("mus_pg:"))
     dp.callback_query.register(callback_lyrics, F.data.startswith("lyrics:"))
+    dp.callback_query.register(callback_show_favs, F.data.startswith("show_favs:"))
+    dp.callback_query.register(callback_show_hist, F.data.startswith("show_hist:"))
+    dp.callback_query.register(callback_back_to_dash, F.data == "back_to_dash")
+    dp.callback_query.register(callback_start_wave, F.data == "start_wave")
+    dp.callback_query.register(callback_radar, F.data == "radar_releases")
 
     dp.message.register(handle_photo, F.photo)
     dp.message.register(handle_ai_chat, F.text)
