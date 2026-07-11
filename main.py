@@ -1127,7 +1127,6 @@ async def cmd_my_music(message: types.Message):
     await message.answer("\n".join(lines), parse_mode="Markdown")
 
  async def inline_music_search(inline_query: types.InlineQuery):
-    """Глобальный инлайн-поиск музыки (в любом чате)"""
     query = inline_query.query.strip()
     if not query: return
     
