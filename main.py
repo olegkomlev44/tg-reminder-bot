@@ -26,11 +26,12 @@ except Exception as _gemini_err:
 from collections import deque
 
 CHAT_HISTORY = deque(maxlen=150)
+DOWNLOAD_SEMAPHORE = asyncio.Semaphore(6) # Ограничитель: макс. 6 трека качаются одновременно
 
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile, InlineQueryResultArticle, InputTextMessageContent
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -296,6 +297,15 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ДОБАВЬ ЭТИ ДВЕ ФУНКЦИИ СРАЗУ ПОСЛЕ def save_data(data):
+def get_cached_file_id(track_id):
+    return load_data().get("track_cache", {}).get(str(track_id))
+
+def save_cached_file_id(track_id, file_id):
+    data = load_data()
+    data.setdefault("track_cache", {})[str(track_id)] = file_id
+    save_data(data)
 
 def increment_count(name, duty_type):
     data = load_data()
@@ -755,6 +765,14 @@ async def send_sunday_summary(bot):
 async def daily_pinned_update(bot): await update_pinned_message(bot)
 
 async def cmd_start(message: types.Message):
+    # --- ДОБАВЛЕНО ДЛЯ INLINE ПОИСКА ---
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("track_"):
+        track_id = args[1].replace("track_", "")
+        await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+        await send_track_to_user(message, track_id)
+        return
+    # -----------------------------------
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     start_text = (
         "👋 *Йоу! Я твой кибер-надзиратель и ИИ-кореш в одном лице.*\n\n"
@@ -953,55 +971,131 @@ async def callback_music_page(callback: types.CallbackQuery):
     query = "" if query == "none" else query
     await show_music_page(callback, mode, query, int(page))
 
-async def callback_download_music(callback: types.CallbackQuery):
-    track_id = callback.data.split(":")[1]
-    await callback.answer("⬇️ Вшиваю обложку и качаю трек...", show_alert=False)
-    status_msg = await callback.message.answer("⏳ Собираю битрейт и теги...")
+async def send_track_to_user(target_obj, track_id: str):
+    """Универсальная функция отправки (для кнопок и инлайна). Поддерживает кэш и очередь."""
+    is_callback = isinstance(target_obj, types.CallbackQuery)
+    message = target_obj.message if is_callback else target_obj
 
+    if is_callback: await target_obj.answer("⏳ Проверяю базу...", show_alert=False)
+    
+    cached_file_id = get_cached_file_id(track_id)
     track = await music_engine.get_track_details(track_id)
-    if not track or not track['stream_url']:
-        await status_msg.edit_text("❌ Ошибка: не удалось получить поток трека.")
+    
+    if not track or not track.get('stream_url'):
+        err = "❌ Ошибка: не удалось получить поток трека (он удален или залочен)."
+        if is_callback: await message.answer(err)
+        else: await message.answer(err)
         return
-
-    audio_bytes, cover_bytes = await asyncio.gather(
-        music_engine.download_file(track['stream_url']),
-        music_engine.download_file(track['artwork_url'])
-    )
-
-    if not audio_bytes:
-        await status_msg.edit_text("❌ Ошибка при скачивании файла.")
-        return
-
-    audio_bytes = add_id3_tags(audio_bytes, track['title'], track['artist'], cover_bytes)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="❤️ В избранное", callback_data=f"fav_sc:{track_id}"),
-            InlineKeyboardButton(text="🧠 Похожее", callback_data=f"rec_sc:{track_id}")
-        ]
+            InlineKeyboardButton(text="🧠 Похожее (ИИ)", callback_data=f"rec_sc:{track_id}")
+        ],
+        [InlineKeyboardButton(text="📝 Текст песни", callback_data=f"lyrics:{track_id}")]
     ])
 
-    try:
-        # Улучшенная карточка трека
-        caption = (
-            f"🎧 *{track['artist']} — {track['title']}*\n\n"
-            f"🎼 *Жанр:* {track.get('genre', 'Неизвестен')}\n"
-            f"⚡️ *Источник:* SoundCloud"
-        )
+    caption = (
+        f"🎧 *{track['artist']} — {track['title']}*\n\n"
+        f"🎼 *Жанр:* {track.get('genre', 'Неизвестен')}\n"
+        f"⚡️ *Источник:* SoundCloud"
+    )
+
+    # 1. Отдаем моментально из кэша
+    if cached_file_id:
+        try:
+            await message.answer_audio(
+                cached_file_id, performer=track['artist'], title=track['title'],
+                caption=caption, parse_mode="Markdown", reply_markup=keyboard
+            )
+            return
+        except Exception:
+            pass # Кэш протух, качаем заново
+
+    # 2. Если кэша нет - ставим в очередь
+    status_msg = await message.answer("⏳ Встал в очередь на скачивание (лимит 3 потока)...")
+    
+    async with DOWNLOAD_SEMAPHORE:
+        await status_msg.edit_text("⬇️ Качаю битрейт и вшиваю обложку...")
         
-        audio_file = BufferedInputFile(audio_bytes, filename=f"{track['title']}.mp3")
-        await callback.message.answer_audio(
-            audio=audio_file,
-            performer=track['artist'],
-            title=track['title'],
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=keyboard
+        audio_bytes, cover_bytes = await asyncio.gather(
+            music_engine.download_file(track['stream_url']),
+            music_engine.download_file(track['artwork_url'])
         )
-        await status_msg.delete()
+
+        if not audio_bytes:
+            await status_msg.edit_text("❌ Ошибка при скачивании файла.")
+            return
+
+        audio_bytes = add_id3_tags(audio_bytes, track['title'], track['artist'], cover_bytes)
+        audio_file = BufferedInputFile(audio_bytes, filename=f"{track['title']}.mp3")
+
+        try:
+            sent_audio = await message.answer_audio(
+                audio=audio_file, performer=track['artist'], title=track['title'],
+                caption=caption, parse_mode="Markdown", reply_markup=keyboard
+            )
+            save_cached_file_id(track_id, sent_audio.audio.file_id)
+            await status_msg.delete()
+        except Exception as e:
+            logger.error(f"Ошибка отправки аудио: {e}")
+            await status_msg.edit_text(f"❌ Телеграм отказался принимать файл: {e}")
+
+async def callback_download_music(callback: types.CallbackQuery):
+    track_id = callback.data.split(":")[1]
+    await send_track_to_user(callback, track_id)
+
+async def callback_lyrics(callback: types.CallbackQuery):
+    track_id = callback.data.split(":")[1]
+    await callback.answer("⏳ Ищу текст по базам...", show_alert=False)
+    
+    track = await music_engine.get_track_details(track_id)
+    if not track: return
+    
+    lyrics = await music_engine.fetch_lyrics(track['artist'], track['title'])
+    if not lyrics:
+        await callback.answer("❌ Текст для этого трека не найден.", show_alert=True)
+        return
+        
+    safe_lyrics = lyrics[:3900] + ("\n\n[...]" if len(lyrics) > 3900 else "")
+    await callback.message.answer(f"📝 *{track['artist']} — {track['title']}*\n\n{safe_lyrics}", parse_mode="Markdown")
+
+async def callback_music_recs(callback: types.CallbackQuery):
+    track_id = callback.data.split(":")[1]
+    await callback.answer("🧠 ИИ подбирает вайб...", show_alert=False)
+    status_msg = await callback.message.answer("⏳ Нейросеть генерирует плейлист...")
+    
+    track = await music_engine.get_track_details(track_id)
+    if not track: return
+        
+    prompt = (
+        f"Посоветуй 5 топовых треков, похожих по стилю и вайбу на: {track['artist']} — {track['title']}. "
+        "Выдай ТОЛЬКО валидный JSON-массив строк. Пример: [\"Artist 1 - Title 1\", \"Artist 2 - Title 2\"]. "
+        "Никакого лишнего текста, маркдауна или пояснений. Только чистый JSON."
+    )
+    
+    try:
+        response = await gemini_client.aio.models.generate_content(model='gemini-3.5-flash', contents=prompt)
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        recs_list = json.loads(clean_text)
+        
+        await status_msg.edit_text("🔍 Пробиваю треки ИИ по базе SoundCloud...")
+        buttons = []
+        
+        for q in recs_list[:5]:
+            search_res = await music_engine.search_sc(q, limit=1)
+            if search_res:
+                t = search_res[0]
+                buttons.append([InlineKeyboardButton(text=f"🎵 {t['artist']} — {t['title']}", callback_data=f"dl_sc:{t['id']}")])
+                
+        if buttons:
+            await status_msg.edit_text("🧠 *Умные рекомендации специально для тебя:*", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+        else:
+            await status_msg.edit_text("❌ ИИ выдал классные треки, но в SoundCloud их не оказалось.")
+            
     except Exception as e:
-        logger.error(f"Ошибка отправки аудио: {e}")
-        await status_msg.edit_text(f"❌ Нейроны не справились: {e}")
+        logger.error(f"Ошибка реков 2.0: {e}")
+        await status_msg.edit_text("❌ Процессоры перегрелись или ИИ выдал кривой формат.")
 
 async def callback_music_fav(callback: types.CallbackQuery):
     track_id = callback.data.split(":")[1]
@@ -1020,29 +1114,6 @@ async def callback_music_fav(callback: types.CallbackQuery):
     else:
         await callback.answer("🤡 Ты уже добавил этот трек, нормис.", show_alert=True)
 
-async def callback_music_recs(callback: types.CallbackQuery):
-    track_id = callback.data.split(":")[1]
-    await callback.answer("🧠 Нейросеть анализирует вайб...", show_alert=False)
-    
-    track = await music_engine.get_track_details(track_id)
-    if not track: return
-        
-    prompt = (
-        f"Пользователь скачал трек: {track['artist']} — {track['title']} (Жанр: {track['genre']}). "
-        "Посоветуй 5 реально годных, похожих по стилю и вайбу треков. "
-        "Отвечай коротко, в стиле токсичного зумерского бота (используй сленг типа база, имба, нормис). "
-        "Выдай просто нумерованный список: Исполнитель - Трек."
-    )
-    try:
-        response = await gemini_client.aio.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        await callback.message.reply(f"🧠 *ИИ-Рекомендации по вайбу:*\n\n{response.text}", parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Ошибка реков: {e}")
-        await callback.message.reply("❌ Процессоры перегрелись, рекомендации отменяются.")
-
 async def cmd_my_music(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     favs = get_music_favs(message.from_user.id)
@@ -1054,7 +1125,33 @@ async def cmd_my_music(message: types.Message):
     for i, f in enumerate(favs, 1):
         lines.append(f"{i}. *{f['artist']}* — {f['title']}")
     await message.answer("\n".join(lines), parse_mode="Markdown")
- 
+
+ async def inline_music_search(inline_query: types.InlineQuery):
+    """Глобальный инлайн-поиск музыки (в любом чате)"""
+    query = inline_query.query.strip()
+    if not query: return
+    
+    tracks = await music_engine.search_sc(query, limit=10)
+    results = []
+    bot_user = await inline_query.bot.me()
+    
+    for t in tracks:
+        deep_link = f"https://t.me/{bot_user.username}?start=track_{t['id']}"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Скачать трек", url=deep_link)]])
+        results.append(
+            InlineQueryResultArticle(
+                id=str(t['id']),
+                title=f"{t['artist']} — {t['title']}",
+                description=f"Длительность: {t['duration']}",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"🎧 Я нашел трек: *{t['artist']}* — {t['title']}\n\nЧтобы послушать и скачать, перейди в бота:",
+                    parse_mode="Markdown"
+                ),
+                reply_markup=keyboard
+            )
+        )
+    await inline_query.answer(results, cache_time=300)
+
 async def cmd_meme(message: types.Message):
     if not gemini_client: return
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
@@ -1476,6 +1573,7 @@ async def main():
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
+    dp.inline_query.register(inline_music_search)
     # 1. Регистрация всех команд
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
@@ -1520,6 +1618,8 @@ async def main():
     dp.callback_query.register(callback_music_fav, F.data.startswith("fav_sc:"))
     dp.callback_query.register(callback_music_recs, F.data.startswith("rec_sc:"))
     dp.callback_query.register(callback_music_page, F.data.startswith("mus_pg:")) # Починенная пагинация
+    dp.callback_query.register(callback_lyrics, F.data.startswith("lyrics:"))
+
 
     # 5. Обработка фото
     dp.message.register(handle_photo, F.photo)
