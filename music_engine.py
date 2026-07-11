@@ -3,6 +3,13 @@ import re
 import logging
 import struct
 import urllib.parse
+import asyncio
+import os
+import tempfile
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
 
 logger = logging.getLogger(__name__)
 
@@ -47,33 +54,64 @@ class MusicEngine:
         self.dynamic_cid = None
 
     async def search_sc(self, query: str, limit: int = 5, offset: int = 0):
+        """Мультиплатформенный поиск. Сначала SC, потом YouTube Music/VK"""
+        sc_results = []
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             params = {"q": query, "limit": limit, "offset": offset, "client_id": cid, "app_version": "1735820463"}
             try:
                 async with session.get(f"{SC_API}/search/tracks", params=params, headers=SC_HEADERS) as resp:
-                    if resp.status != 200: return []
-                    data = await resp.json()
-                    results = []
-                    for t in data.get("collection", []):
-                        if not t.get("streamable"): continue
-                        dur = t.get("duration", 0)
-                        
-                        # --- Твоя вставка с картинками ---
-                        artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
-                        artwork = artwork.replace("large", "t500x500") if artwork else ""
-                        
-                        results.append({
-                            "id": str(t.get("id")),
-                            "title": t.get("title", "Unknown"),
-                            "artist": t.get("user", {}).get("username", "Unknown"),
-                            "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
-                            "artwork_url": artwork  # ДОБАВЛЕНО ДЛЯ ПРЕВЬЮ
-                        })
-                    
-                    return results
-            except: return []
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for t in data.get("collection", []):
+                            if not t.get("streamable"): continue
+                            dur = t.get("duration", 0)
+                            artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
+                            artwork = artwork.replace("large", "t500x500") if artwork else ""
+                            sc_results.append({
+                                "id": str(t.get("id")),
+                                "title": t.get("title", "Unknown"),
+                                "artist": t.get("user", {}).get("username", "Unknown"),
+                                "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
+                                "artwork_url": artwork,
+                                "source": "SoundCloud"
+                            })
+            except Exception as e:
+                logger.error(f"SC Search error: {e}")
 
+        if sc_results:
+            return sc_results
+
+        # Если в SoundCloud пусто — Фолбэк на Мультиплатформу (YouTube Music)
+        if yt_dlp and offset == 0:
+            return await self.search_yt(query, limit)
+            
+        return []
+
+    async def search_yt(self, query: str, limit: int = 5):
+        """Поиск через yt-dlp (по базе YouTube Music)"""
+        def _search():
+            ydl_opts = {'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True, 'extract_flat': True}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+        try:
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, _search)
+            results = []
+            for entry in data.get('entries', []):
+                dur = int(entry.get('duration') or 0)
+                results.append({
+                    "id": f"yt_{entry['id']}",
+                    "title": entry.get('title', 'Unknown'),
+                    "artist": entry.get('uploader', 'YouTube Music'),
+                    "duration": f"{dur//60}:{(dur%60):02d}",
+                    "artwork_url": entry.get('thumbnails', [{'url': ''}])[-1]['url'] if entry.get('thumbnails') else "",
+                    "source": "YouTube Music"
+                })
+            return results
+        except Exception as e:
+            logger.error(f"YT search error: {e}")
+            return []
 
     async def get_charts(self, limit: int = 5, offset: int = 0):
         async with aiohttp.ClientSession() as session:
@@ -97,13 +135,13 @@ class MusicEngine:
                         dur = t.get("duration", 0)
                         artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
                         artwork = artwork.replace("large", "t500x500") if artwork else ""
-                        
                         results.append({
                             "id": str(t.get("id")),
                             "title": t.get("title", "Unknown"),
                             "artist": t.get("user", {}).get("username", "Unknown"),
                             "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
-                            "artwork_url": artwork  # ДОБАВЛЕНО 
+                            "artwork_url": artwork,
+                            "source": "SoundCloud"
                         })
                     return results
             except Exception as e:
@@ -111,6 +149,30 @@ class MusicEngine:
                 return []
 
     async def get_track_details(self, track_id: str) -> dict | None:
+        # Мультиплатформенный парсинг (YT)
+        if track_id.startswith("yt_"):
+            real_id = track_id.replace("yt_", "")
+            def _get_info():
+                ydl_opts = {'format': 'bestaudio/best', 'quiet': True}
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    return ydl.extract_info(real_id, download=False)
+            try:
+                loop = asyncio.get_event_loop()
+                info = await loop.run_in_executor(None, _get_info)
+                return {
+                    "id": track_id,
+                    "title": info.get('title', 'Unknown'),
+                    "artist": info.get('uploader', 'Unknown'),
+                    "stream_url": track_id, # Маркер для метода download_file
+                    "artwork_url": info.get('thumbnail', ''),
+                    "genre": "Мультиплатформа",
+                    "source": "YouTube Music"
+                }
+            except Exception as e:
+                logger.error(f"YT Track details error: {e}")
+                return None
+                
+        # Оригинальный код SoundCloud
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             url = f"https://api-v2.soundcloud.com/tracks/{track_id}?client_id={cid}"
@@ -140,12 +202,13 @@ class MusicEngine:
                     artwork = (data.get("artwork_url") or "").replace("large", "t500x500")
                     
                     return {
-                        "id":          str(data.get("id", "")),
-                        "title":       data.get("title", "Unknown"),
-                        "artist":      user.get("username", "Unknown"),
-                        "stream_url":  real_url,
+                        "id": str(data.get("id", "")),
+                        "title": data.get("title", "Unknown"),
+                        "artist": user.get("username", "Unknown"),
+                        "stream_url": real_url,
                         "artwork_url": artwork,
-                        "genre":       data.get("genre") or "Неизвестен"
+                        "genre": data.get("genre") or "Неизвестен",
+                        "source": "SoundCloud"
                     }
             except Exception as e:
                 logger.error(f"get_track_details error: {e}")
@@ -153,19 +216,58 @@ class MusicEngine:
 
     async def download_file(self, url: str | None) -> bytes | None:
         if not url: return None
+        
+        # Если это запрос на скачивание мультиплатформы (YT)
+        if url.startswith("yt_"):
+            real_id = url.replace("yt_", "")
+            temp_path = os.path.join(tempfile.gettempdir(), f"yt_{real_id}.m4a")
+            def _dl():
+                ydl_opts = {
+                    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                    'outtmpl': temp_path,
+                    'quiet': True,
+                    'nocheckcertificate': True
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([real_id])
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, _dl)
+                if os.path.exists(temp_path):
+                    with open(temp_path, "rb") as f:
+                        data = f.read()
+                    os.remove(temp_path)
+                    return data
+            except Exception as e:
+                logger.error(f"YT download error: {e}")
+                if os.path.exists(temp_path): os.remove(temp_path)
+            return None
+
+        # Обычное скачивание (SC / картинки)
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url) as r:
                     return await r.read() if r.status == 200 else None
             except: return None
-                
+
+    async def fetch_lyrics(self, artist: str, title: str) -> str | None:
+        clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
+        url = f"https://lrclib.net/api/search?q={urllib.parse.quote(artist + ' ' + clean_title)}"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data and len(data) > 0:
+                            return data[0].get("syncedLyrics") or data[0].get("plainLyrics")
+            except Exception as e:
+                logger.error(f"Lyrics error: {e}")
+        return None
+
     async def fetch_itunes_cover(self, artist: str, title: str) -> str | None:
-        """Поиск официальной обложки альбома в iTunes (высокое качество)"""
-        # Чистим название от (Remix), (Bassboosted) и тд, чтобы iTunes лучше искал
         clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
         query = urllib.parse.quote(f"{artist} {clean_title}")
         url = f"https://itunes.apple.com/search?term={query}&entity=song&limit=1"
-        
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, timeout=3) as resp:
@@ -173,25 +275,9 @@ class MusicEngine:
                         data = await resp.json()
                         if data.get('resultCount', 0) > 0:
                             img = data['results'][0].get('artworkUrl100', '')
-                            # Меняем мелкую картинку на HD качество
                             return img.replace('100x100bb', '1000x1000bb')
             except Exception as e:
                 logger.error(f"iTunes cover error: {e}")
-        return None
-
-    async def fetch_lyrics(self, artist: str, title: str) -> str | None:
-        """Поиск текста песни по API LRCLIB"""
-        url = f"https://lrclib.net/api/search?q={urllib.parse.quote(artist + ' ' + title)}"
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url, timeout=5) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data and len(data) > 0:
-                            # Берем синхронизированный текст, если нет - обычный
-                            return data[0].get("syncedLyrics") or data[0].get("plainLyrics")
-            except Exception as e:
-                logger.error(f"Lyrics error: {e}")
         return None
 
 music_engine = MusicEngine()
