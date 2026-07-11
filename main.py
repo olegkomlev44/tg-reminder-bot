@@ -267,29 +267,16 @@ def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if "ai_random_replies_enabled" not in data:
-                data["ai_random_replies_enabled"] = True
-            if "track_cache" not in data:
-                data["track_cache"] = {}
+            if "ai_random_replies_enabled" not in data: data["ai_random_replies_enabled"] = True
+            if "track_cache" not in data: data["track_cache"] = {}
+            if "user_history" not in data: data["user_history"] = {} # НОВОЕ: История
             return data
             
     data = {
-        "start_date": date.today().isoformat(),
-        "svodki_start_index": 0,
-        "procedura_start_index": 0,
-        "chat_id": CHAT_ID,
-        "reminders_enabled": True,
-        "ai_random_replies_enabled": True,
-        "personal_ids": {},
-        "log": {},
-        "pending_retry": {},
-        "duty_counts": {},
-        "pinned_msg_id": None,
-        "delete_queue": [],
-        "daily_mood": {},
-        "last_svodki_msg_id": None,
-        "last_proc_msg_id": None,
-        "track_cache": {}
+        "start_date": date.today().isoformat(), "svodki_start_index": 0, "procedura_start_index": 0,
+        "chat_id": CHAT_ID, "reminders_enabled": True, "ai_random_replies_enabled": True,
+        "personal_ids": {}, "log": {}, "pending_retry": {}, "duty_counts": {}, "pinned_msg_id": None,
+        "daily_mood": {}, "track_cache": {}, "user_history": {}
     }
     save_data(data)
     return data
@@ -297,6 +284,25 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+# --- ФУНКЦИИ ИСТОРИИ (Функционал 4) ---
+def log_track_history(user_id, track_info):
+    data = load_data()
+    history = data.setdefault("user_history", {}).setdefault(str(user_id), [])
+    # Удаляем дубликат, если трек уже был в истории, чтобы поднять его наверх
+    history = [t for t in history if t['id'] != track_info['id']]
+    history.insert(0, track_info) # Добавляем в начало
+    if len(history) > 30: history = history[:30] # Храним только 30 последних
+    data["user_history"][str(user_id)] = history
+    save_data(data)
+
+def get_user_history(user_id):
+    return load_data().get("user_history", {}).get(str(user_id), [])
+
+# --- ФИЛЬТР ЯВНОГО КОНТЕНТА (Визуал 9) ---
+def get_explicit_tag(title):
+    bad_words = ['fuck', 'bitch', 'shit', 'nigga', 'hoe', 'explicit', '18+']
+    return " 🔞[E]" if any(w in title.lower() for w in bad_words) else ""
 
 def get_cached_file_id(track_id):
     return load_data().get("track_cache", {}).get(str(track_id))
@@ -377,6 +383,20 @@ async def animate_loading(message: types.Message):
         try:
             await message.edit_text(frame, parse_mode="Markdown")
             await asyncio.sleep(1.2)
+        except: pass
+            
+async def animate_wave(message: types.Message):
+    """Кастомная анимация Загрузки Волны"""
+    frames = [
+        "🎧 `[ ılı.lıllılı.ıllı. ] Настраиваемся на ваш вайб...`",
+        "🎧 `[ .ıllı.lıllılı.ılı ] Анализ Избранного...`",
+        "🎧 `[ ılı.lıllılı.ıllı. ] Подключение к нейронке...`",
+        "🎧 `[ .ıllı.lıllılı.ılı ] Синтез бесконечного потока...`"
+    ]
+    for frame in frames:
+        try:
+            await message.edit_text(frame, parse_mode="Markdown")
+            await asyncio.sleep(1.0)
         except: pass
 
 def get_duty_day_number(target_date):
@@ -1014,11 +1034,15 @@ async def send_track_to_user(target_obj, track_id: str):
     clean_genre = re.sub(r'[^a-zA-Zа-яА-Я0-9\s]', '', genre_raw).strip().replace(" ", "_").lower()
     genre_tag = f"#{clean_genre}" if clean_genre and clean_genre != 'неизвестен' else "#music"
 
+        explicit = get_explicit_tag(track['title'])
+    
+    # 2. ФОРМИРУЕМ текст с уже готовым хештегом и тегом Explicit
     caption = (
-        f"🎧 *{track['artist']} — {track['title']}*\n\n"
+        f"🎧 *{track['artist']} — {track['title']}*{explicit}\n\n"
         f"🎼 *Жанр:* {genre_tag}\n"
         f"⚡️ *Источник:* SoundCloud"
     )
+
 
     if cached_file_id:
         try:
@@ -1082,7 +1106,9 @@ async def send_track_to_user(target_obj, track_id: str):
                 thumbnail=thumb_file
             )
             save_cached_file_id(track_id, sent_audio.audio.file_id)
+            log_track_history(target_obj.from_user.id, {"id": track_id, "title": track['title'], "artist": track['artist']}) # НОВОЕ: Запись в историю
             await status_msg.delete()
+
         except Exception as e:
             logger.error(f"Ошибка отправки аудио: {e}")
             await status_msg.edit_text(f"❌ Телеграм отказался принимать файл: {e}")
@@ -1163,22 +1189,189 @@ async def callback_music_fav(callback: types.CallbackQuery):
     else:
         await callback.answer("🤡 Ты уже добавил этот трек, нормис.", show_alert=True)
 
-async def cmd_my_music(message: types.Message):
-    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
-    favs = get_music_favs(message.from_user.id)
+# --- ФУНКЦИОНАЛ 1: МОЯ ВОЛНА ---
+async def callback_start_wave(callback: types.CallbackQuery):
+    await callback.answer()
+    favs = get_music_favs(callback.from_user.id)
+    
+    status_msg = await callback.message.answer("🌊 Запускаю Мою Волну...")
+    anim_task = asyncio.create_task(animate_wave(status_msg))
+    
+    try:
+        if favs:
+            # Берем 3 случайных трека из избранного для контекста
+            sample = random.sample(favs, min(3, len(favs)))
+            context = ", ".join([f"{t['artist']} - {t['title']}" for t in sample])
+            prompt = f"Юзер любит эти треки: {context}. Выдай 5 очень похожих треков других исполнителей. Верни СТРОГО JSON массив строк."
+        else:
+            prompt = "Выдай 5 популярных крутых треков (хип-хоп, поп, фонк). Верни СТРОГО JSON массив строк."
+            
+        response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        recs_list = json.loads(clean_text)
+        
+        buttons = []
+        for q in recs_list[:5]:
+            search_res = await music_engine.search_sc(q, limit=1)
+            if search_res:
+                t = search_res[0]
+                buttons.append([InlineKeyboardButton(text=f"🌊 {t['artist']} — {t['title']}", callback_data=f"dl_sc:{t['id']}")])
+        
+        buttons.append([InlineKeyboardButton(text="🔄 Следующая Волна", callback_data="start_wave")])
+        
+        anim_task.cancel()
+        if buttons:
+            await status_msg.edit_text("🌊 *Моя Волна*\nБесконечный поток под твой вкус:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+        else:
+            await status_msg.edit_text("❌ Волна разбилась о скалы API. Попробуй еще раз.")
+            
+    except Exception as e:
+        anim_task.cancel()
+        logger.error(f"Wave error: {e}")
+        await status_msg.edit_text("❌ Нейросеть не смогла сгенерировать волну.")
+
+# --- ФУНКЦИОНАЛ 7: РАДАР РЕЛИЗОВ ---
+async def callback_radar(callback: types.CallbackQuery):
+    await callback.answer("🚀 Сканирую новинки твоих любимых артистов...", show_alert=False)
+    favs = get_music_favs(callback.from_user.id)
     if not favs:
-        sent = await message.answer("💀 Твой плейлист пуст. Нажми ❤️ под любым скачанным треком.")
-        await auto_delete_later(message.bot, message.chat.id, sent.message_id, 15)
+        await callback.message.answer("❌ Добавь треки в избранное, чтобы радар знал, кого искать!")
         return
         
-    lines = ["🎧 *Твоя база (Избранное):*\n```text"]
-    for i, f in enumerate(favs, 1):
-        num = str(i).zfill(2)
-        artist_trunc = f['artist'][:12] + '...' if len(f['artist']) > 15 else f['artist']
-        lines.append(f"{num} | {artist_trunc:<15} | {f['title']}")
-    lines.append("```")
+    # Собираем уникальных артистов
+    artists = list(set([f['artist'] for f in favs]))
+    target_artist = random.choice(artists) # Ищем новинку для случайного артиста из базы
     
-    await message.answer("\n".join(lines), parse_mode="Markdown")
+    tracks = await music_engine.search_sc(f"{target_artist} 2026", limit=3)
+    if not tracks:
+        await callback.message.answer(f"🔕 У *{target_artist}* пока нет свежих дропов.")
+        return
+        
+    buttons = [[InlineKeyboardButton(text=f"🚀 {t['artist']} — {t['title']}", callback_data=f"dl_sc:{t['id']}")] for t in tracks]
+    await callback.message.answer(f"🚀 *Радар релизов*\nСвежее для тебя от *{target_artist}*:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+# --- ВИЗУАЛ 5: ИТОГИ ГОДА (WRAPPED) ---
+async def cmd_wrapped(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+    hist = get_user_history(message.from_user.id)
+    if len(hist) < 5:
+        await message.answer("🤡 Какой тебе Wrapped, ты даже 5 треков не послушал. Иди слушай музыку.")
+        return
+        
+    status_msg = await message.answer("🎁 Собираю твои Итоги Года...")
+    
+    # Считаем статистику
+    artists = {}
+    for t in hist: artists[t['artist']] = artists.get(t['artist'], 0) + 1
+    top_artist = max(artists, key=artists.get)
+    
+    # Рисуем красивую картинку
+    try:
+        img = Image.new('RGB', (800, 800), color='#1DB954') # Зеленый в стиле Spotify
+        draw = ImageDraw.Draw(img)
+        font_large = ImageFont.truetype(os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf"), 60)
+        font_medium = ImageFont.truetype(os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf"), 40)
+        
+        draw.text((50, 100), "ТВОЙ 2026 В МУЗЫКЕ", font=font_large, fill="black")
+        draw.text((50, 300), f"Твой топ артист:", font=font_medium, fill="black")
+        draw.text((50, 380), f"👑 {top_artist}", font=font_large, fill="white")
+        draw.text((50, 600), f"Прослушано треков: {len(hist)}", font=font_medium, fill="black")
+        
+        out_bytes = io.BytesIO()
+        img.save(out_bytes, format="JPEG", quality=90)
+        out_bytes.seek(0)
+        
+        await message.answer_photo(BufferedInputFile(out_bytes.read(), filename="wrapped.jpg"), caption="🎁 Твои музыкальные итоги! Поделись с друзьями.")
+        await status_msg.delete()
+    except Exception as e:
+        logger.error(f"Wrapped error: {e}")
+        await status_msg.edit_text(f"📊 *Твой Топ Артист:* {top_artist}\n*Прослушано треков:* {len(hist)}")
+
+# --- ВИЗУАЛ 6: ГЛАВНЫЙ ДАШБОРД ---
+from aiogram.types import WebAppInfo
+
+async def cmd_music_dashboard(message: types.Message):
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+    
+    # Кнопка Web App (заглушка для Визуала 1)
+    web_app_url = "https://soundcloud.com" # Позже заменишь на урл своего сайта-плеера
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Открыть плеер (Web App)", web_app=WebAppInfo(url=web_app_url))],
+        [
+            InlineKeyboardButton(text="🌊 Моя Волна", callback_data="start_wave"),
+            InlineKeyboardButton(text="🔥 Чарты", callback_data="mus_pg:chart:none:0")
+        ],
+        [
+            InlineKeyboardButton(text="❤️ Избранное", callback_data="show_favs:0"),
+            InlineKeyboardButton(text="🕒 История", callback_data="show_hist:0")
+        ],
+        [InlineKeyboardButton(text="🚀 Радар релизов", callback_data="radar_releases")]
+    ])
+    
+    text = (
+        "🎶 *MUSIC DASHBOARD*\n\n"
+        "Добро пожаловать в хаб. Выбирай, какой вайб тебе нужен сейчас.\n"
+        "Или ищи треки напрямую: `@твой_бот [название]`"
+    )
+    await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+
+# --- ИЗБРАННОЕ ИНЛАЙН-КНОПКАМИ ---
+async def callback_show_favs(callback: types.CallbackQuery):
+    page = int(callback.data.split(":")[1])
+    favs = get_music_favs(callback.from_user.id)
+    
+    if not favs:
+        await callback.answer("💀 Твой плейлист пуст. Нажми ❤️ под треком.", show_alert=True)
+        return
+        
+    limit = 6
+    offset = page * limit
+    page_favs = favs[offset:offset+limit]
+    
+    buttons = []
+    for f in page_favs:
+        explicit = get_explicit_tag(f['title'])
+        buttons.append([InlineKeyboardButton(text=f"🎵 {f['artist']} — {f['title']}{explicit}", callback_data=f"dl_sc:{f['id']}")])
+        
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton(text="⏪", callback_data=f"show_favs:{page-1}"))
+    if offset + limit < len(favs): nav.append(InlineKeyboardButton(text="⏩", callback_data=f"show_favs:{page+1}"))
+    if nav: buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в Дашборд", callback_data="back_to_dash")])
+    
+    await callback.message.edit_text("❤️ *Твоя база (Избранное):*", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+# --- ИСТОРИЯ ПРОСЛУШИВАНИЙ (Функционал 4) ---
+async def callback_show_hist(callback: types.CallbackQuery):
+    page = int(callback.data.split(":")[1])
+    hist = get_user_history(callback.from_user.id)
+    
+    if not hist:
+        await callback.answer("🕳 Ты еще ничего не слушал.", show_alert=True)
+        return
+        
+    limit = 6
+    offset = page * limit
+    page_hist = hist[offset:offset+limit]
+    
+    buttons = []
+    for f in page_hist:
+        explicit = get_explicit_tag(f['title'])
+        buttons.append([InlineKeyboardButton(text=f"🕒 {f['artist']} — {f['title']}{explicit}", callback_data=f"dl_sc:{f['id']}")])
+        
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton(text="⏪", callback_data=f"show_hist:{page-1}"))
+    if offset + limit < len(hist): nav.append(InlineKeyboardButton(text="⏩", callback_data=f"show_hist:{page+1}"))
+    if nav: buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="◀️ Назад в Дашборд", callback_data="back_to_dash")])
+    
+    await callback.message.edit_text("🕒 *Недавно прослушанное:*", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+async def callback_back_to_dash(callback: types.CallbackQuery):
+    await callback.message.delete()
+    await cmd_music_dashboard(callback.message)
+
 
 async def inline_music_search(inline_query: types.InlineQuery):
     query = inline_query.query.strip()
@@ -1642,7 +1835,8 @@ async def main():
     dp.message.register(cmd_tldr, Command("tldr"))
     dp.message.register(cmd_music_find, Command("find"))
     dp.message.register(cmd_charts, Command("charts"))
-    dp.message.register(cmd_my_music, Command("my_music"))
+    dp.message.register(cmd_music_dashboard, Command("music"))
+    dp.message.register(cmd_wrapped, Command("wrapped"))
     dp.message.register(cmd_weather, Command("pogoda"))
     
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
