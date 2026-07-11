@@ -29,10 +29,25 @@ SC_CLIENT_IDS = [
     "2t9loNQH90kzJcsFCODdigxfp325aq4z"
 ]
 
+# Deezer — публичный API, без токена
+DEEZER_API = "https://api.deezer.com"
+
+# Источники с эмодзи для отображения пользователю
+SOURCE_EMOJI = {
+    "SoundCloud": "🔊",
+    "Deezer": "💿",
+    "YouTube Music": "▶️",
+}
+
+
 class MusicEngine:
     def __init__(self):
         self.dynamic_cid = None
         self.current_cid_idx = 0
+
+    # ─────────────────────────────────────────────
+    #  SoundCloud helpers
+    # ─────────────────────────────────────────────
 
     async def get_valid_cid(self, session):
         if not self.dynamic_cid:
@@ -47,28 +62,37 @@ class MusicEngine:
                             if m:
                                 self.dynamic_cid = m.group(1)
                                 return self.dynamic_cid
-            except: pass
+            except:
+                pass
         return self.dynamic_cid or SC_CLIENT_IDS[self.current_cid_idx]
 
     def invalidate_cid(self):
         self.dynamic_cid = None
 
+    # ─────────────────────────────────────────────
+    #  ПОИСК
+    # ─────────────────────────────────────────────
+
     async def search_sc(self, query: str, limit: int = 5, offset: int = 0):
-        """Мультиплатформенный поиск. Сначала SC, потом YouTube Music/VK"""
-        sc_results = []
+        """Поиск в SoundCloud."""
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
-            params = {"q": query, "limit": limit, "offset": offset, "client_id": cid, "app_version": "1735820463"}
+            params = {
+                "q": query, "limit": limit, "offset": offset,
+                "client_id": cid, "app_version": "1735820463"
+            }
             try:
                 async with session.get(f"{SC_API}/search/tracks", params=params, headers=SC_HEADERS) as resp:
                     if resp.status == 200:
                         data = await resp.json()
+                        results = []
                         for t in data.get("collection", []):
-                            if not t.get("streamable"): continue
+                            if not t.get("streamable"):
+                                continue
                             dur = t.get("duration", 0)
                             artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
                             artwork = artwork.replace("large", "t500x500") if artwork else ""
-                            sc_results.append({
+                            results.append({
                                 "id": str(t.get("id")),
                                 "title": t.get("title", "Unknown"),
                                 "artist": t.get("user", {}).get("username", "Unknown"),
@@ -76,22 +100,46 @@ class MusicEngine:
                                 "artwork_url": artwork,
                                 "source": "SoundCloud"
                             })
+                        return results
             except Exception as e:
                 logger.error(f"SC Search error: {e}")
-
-        if sc_results:
-            return sc_results
-
-        # Если в SoundCloud пусто — Фолбэк на Мультиплатформу (YouTube Music)
-        if yt_dlp and offset == 0:
-            return await self.search_yt(query, limit)
-            
         return []
 
-    async def search_yt(self, query: str, limit: int = 5):
-        """Поиск через yt-dlp (по базе YouTube Music)"""
+    async def search_deezer(self, query: str, limit: int = 5) -> list:
+        """Поиск в Deezer (публичный API)."""
+        try:
+            params = {"q": query, "limit": limit, "output": "json"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{DEEZER_API}/search", params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status != 200:
+                        return []
+                    data = await resp.json()
+                    results = []
+                    for t in data.get("data", []):
+                        dur = int(t.get("duration", 0))
+                        cover = t.get("album", {}).get("cover_xl") or t.get("album", {}).get("cover_big") or ""
+                        results.append({
+                            "id": f"dz_{t['id']}",
+                            "title": t.get("title", "Unknown"),
+                            "artist": t.get("artist", {}).get("name", "Unknown"),
+                            "duration": f"{dur//60}:{dur%60:02d}",
+                            "artwork_url": cover,
+                            "source": "Deezer"
+                        })
+                    return results
+        except Exception as e:
+            logger.error(f"Deezer search error: {e}")
+        return []
+
+    async def search_yt(self, query: str, limit: int = 5) -> list:
+        """Поиск через yt-dlp (YouTube Music)."""
+        if not yt_dlp:
+            return []
         def _search():
-            ydl_opts = {'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True, 'extract_flat': True}
+            ydl_opts = {
+                'format': 'bestaudio/best', 'noplaylist': True,
+                'quiet': True, 'extract_flat': True
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
         try:
@@ -100,20 +148,62 @@ class MusicEngine:
             results = []
             for entry in data.get('entries', []):
                 dur = int(entry.get('duration') or 0)
+                thumb = ""
+                thumbs = entry.get('thumbnails', [])
+                if thumbs:
+                    thumb = thumbs[-1].get('url', '')
                 results.append({
                     "id": f"yt_{entry['id']}",
                     "title": entry.get('title', 'Unknown'),
                     "artist": entry.get('uploader', 'YouTube Music'),
-                    "duration": f"{dur//60}:{(dur%60):02d}",
-                    "artwork_url": entry.get('thumbnails', [{'url': ''}])[-1]['url'] if entry.get('thumbnails') else "",
+                    "duration": f"{dur//60}:{dur%60:02d}",
+                    "artwork_url": thumb,
                     "source": "YouTube Music"
                 })
             return results
         except Exception as e:
             logger.error(f"YT search error: {e}")
+        return []
+
+    async def search_multi(self, query: str, limit: int = 5, offset: int = 0) -> list:
+        """
+        Мультиплатформенный поиск с каскадным фолбэком:
+        SoundCloud → Deezer → YouTube Music
+        Всегда возвращает результаты, показывая источник.
+        """
+        # 1. SoundCloud (основной)
+        sc = await self.search_sc(query, limit=limit, offset=offset)
+        if sc:
+            return sc
+
+        # Пагинация SC провалилась — без фолбэка (другие платформы не поддерживают offset)
+        if offset > 0:
             return []
 
+        logger.info(f"SC дал 0 результатов для '{query}', пробуем Deezer...")
+
+        # 2. Deezer
+        dz = await self.search_deezer(query, limit=limit)
+        if dz:
+            return dz
+
+        logger.info(f"Deezer дал 0 результатов для '{query}', пробуем YouTube Music...")
+
+        # 3. YouTube Music
+        yt = await self.search_yt(query, limit=limit)
+        return yt
+
+    # Для обратной совместимости с вызовами search_sc в остальном коде
+    async def search_sc_compat(self, query: str, limit: int = 5, offset: int = 0) -> list:
+        """Используется вместо прямых вызовов search_sc — с автофолбэком."""
+        return await self.search_multi(query, limit=limit, offset=offset)
+
+    # ─────────────────────────────────────────────
+    #  ЧАРТЫ
+    # ─────────────────────────────────────────────
+
     async def get_charts(self, limit: int = 5, offset: int = 0):
+        """Чарты SC, фолбэк на Deezer charts."""
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             params = {
@@ -126,81 +216,94 @@ class MusicEngine:
             }
             try:
                 async with session.get(f"{SC_API}/charts", params=params, headers=SC_HEADERS) as resp:
-                    if resp.status != 200: return []
-                    data = await resp.json()
-                    results = []
-                    for item in data.get("collection", []):
-                        t = item.get("track", {})
-                        if not t.get("streamable"): continue
-                        dur = t.get("duration", 0)
-                        artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
-                        artwork = artwork.replace("large", "t500x500") if artwork else ""
-                        results.append({
-                            "id": str(t.get("id")),
-                            "title": t.get("title", "Unknown"),
-                            "artist": t.get("user", {}).get("username", "Unknown"),
-                            "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
-                            "artwork_url": artwork,
-                            "source": "SoundCloud"
-                        })
-                    return results
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results = []
+                        for item in data.get("collection", []):
+                            t = item.get("track", {})
+                            if not t.get("streamable"):
+                                continue
+                            dur = t.get("duration", 0)
+                            artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
+                            artwork = artwork.replace("large", "t500x500") if artwork else ""
+                            results.append({
+                                "id": str(t.get("id")),
+                                "title": t.get("title", "Unknown"),
+                                "artist": t.get("user", {}).get("username", "Unknown"),
+                                "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
+                                "artwork_url": artwork,
+                                "source": "SoundCloud"
+                            })
+                        if results:
+                            return results
             except Exception as e:
-                logger.error(f"Chart error: {e}")
-                return []
+                logger.error(f"Chart SC error: {e}")
+
+        # Фолбэк: Deezer charts
+        if offset == 0:
+            logger.info("SC чарты недоступны, берём Deezer charts...")
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{DEEZER_API}/chart/0/tracks", params={"limit": limit, "index": 0}) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            results = []
+                            for t in data.get("data", []):
+                                dur = int(t.get("duration", 0))
+                                cover = t.get("album", {}).get("cover_xl") or ""
+                                results.append({
+                                    "id": f"dz_{t['id']}",
+                                    "title": t.get("title", "Unknown"),
+                                    "artist": t.get("artist", {}).get("name", "Unknown"),
+                                    "duration": f"{dur//60}:{dur%60:02d}",
+                                    "artwork_url": cover,
+                                    "source": "Deezer"
+                                })
+                            return results
+            except Exception as e:
+                logger.error(f"Deezer chart error: {e}")
+        return []
+
+    # ─────────────────────────────────────────────
+    #  ДЕТАЛИ ТРЕКА + СТРИМ
+    # ─────────────────────────────────────────────
 
     async def get_track_details(self, track_id: str) -> dict | None:
-        # Мультиплатформенный парсинг (YT)
         if track_id.startswith("yt_"):
-            real_id = track_id.replace("yt_", "")
-            def _get_info():
-                ydl_opts = {'format': 'bestaudio/best', 'quiet': True}
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(real_id, download=False)
-            try:
-                loop = asyncio.get_event_loop()
-                info = await loop.run_in_executor(None, _get_info)
-                return {
-                    "id": track_id,
-                    "title": info.get('title', 'Unknown'),
-                    "artist": info.get('uploader', 'Unknown'),
-                    "stream_url": track_id, # Маркер для метода download_file
-                    "artwork_url": info.get('thumbnail', ''),
-                    "genre": "Мультиплатформа",
-                    "source": "YouTube Music"
-                }
-            except Exception as e:
-                logger.error(f"YT Track details error: {e}")
-                return None
-                
-        # Оригинальный код SoundCloud
+            return await self._get_yt_details(track_id)
+        if track_id.startswith("dz_"):
+            return await self._get_deezer_details(track_id)
+        return await self._get_sc_details(track_id)
+
+    async def _get_sc_details(self, track_id: str) -> dict | None:
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             url = f"https://api-v2.soundcloud.com/tracks/{track_id}?client_id={cid}"
             try:
                 async with session.get(url, headers=SC_HEADERS) as r:
-                    if r.status != 200: return None
+                    if r.status != 200:
+                        return None
                     data = await r.json()
-                    
+
                     stream_url = None
                     for tr in data.get("media", {}).get("transcodings", []):
                         if tr.get("format", {}).get("protocol") == "progressive":
                             stream_url = tr.get("url")
                             break
-                            
                     if not stream_url:
                         for tr in data.get("media", {}).get("transcodings", []):
                             if tr.get("format", {}).get("mime_type") == "audio/mpeg":
                                 stream_url = tr.get("url")
                                 break
-                    
+
                     real_url = None
                     if stream_url:
                         async with session.get(f"{stream_url}?client_id={cid}", headers=SC_HEADERS) as sr:
-                            if sr.status == 200: real_url = (await sr.json()).get("url")
-                            
+                            if sr.status == 200:
+                                real_url = (await sr.json()).get("url")
+
                     user = data.get("user", {})
                     artwork = (data.get("artwork_url") or "").replace("large", "t500x500")
-                    
                     return {
                         "id": str(data.get("id", "")),
                         "title": data.get("title", "Unknown"),
@@ -211,54 +314,120 @@ class MusicEngine:
                         "source": "SoundCloud"
                     }
             except Exception as e:
-                logger.error(f"get_track_details error: {e}")
-                return None
+                logger.error(f"get_sc_details error: {e}")
+        return None
+
+    async def _get_deezer_details(self, track_id: str) -> dict | None:
+        """Детали трека из Deezer. Стрим — 30-секундный preview (единственный публичный вариант без токена)."""
+        real_id = track_id.replace("dz_", "")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{DEEZER_API}/track/{real_id}", timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status != 200:
+                        return None
+                    t = await resp.json()
+                    dur = int(t.get("duration", 0))
+                    cover = t.get("album", {}).get("cover_xl") or t.get("album", {}).get("cover_big") or ""
+                    preview = t.get("preview", "")  # 30-сек MP3 preview, всегда доступен
+                    return {
+                        "id": track_id,
+                        "title": t.get("title", "Unknown"),
+                        "artist": t.get("artist", {}).get("name", "Unknown"),
+                        "stream_url": preview,
+                        "artwork_url": cover,
+                        "genre": t.get("genres", {}).get("data", [{}])[0].get("name", "Неизвестен") if t.get("genres") else "Неизвестен",
+                        "source": "Deezer",
+                        "deezer_preview": True  # флаг — это превью, не полный трек
+                    }
+        except Exception as e:
+            logger.error(f"get_deezer_details error: {e}")
+        return None
+
+    async def _get_yt_details(self, track_id: str) -> dict | None:
+        if not yt_dlp:
+            return None
+        real_id = track_id.replace("yt_", "")
+        def _get_info():
+            ydl_opts = {'format': 'bestaudio/best', 'quiet': True}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(real_id, download=False)
+        try:
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(None, _get_info)
+            return {
+                "id": track_id,
+                "title": info.get('title', 'Unknown'),
+                "artist": info.get('uploader', 'Unknown'),
+                "stream_url": track_id,  # маркер для download_file
+                "artwork_url": info.get('thumbnail', ''),
+                "genre": "Мультиплатформа",
+                "source": "YouTube Music"
+            }
+        except Exception as e:
+            logger.error(f"YT Track details error: {e}")
+        return None
+
+    # ─────────────────────────────────────────────
+    #  СКАЧИВАНИЕ ФАЙЛА
+    # ─────────────────────────────────────────────
 
     async def download_file(self, url: str | None) -> bytes | None:
-        if not url: return None
-        
-        # Если это запрос на скачивание мультиплатформы (YT)
-        if url.startswith("yt_"):
-            real_id = url.replace("yt_", "")
-            temp_path = os.path.join(tempfile.gettempdir(), f"yt_{real_id}.m4a")
-            def _dl():
-                ydl_opts = {
-                    'format': 'bestaudio[ext=m4a]/bestaudio/best',
-                    'outtmpl': temp_path,
-                    'quiet': True,
-                    'nocheckcertificate': True
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([real_id])
-            try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, _dl)
-                if os.path.exists(temp_path):
-                    with open(temp_path, "rb") as f:
-                        data = f.read()
-                    os.remove(temp_path)
-                    return data
-            except Exception as e:
-                logger.error(f"YT download error: {e}")
-                if os.path.exists(temp_path): os.remove(temp_path)
+        if not url:
             return None
 
-        # Обычное скачивание (SC / картинки)
+        # YouTube Music
+        if url.startswith("yt_"):
+            return await self._download_yt(url.replace("yt_", ""))
+
+        # Обычный HTTP (SC / Deezer preview / картинки)
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(url) as r:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
                     return await r.read() if r.status == 200 else None
-            except: return None
+            except Exception as e:
+                logger.error(f"download_file HTTP error: {e}")
+        return None
+
+    async def _download_yt(self, real_id: str) -> bytes | None:
+        if not yt_dlp:
+            return None
+        temp_path = os.path.join(tempfile.gettempdir(), f"yt_{real_id}.m4a")
+        def _dl():
+            ydl_opts = {
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                'outtmpl': temp_path,
+                'quiet': True,
+                'nocheckcertificate': True
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([real_id])
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _dl)
+            if os.path.exists(temp_path):
+                with open(temp_path, "rb") as f:
+                    data = f.read()
+                os.remove(temp_path)
+                return data
+        except Exception as e:
+            logger.error(f"YT download error: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        return None
+
+    # ─────────────────────────────────────────────
+    #  LYRICS / COVER
+    # ─────────────────────────────────────────────
 
     async def fetch_lyrics(self, artist: str, title: str) -> str | None:
         clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
         url = f"https://lrclib.net/api/search?q={urllib.parse.quote(artist + ' ' + clean_title)}"
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(url, timeout=5) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        if data and len(data) > 0:
+                        if data:
                             return data[0].get("syncedLyrics") or data[0].get("plainLyrics")
             except Exception as e:
                 logger.error(f"Lyrics error: {e}")
@@ -270,7 +439,7 @@ class MusicEngine:
         url = f"https://itunes.apple.com/search?term={query}&entity=song&limit=1"
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(url, timeout=3) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data.get('resultCount', 0) > 0:
@@ -280,7 +449,9 @@ class MusicEngine:
                 logger.error(f"iTunes cover error: {e}")
         return None
 
+
 music_engine = MusicEngine()
+
 
 def add_id3_tags(audio_bytes: bytes, title: str = "", artist: str = "", cover_bytes: bytes | None = None) -> bytes:
     def _sync_safe(n: int) -> bytes:
@@ -292,22 +463,28 @@ def add_id3_tags(audio_bytes: bytes, title: str = "", artist: str = "", cover_by
 
     try:
         frames = bytearray()
+
         def _frame(fid: str, data: bytes):
             frames.extend(fid.encode("ascii"))
             frames.extend(struct.pack(">I", len(data)))
             frames.extend(b"\x00\x00")
             frames.extend(data)
 
-        if title: _frame("TIT2", b"\x03" + title.encode("utf-8"))
-        if artist: _frame("TPE1", b"\x03" + artist.encode("utf-8"))
-        if cover_bytes: _frame("APIC", b"\x00" + b"image/jpeg" + b"\x00\x03\x00" + cover_bytes)
+        if title:
+            _frame("TIT2", b"\x03" + title.encode("utf-8"))
+        if artist:
+            _frame("TPE1", b"\x03" + artist.encode("utf-8"))
+        if cover_bytes:
+            _frame("APIC", b"\x00" + b"image/jpeg" + b"\x00\x03\x00" + cover_bytes)
 
-        if not frames: return audio_bytes
+        if not frames:
+            return audio_bytes
         header = b"ID3\x03\x00\x00" + _sync_safe(len(frames))
         payload = audio_bytes
         if payload[:3] == b"ID3":
             sb = payload[6:10]
-            sz = (((sb[0]&0x7F)<<21)|((sb[1]&0x7F)<<14)|((sb[2]&0x7F)<<7)|(sb[3]&0x7F))
+            sz = (((sb[0] & 0x7F) << 21) | ((sb[1] & 0x7F) << 14) | ((sb[2] & 0x7F) << 7) | (sb[3] & 0x7F))
             payload = payload[10 + sz:]
         return header + bytes(frames) + payload
-    except: return audio_bytes
+    except:
+        return audio_bytes
