@@ -2,6 +2,7 @@ import aiohttp
 import re
 import logging
 import struct
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -67,22 +68,19 @@ class MusicEngine:
             except: return []
 
     async def get_charts(self, limit: int = 5, offset: int = 0):
-        """Новая функция: получение популярных треков (чарты)"""
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             params = {
                 "kind": "top",
                 "genre": "soundcloud:genres:all-music",
-                "high_tier_only": "false",  # Обязательный параметр для API v2 (без него чарты не отдаются)
+                "high_tier_only": "false",
                 "limit": limit,
                 "offset": offset,
                 "client_id": cid
             }
             try:
                 async with session.get(f"{SC_API}/charts", params=params, headers=SC_HEADERS) as resp:
-                    if resp.status != 200: 
-                        logger.error(f"Charts API returned {resp.status}")
-                        return []
+                    if resp.status != 200: return []
                     data = await resp.json()
                     results = []
                     for item in data.get("collection", []):
@@ -110,13 +108,11 @@ class MusicEngine:
                     data = await r.json()
                     
                     stream_url = None
-                    # ИЩЕМ ИМЕННО PROGRESSIVE! Если взять HLS, скачается текстовый m3u8 плейлист (битый mp3)
                     for tr in data.get("media", {}).get("transcodings", []):
                         if tr.get("format", {}).get("protocol") == "progressive":
                             stream_url = tr.get("url")
                             break
-                    
-                    # Если progressive нет (бывает редко), пытаемся дёрнуть дефолтный стрим
+                            
                     if not stream_url:
                         for tr in data.get("media", {}).get("transcodings", []):
                             if tr.get("format", {}).get("mime_type") == "audio/mpeg":
@@ -147,13 +143,24 @@ class MusicEngine:
         if not url: return None
         async with aiohttp.ClientSession() as session:
             try:
-                # ВАЖНО: Убираем SC_HEADERS для скачивания самого файла с CDN!
-                # Amazon CloudFront (где лежат файлы) блокирует запросы с заголовками от soundcloud.com.
                 async with session.get(url) as r:
                     return await r.read() if r.status == 200 else None
-            except Exception as e: 
-                logger.error(f"File download error: {e}")
-                return None
+            except: return None
+
+    async def fetch_lyrics(self, artist: str, title: str) -> str | None:
+        """Поиск текста песни по API LRCLIB"""
+        url = f"https://lrclib.net/api/search?q={urllib.parse.quote(artist + ' ' + title)}"
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data and len(data) > 0:
+                            # Берем синхронизированный текст, если нет - обычный
+                            return data[0].get("syncedLyrics") or data[0].get("plainLyrics")
+            except Exception as e:
+                logger.error(f"Lyrics error: {e}")
+        return None
 
 music_engine = MusicEngine()
 
