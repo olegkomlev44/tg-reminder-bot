@@ -959,21 +959,25 @@ async def show_music_page(message_or_callback, mode, query, page):
     
     if mode == "chart":
         tracks = await music_engine.get_charts(limit=limit, offset=offset)
-        header_text = f"🔥 *Чарт SoundCloud* (стр. {page+1})"
+        src_names = list(set(t.get("source", "SC") for t in tracks)) if tracks else ["SoundCloud"]
+        header_text = f"🔥 *Чарт* ({', '.join(src_names)}) — стр. {page+1}"
     else:
-        tracks = await music_engine.search_sc(query, limit=limit, offset=offset)
-        header_text = f"🎧 *Поиск:* «{query}» (стр. {page+1})"
+        tracks = await music_engine.search_multi(query, limit=limit, offset=offset)
+        src_names = list(set(t.get("source", "SC") for t in tracks)) if tracks else ["SoundCloud"]
+        header_text = f"🎧 *Поиск:* «{query}» ({', '.join(src_names)}) — стр. {page+1}"
 
     if not tracks:
         if isinstance(message_or_callback, types.CallbackQuery):
             await message_or_callback.answer("❌ Больше треков нет.", show_alert=True)
         else:
-            await message_or_callback.answer("❌ Больше треков не найдено.")
+            await message_or_callback.answer("❌ Ничего не нашли ни на одной площадке 💀")
         return
 
+    _src_icons = {"SoundCloud": "🔊", "Deezer": "💿", "YouTube Music": "▶️"}
     buttons = []
     for t in tracks:
-        btn_text = f"🎵 {t['artist']} — {t['title']} [{t['duration']}]"
+        icon = _src_icons.get(t.get("source", ""), "🎵")
+        btn_text = f"{icon} {t['artist']} — {t['title']} [{t['duration']}]"
         cb_data = f"dl_sc:{t['id']}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
     
@@ -1037,10 +1041,13 @@ async def send_track_to_user(target_obj, track_id: str):
     explicit = get_explicit_tag(track['title'])
     
     # 2. ФОРМИРУЕМ текст с уже готовым хештегом и тегом Explicit
+    _src = track.get("source", "SoundCloud")
+    _src_icon = {"SoundCloud": "🔊", "Deezer": "💿", "YouTube Music": "▶️"}.get(_src, "🎵")
+    _preview_note = "\n⚠️ _30-сек превью (Deezer)_" if track.get("deezer_preview") else ""
     caption = (
         f"🎧 *{track['artist']} — {track['title']}*{explicit}\n\n"
         f"🎼 *Жанр:* {genre_tag}\n"
-        f"⚡️ *Источник:* SoundCloud"
+        f"{_src_icon} *Источник:* {_src}{_preview_note}"
     )
 
 
@@ -1090,7 +1097,7 @@ async def send_track_to_user(target_obj, track_id: str):
         caption = (
             f"🎧 *{track['artist']} — {track['title']}*\n\n"
             f"🎼 *Жанр:* {genre_tag}\n"
-            f"⚡️ *Источник:* SoundCloud{geek_data}"
+            f"{_src_icon} *Источник:* {_src}{_preview_note}{geek_data}"
         )
 
         audio_bytes = add_id3_tags(audio_bytes, track['title'], track['artist'], cover_bytes)
@@ -1158,7 +1165,7 @@ async def callback_music_recs(callback: types.CallbackQuery):
         buttons = []
         
         for q in recs_list[:5]:
-            search_res = await music_engine.search_sc(q, limit=1)
+            search_res = await music_engine.search_multi(q, limit=1)
             if search_res:
                 t = search_res[0]
                 buttons.append([InlineKeyboardButton(text=f"🎵 {t['artist']} — {t['title']}", callback_data=f"dl_sc:{t['id']}")])
@@ -1212,7 +1219,7 @@ async def callback_start_wave(callback: types.CallbackQuery):
         
         buttons = []
         for q in recs_list[:5]:
-            search_res = await music_engine.search_sc(q, limit=1)
+            search_res = await music_engine.search_multi(q, limit=1)
             if search_res:
                 t = search_res[0]
                 buttons.append([InlineKeyboardButton(text=f"🌊 {t['artist']} — {t['title']}", callback_data=f"dl_sc:{t['id']}")])
@@ -1242,7 +1249,7 @@ async def callback_radar(callback: types.CallbackQuery):
     artists = list(set([f['artist'] for f in favs]))
     target_artist = random.choice(artists) # Ищем новинку для случайного артиста из базы
     
-    tracks = await music_engine.search_sc(f"{target_artist} 2026", limit=3)
+    tracks = await music_engine.search_multi(f"{target_artist} 2026", limit=3)
     if not tracks:
         await callback.message.answer(f"🔕 У *{target_artist}* пока нет свежих дропов.")
         return
@@ -1289,6 +1296,47 @@ async def cmd_wrapped(message: types.Message):
 
 # --- ВИЗУАЛ 6: ГЛАВНЫЙ ДАШБОРД ---
 from aiogram.types import WebAppInfo
+
+async def cmd_my_music(message: types.Message):
+    """Показывает избранное пользователя — аналог /music > Избранное, но одной командой."""
+    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+    favs = get_music_favs(message.from_user.id)
+
+    if not favs:
+        await message.answer(
+            "💀 *Твой плейлист пуст.*\n\n"
+            "Нажимай ❤️ под треками чтобы сохранять их сюда. "
+            "Ищи треки через `/find <название>`.",
+            parse_mode="Markdown"
+        )
+        return
+
+    limit = 6
+    page = 0
+    page_favs = favs[:limit]
+
+    buttons = []
+    for f in page_favs:
+        explicit = get_explicit_tag(f['title'])
+        source_icon = {"SoundCloud": "🔊", "Deezer": "💿", "YouTube Music": "▶️"}.get(f.get("source", ""), "🎵")
+        buttons.append([InlineKeyboardButton(
+            text=f"{source_icon} {f['artist']} — {f['title']}{explicit}",
+            callback_data=f"dl_sc:{f['id']}"
+        )])
+
+    nav = []
+    if limit < len(favs):
+        nav.append(InlineKeyboardButton(text="⏩", callback_data="show_favs:1"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="🎶 В дашборд", callback_data="back_to_dash")])
+
+    await message.answer(
+        f"❤️ *Твоя база — {len(favs)} трек(ов):*",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="Markdown"
+    )
+
 
 async def cmd_music_dashboard(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
@@ -1377,7 +1425,7 @@ async def inline_music_search(inline_query: types.InlineQuery):
     query = inline_query.query.strip()
     if not query: return
     
-    tracks = await music_engine.search_sc(query, limit=10)
+    tracks = await music_engine.search_multi(query, limit=10)
     results = []
     bot_user = await inline_query.bot.me()
     
@@ -1836,6 +1884,7 @@ async def main():
     dp.message.register(cmd_music_find, Command("find"))
     dp.message.register(cmd_charts, Command("charts"))
     dp.message.register(cmd_music_dashboard, Command("music"))
+    dp.message.register(cmd_my_music, Command("my_music"))
     dp.message.register(cmd_wrapped, Command("wrapped"))
     dp.message.register(cmd_weather, Command("pogoda"))
     
