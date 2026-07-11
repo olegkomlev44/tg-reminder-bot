@@ -58,14 +58,22 @@ class MusicEngine:
                     for t in data.get("collection", []):
                         if not t.get("streamable"): continue
                         dur = t.get("duration", 0)
+                        
+                        # --- Твоя вставка с картинками ---
+                        artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
+                        artwork = artwork.replace("large", "t500x500") if artwork else ""
+                        
                         results.append({
                             "id": str(t.get("id")),
                             "title": t.get("title", "Unknown"),
                             "artist": t.get("user", {}).get("username", "Unknown"),
                             "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
+                            "artwork_url": artwork  # ДОБАВЛЕНО ДЛЯ ПРЕВЬЮ
                         })
+                    
                     return results
             except: return []
+
 
     async def get_charts(self, limit: int = 5, offset: int = 0):
         async with aiohttp.ClientSession() as session:
@@ -87,11 +95,15 @@ class MusicEngine:
                         t = item.get("track", {})
                         if not t.get("streamable"): continue
                         dur = t.get("duration", 0)
+                        artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
+                        artwork = artwork.replace("large", "t500x500") if artwork else ""
+                        
                         results.append({
                             "id": str(t.get("id")),
                             "title": t.get("title", "Unknown"),
                             "artist": t.get("user", {}).get("username", "Unknown"),
                             "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
+                            "artwork_url": artwork  # ДОБАВЛЕНО 
                         })
                     return results
             except Exception as e:
