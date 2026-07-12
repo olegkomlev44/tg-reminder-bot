@@ -1,4 +1,5 @@
 import os, json, hmac, hashlib, aiohttp
+import random
 from urllib.parse import parse_qsl
 from aiohttp import web
 from music_engine import music_engine
@@ -59,8 +60,37 @@ async def api_search(request):
     return cors(web.json_response(tracks))
 
 
+async def api_smart_wave(request):
+    """Умная волна — анализирует лайки, либо отдает чарты, если лайков нет"""
+    user = verify(request.headers.get("Authorization", ""))
+    limit = int(request.rel_url.query.get("limit", 20))
+    offset = int(request.rel_url.query.get("offset", 0))
+
+    if not user:
+        return cors(web.json_response(await music_engine.get_charts(limit=limit, offset=offset)))
+    
+    uid = user["id"]
+    favs = get_music_favs(uid)
+    
+    if not favs:
+        # Если юзер не лайкал треки, шлем популярное
+        return cors(web.json_response(await music_engine.get_charts(limit=limit, offset=offset)))
+        
+    # Берем случайного артиста из лайков юзера
+    sample = random.choice(favs)
+    artist = sample["artist"]
+    
+    # Ищем похожие треки / треки этого артиста
+    tracks = await music_engine.search_multi(artist, limit=limit)
+    if not tracks:
+        tracks = await music_engine.get_charts(limit=limit, offset=offset)
+    else:
+        random.shuffle(tracks)
+        
+    return cors(web.json_response(tracks))
+
+
 async def api_wave(request):
-    """Главный экран — бесконечная волна: чарты + перемешка"""
     limit = int(request.rel_url.query.get("limit", 20))
     offset = int(request.rel_url.query.get("offset", 0))
     tracks = await music_engine.get_charts(limit=limit, offset=offset)
@@ -138,6 +168,7 @@ async def start_web_server():
     app.router.add_get("/api/tracks", api_get_tracks)
     app.router.add_get("/api/search", api_search)
     app.router.add_get("/api/wave", api_wave)
+    app.router.add_get("/api/smart_wave", api_smart_wave)
     app.router.add_post("/api/fav", api_fav_add)
     app.router.add_get("/api/stream/{track_id}", api_stream_track)
     app.router.add_get("/api/track/{track_id}", api_track_info)
