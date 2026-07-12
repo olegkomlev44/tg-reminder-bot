@@ -40,6 +40,14 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
+# --- НОВЫЕ ИМПОРТЫ ---
+from db import (
+    init_db, get_cached_file_id, save_cached_file_id,
+    save_music_fav, get_music_favs, log_track_history, get_user_history
+)
+from web_server import start_web_server
+from aiogram.types import WebAppInfo
+# ----------------------
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -285,32 +293,11 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# --- ФУНКЦИИ ИСТОРИИ (Функционал 4) ---
-def log_track_history(user_id, track_info):
-    data = load_data()
-    history = data.setdefault("user_history", {}).setdefault(str(user_id), [])
-    # Удаляем дубликат, если трек уже был в истории, чтобы поднять его наверх
-    history = [t for t in history if t['id'] != track_info['id']]
-    history.insert(0, track_info) # Добавляем в начало
-    if len(history) > 30: history = history[:30] # Храним только 30 последних
-    data["user_history"][str(user_id)] = history
-    save_data(data)
-
-def get_user_history(user_id):
-    return load_data().get("user_history", {}).get(str(user_id), [])
 
 # --- ФИЛЬТР ЯВНОГО КОНТЕНТА (Визуал 9) ---
 def get_explicit_tag(title):
     bad_words = ['fuck', 'bitch', 'shit', 'nigga', 'hoe', 'explicit', '18+']
     return " 🔞[E]" if any(w in title.lower() for w in bad_words) else ""
-
-def get_cached_file_id(track_id):
-    return load_data().get("track_cache", {}).get(str(track_id))
-
-def save_cached_file_id(track_id, file_id):
-    data = load_data()
-    data.setdefault("track_cache", {})[str(track_id)] = file_id
-    save_data(data)
 
 def increment_count(name, duty_type):
     data = load_data()
@@ -323,19 +310,6 @@ def get_total_duties(name):
     data = load_data()
     counts = data.get("duty_counts", {}).get(name, {})
     return counts.get("svodki", 0) + counts.get("proc", 0)
-
-def save_music_fav(user_id, track_info):
-    data = load_data()
-    favs = data.setdefault("music_favs", {})
-    user_favs = favs.setdefault(str(user_id), [])
-    if not any(t['id'] == track_info['id'] for t in user_favs):
-        user_favs.append(track_info)
-        save_data(data)
-        return True
-    return False
-
-def get_music_favs(user_id):
-    return load_data().get("music_favs", {}).get(str(user_id), [])
 
 # ── ПЛЕЙЛИСТЫ ──────────────────────────────────────────────────────────────
 def get_playlists(user_id) -> dict:
@@ -1540,7 +1514,14 @@ async def cmd_music_dashboard(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     
     # Кнопка Web App (заглушка для Визуала 1)
-    web_app_url = "https://soundcloud.com" # Позже заменишь на урл своего сайта-плеера
+    # Замени web_app_url на свой домен в BotHost (например, bot-12345.bothost.ru)
+# Обязательно с https://
+web_app_url = "https://bot-твой-id.bothost.ru" 
+
+keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🌐 Открыть плеер", web_app=WebAppInfo(url=web_app_url))],
+    # ... остальные кнопки
+
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
