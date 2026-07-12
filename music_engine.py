@@ -29,13 +29,8 @@ SC_CLIENT_IDS = [
     "2t9loNQH90kzJcsFCODdigxfp325aq4z"
 ]
 
-# Deezer — публичный API, без токена
-DEEZER_API = "https://api.deezer.com"
-
-# Источники с эмодзи для отображения пользователю
 SOURCE_EMOJI = {
     "SoundCloud": "🔊",
-    "Deezer": "💿",
     "YouTube Music": "▶️",
 }
 
@@ -105,32 +100,6 @@ class MusicEngine:
                 logger.error(f"SC Search error: {e}")
         return []
 
-    async def search_deezer(self, query: str, limit: int = 5) -> list:
-        """Поиск в Deezer (публичный API)."""
-        try:
-            params = {"q": query, "limit": limit, "output": "json"}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{DEEZER_API}/search", params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    if resp.status != 200:
-                        return []
-                    data = await resp.json()
-                    results = []
-                    for t in data.get("data", []):
-                        dur = int(t.get("duration", 0))
-                        cover = t.get("album", {}).get("cover_xl") or t.get("album", {}).get("cover_big") or ""
-                        results.append({
-                            "id": f"dz_{t['id']}",
-                            "title": t.get("title", "Unknown"),
-                            "artist": t.get("artist", {}).get("name", "Unknown"),
-                            "duration": f"{dur//60}:{dur%60:02d}",
-                            "artwork_url": cover,
-                            "source": "Deezer"
-                        })
-                    return results
-        except Exception as e:
-            logger.error(f"Deezer search error: {e}")
-        return []
-
     async def search_yt(self, query: str, limit: int = 5) -> list:
         """Поиск через yt-dlp (YouTube Music)."""
         if not yt_dlp:
@@ -148,10 +117,8 @@ class MusicEngine:
             results = []
             for entry in data.get('entries', []):
                 dur = int(entry.get('duration') or 0)
-                thumb = ""
                 thumbs = entry.get('thumbnails', [])
-                if thumbs:
-                    thumb = thumbs[-1].get('url', '')
+                thumb = thumbs[-1].get('url', '') if thumbs else ""
                 results.append({
                     "id": f"yt_{entry['id']}",
                     "title": entry.get('title', 'Unknown'),
@@ -167,43 +134,28 @@ class MusicEngine:
 
     async def search_multi(self, query: str, limit: int = 5, offset: int = 0) -> list:
         """
-        Мультиплатформенный поиск с каскадным фолбэком:
-        SoundCloud → Deezer → YouTube Music
-        Всегда возвращает результаты, показывая источник.
+        Мультиплатформенный поиск: SoundCloud → YouTube Music
         """
         # 1. SoundCloud (основной)
         sc = await self.search_sc(query, limit=limit, offset=offset)
         if sc:
             return sc
 
-        # Пагинация SC провалилась — без фолбэка (другие платформы не поддерживают offset)
+        # Пагинация SC провалилась — YT не поддерживает offset
         if offset > 0:
             return []
 
-        logger.info(f"SC дал 0 результатов для '{query}', пробуем Deezer...")
+        logger.info(f"SC дал 0 результатов для '{query}', пробуем YouTube Music...")
 
-        # 2. Deezer
-        dz = await self.search_deezer(query, limit=limit)
-        if dz:
-            return dz
-
-        logger.info(f"Deezer дал 0 результатов для '{query}', пробуем YouTube Music...")
-
-        # 3. YouTube Music
-        yt = await self.search_yt(query, limit=limit)
-        return yt
-
-    # Для обратной совместимости с вызовами search_sc в остальном коде
-    async def search_sc_compat(self, query: str, limit: int = 5, offset: int = 0) -> list:
-        """Используется вместо прямых вызовов search_sc — с автофолбэком."""
-        return await self.search_multi(query, limit=limit, offset=offset)
+        # 2. YouTube Music
+        return await self.search_yt(query, limit=limit)
 
     # ─────────────────────────────────────────────
     #  ЧАРТЫ
     # ─────────────────────────────────────────────
 
     async def get_charts(self, limit: int = 5, offset: int = 0):
-        """Чарты SC, фолбэк на Deezer charts."""
+        """Чарты SC."""
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             params = {
@@ -234,34 +186,9 @@ class MusicEngine:
                                 "artwork_url": artwork,
                                 "source": "SoundCloud"
                             })
-                        if results:
-                            return results
+                        return results
             except Exception as e:
                 logger.error(f"Chart SC error: {e}")
-
-        # Фолбэк: Deezer charts
-        if offset == 0:
-            logger.info("SC чарты недоступны, берём Deezer charts...")
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(f"{DEEZER_API}/chart/0/tracks", params={"limit": limit, "index": 0}) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            results = []
-                            for t in data.get("data", []):
-                                dur = int(t.get("duration", 0))
-                                cover = t.get("album", {}).get("cover_xl") or ""
-                                results.append({
-                                    "id": f"dz_{t['id']}",
-                                    "title": t.get("title", "Unknown"),
-                                    "artist": t.get("artist", {}).get("name", "Unknown"),
-                                    "duration": f"{dur//60}:{dur%60:02d}",
-                                    "artwork_url": cover,
-                                    "source": "Deezer"
-                                })
-                            return results
-            except Exception as e:
-                logger.error(f"Deezer chart error: {e}")
         return []
 
     # ─────────────────────────────────────────────
@@ -271,8 +198,6 @@ class MusicEngine:
     async def get_track_details(self, track_id: str) -> dict | None:
         if track_id.startswith("yt_"):
             return await self._get_yt_details(track_id)
-        if track_id.startswith("dz_"):
-            return await self._get_deezer_details(track_id)
         return await self._get_sc_details(track_id)
 
     async def _get_sc_details(self, track_id: str) -> dict | None:
@@ -317,32 +242,6 @@ class MusicEngine:
                 logger.error(f"get_sc_details error: {e}")
         return None
 
-    async def _get_deezer_details(self, track_id: str) -> dict | None:
-        """Детали трека из Deezer. Стрим — 30-секундный preview (единственный публичный вариант без токена)."""
-        real_id = track_id.replace("dz_", "")
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{DEEZER_API}/track/{real_id}", timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    if resp.status != 200:
-                        return None
-                    t = await resp.json()
-                    dur = int(t.get("duration", 0))
-                    cover = t.get("album", {}).get("cover_xl") or t.get("album", {}).get("cover_big") or ""
-                    preview = t.get("preview", "")  # 30-сек MP3 preview, всегда доступен
-                    return {
-                        "id": track_id,
-                        "title": t.get("title", "Unknown"),
-                        "artist": t.get("artist", {}).get("name", "Unknown"),
-                        "stream_url": preview,
-                        "artwork_url": cover,
-                        "genre": t.get("genres", {}).get("data", [{}])[0].get("name", "Неизвестен") if t.get("genres") else "Неизвестен",
-                        "source": "Deezer",
-                        "deezer_preview": True  # флаг — это превью, не полный трек
-                    }
-        except Exception as e:
-            logger.error(f"get_deezer_details error: {e}")
-        return None
-
     async def _get_yt_details(self, track_id: str) -> dict | None:
         if not yt_dlp:
             return None
@@ -379,7 +278,7 @@ class MusicEngine:
         if url.startswith("yt_"):
             return await self._download_yt(url.replace("yt_", ""))
 
-        # Обычный HTTP (SC / Deezer preview / картинки)
+        # Обычный HTTP (SC / картинки)
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
