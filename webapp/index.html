@@ -2,393 +2,136 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
 <title>Music Player</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   :root {
-    --bg: #0a0a0f;
-    --surface: #13131a;
-    --surface2: #1c1c28;
-    --border: #2a2a3a;
-    --accent: #7c3aed;
-    --accent2: #a855f7;
-    --accent-glow: rgba(124,58,237,0.35);
-    --text: #e8e8f0;
-    --text-dim: #7a7a9a;
-    --green: #22c55e;
-    --red: #ef4444;
-    --player-h: 88px;
+    --bg: #000000;
+    --surface: #1a1a1d;
+    --surface2: #2d2d33;
+    --border: #333333;
+    --accent: #ffcc00; /* Стиль Яндекс Музыки */
+    --text: #ffffff;
+    --text-dim: #999999;
+    --player-h: 64px;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 
   body {
-    background: var(--bg);
-    color: var(--text);
+    background: var(--bg); color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    height: 100dvh;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
+    height: 100dvh; overflow: hidden; display: flex; flex-direction: column;
   }
 
   /* ── NAV TABS ── */
-  .tabs {
-    display: flex;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-  }
-  .tab {
-    flex: 1;
-    padding: 14px 0 10px;
-    text-align: center;
-    font-size: 11px;
-    color: var(--text-dim);
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    transition: all .2s;
-    user-select: none;
-  }
-  .tab .tab-icon { font-size: 20px; display: block; margin-bottom: 3px; }
-  .tab.active { color: var(--accent2); border-bottom-color: var(--accent); }
+  .tabs { display: flex; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .tab { flex: 1; padding: 12px 0 8px; text-align: center; font-size: 11px; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; transition: all .2s; font-weight: 600;}
+  .tab .tab-icon { font-size: 20px; display: block; margin-bottom: 4px; }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
   /* ── PAGES ── */
-  .page { display: none; flex: 1; overflow-y: auto; padding-bottom: calc(var(--player-h) + 12px); }
+  .page { display: none; flex: 1; overflow-y: auto; padding-bottom: calc(var(--player-h) + 20px); }
   .page.active { display: block; }
 
   /* ── SEARCH BAR ── */
-  .search-wrap {
-    padding: 14px 14px 10px;
-    position: sticky;
-    top: 0;
-    background: var(--bg);
-    z-index: 10;
-  }
+  .search-wrap { padding: 14px; position: sticky; top: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(10px); z-index: 10; }
   .search-row { display: flex; gap: 8px; }
-  .search-input {
-    flex: 1;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 10px 14px;
-    color: var(--text);
-    font-size: 15px;
-    outline: none;
-    transition: border-color .2s;
-  }
-  .search-input:focus { border-color: var(--accent); }
+  .search-input { flex: 1; background: var(--surface); border: none; border-radius: 12px; padding: 12px 16px; color: var(--text); font-size: 15px; outline: none; }
   .search-input::placeholder { color: var(--text-dim); }
-  .search-btn {
-    background: var(--accent);
-    border: none;
-    border-radius: 12px;
-    color: white;
-    font-size: 18px;
-    padding: 0 16px;
-    cursor: pointer;
-    transition: background .2s;
-  }
-  .search-btn:active { background: var(--accent2); }
-
-  /* ── SECTION HEADER ── */
-  .section-header {
-    padding: 14px 14px 8px;
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: .8px;
-  }
+  .search-btn { background: var(--accent); border: none; border-radius: 12px; color: #000; font-size: 18px; padding: 0 16px; cursor: pointer; font-weight: bold;}
 
   /* ── TRACK LIST ── */
-  .track-list { list-style: none; }
+  .track-list { list-style: none; padding: 0 8px;}
+  .track-item { display: flex; align-items: center; gap: 12px; padding: 8px; cursor: pointer; border-radius: 12px; transition: background .15s; margin-bottom: 4px;}
+  .track-item:active { background: var(--surface); }
+  .track-item.playing { background: rgba(255, 204, 0, 0.1); }
 
-  .track-item {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    cursor: pointer;
-    transition: background .15s;
-    border-radius: 0;
-  }
-  .track-item:active { background: var(--surface2); }
-  .track-item.playing { background: rgba(124,58,237,.12); }
-
-  .track-cover {
-    width: 48px;
-    height: 48px;
-    border-radius: 8px;
-    background: var(--surface2);
-    flex-shrink: 0;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 22px;
-    position: relative;
-  }
+  .track-cover { width: 48px; height: 48px; border-radius: 8px; background: var(--surface2); flex-shrink: 0; overflow: hidden; position: relative; }
   .track-cover img { width: 100%; height: 100%; object-fit: cover; }
-  .track-cover .play-over {
-    position: absolute;
-    inset: 0;
-    background: rgba(0,0,0,.55);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    opacity: 0;
-    transition: opacity .15s;
-  }
-  .track-item:active .play-over,
-  .track-item.playing .play-over { opacity: 1; }
+  
+  /* Эквалайзер для активного трека в списке */
+  .eq-mini { display: none; position: absolute; inset: 0; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; gap: 2px;}
+  .track-item.playing .eq-mini { display: flex; }
+  .eq-bar { width: 4px; background: var(--accent); border-radius: 2px; animation: eq 0.8s infinite alternate ease-in-out; }
+  .eq-bar:nth-child(2) { animation-delay: 0.2s; }
+  .eq-bar:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes eq { 0% { height: 4px; } 100% { height: 16px; } }
 
   .track-meta { flex: 1; min-width: 0; }
-  .track-title {
-    font-size: 15px;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .track-artist {
-    font-size: 13px;
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    margin-top: 2px;
-  }
-  .track-dur {
-    font-size: 12px;
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .src-badge {
-    font-size: 10px;
-    padding: 2px 6px;
-    border-radius: 6px;
-    flex-shrink: 0;
-    font-weight: 700;
-  }
-  .src-sc { background: #ff5500; color: white; }
-  .src-yt { background: #ff0000; color: white; }
+  .track-title { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .track-artist { font-size: 13px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .track-actions { display: flex; align-items: center; gap: 10px; }
+  .btn-queue { background: none; border: none; color: var(--text-dim); font-size: 20px; padding: 4px; cursor: pointer;}
 
-  /* ── ADD TO QUEUE btn (swipe-like action) ── */
-  .track-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-  .btn-queue {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 18px;
-    cursor: pointer;
-    padding: 4px;
-  }
-  .btn-queue:active { color: var(--accent2); }
+  /* ── MINI PLAYER (BOTTOM) ── */
+  .mini-player { position: fixed; bottom: 0; left: 0; right: 0; height: var(--player-h); background: var(--surface); border-top: 1px solid var(--border); display: none; align-items: center; padding: 0 16px; gap: 12px; z-index: 100; box-shadow: 0 -4px 20px rgba(0,0,0,0.5); cursor: pointer;}
+  .mini-player.visible { display: flex; }
+  .mp-progress { position: absolute; top: 0; left: 0; height: 2px; background: var(--accent); width: 0%; transition: width 0.1s linear; }
+  .mp-cover { width: 40px; height: 40px; border-radius: 6px; overflow: hidden; background: #000; }
+  .mp-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .mp-info { flex: 1; min-width: 0; }
+  .mp-title { font-size: 14px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mp-artist { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mp-btn { background: none; border: none; color: var(--text); font-size: 24px; padding: 8px; }
 
-  /* ── PLAYLIST TABS ── */
-  .pl-tabs {
-    display: flex;
-    gap: 8px;
-    padding: 8px 14px;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .pl-tabs::-webkit-scrollbar { display: none; }
-  .pl-chip {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 6px 14px;
-    font-size: 13px;
-    white-space: nowrap;
-    cursor: pointer;
-    transition: all .15s;
-    flex-shrink: 0;
-  }
-  .pl-chip.active { background: var(--accent); border-color: var(--accent); color: white; }
+  /* ── FULLSCREEN PLAYER ── */
+  .fs-player { position: fixed; inset: 0; background: var(--bg); z-index: 999; display: flex; flex-direction: column; transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); }
+  .fs-player.open { transform: translateY(0); }
+  
+  .fs-header { display: flex; justify-content: space-between; align-items: center; padding: 20px; }
+  .fs-btn { background: none; border: none; color: var(--text); font-size: 24px; }
+  
+  .fs-cover-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .fs-cover { width: 100%; max-width: 320px; aspect-ratio: 1; border-radius: 20px; box-shadow: 0 20px 40px rgba(0,0,0,0.6); object-fit: cover; }
+  
+  .fs-controls { padding: 30px 24px 50px; }
+  .fs-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+  .fs-texts { flex: 1; min-width: 0; padding-right: 16px; }
+  .fs-title { font-size: 22px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px; }
+  .fs-artist { font-size: 16px; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fs-fav { font-size: 28px; color: var(--text-dim); background: none; border: none; transition: color 0.2s; }
+  .fs-fav.active { color: var(--accent); }
 
-  /* ── EMPTY STATE ── */
-  .empty {
-    text-align: center;
-    padding: 60px 24px;
-    color: var(--text-dim);
-  }
-  .empty .empty-icon { font-size: 48px; margin-bottom: 12px; }
-  .empty p { font-size: 15px; line-height: 1.5; }
+  /* Ползунок перемотки */
+  .seek-bar-container { position: relative; height: 24px; display: flex; align-items: center; cursor: pointer; margin-bottom: 8px; }
+  .seek-bg { width: 100%; height: 4px; background: var(--surface2); border-radius: 2px; position: relative; }
+  .seek-fill { position: absolute; left: 0; top: 0; height: 100%; background: var(--accent); border-radius: 2px; width: 0%; pointer-events: none;}
+  .seek-thumb { position: absolute; top: 50%; width: 12px; height: 12px; background: #fff; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; box-shadow: 0 0 10px rgba(0,0,0,0.5);}
+  .time-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-dim); margin-bottom: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
-  /* ── LOADING SPINNER ── */
-  .spinner {
-    display: flex;
-    justify-content: center;
-    padding: 32px;
-  }
-  .spinner::after {
-    content: '';
-    width: 28px; height: 28px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin .7s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* ── PLAYER BAR ── */
-  .player-bar {
-    position: fixed;
-    bottom: 0; left: 0; right: 0;
-    height: var(--player-h);
-    background: var(--surface);
-    border-top: 1px solid var(--border);
-    display: none;
-    flex-direction: column;
-    z-index: 100;
-    box-shadow: 0 -8px 32px rgba(0,0,0,.6);
-  }
-  .player-bar.visible { display: flex; }
-
-  .player-progress {
-    height: 3px;
-    background: var(--border);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .player-progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg, var(--accent), var(--accent2));
-    width: 0%;
-    transition: width .1s linear;
-    pointer-events: none;
-  }
-
-  .player-main {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 0 14px;
-    flex: 1;
-  }
-
-  .player-cover {
-    width: 46px; height: 46px;
-    border-radius: 8px;
-    background: var(--surface2);
-    overflow: hidden;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 22px;
-  }
-  .player-cover img { width: 100%; height: 100%; object-fit: cover; }
-
-  .player-info { flex: 1; min-width: 0; }
-  .player-title {
-    font-size: 14px;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .player-artist { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
-  .player-time { font-size: 11px; color: var(--text-dim); }
-
-  .player-controls { display: flex; align-items: center; gap: 4px; }
-  .ctrl-btn {
-    background: none;
-    border: none;
-    color: var(--text);
-    font-size: 24px;
-    cursor: pointer;
-    padding: 8px;
-    border-radius: 50%;
-    transition: background .15s;
-    line-height: 1;
-  }
-  .ctrl-btn:active { background: var(--surface2); }
-  .ctrl-btn.play-main {
-    background: var(--accent);
-    color: white;
-    font-size: 20px;
-    padding: 10px;
-    box-shadow: 0 0 16px var(--accent-glow);
-  }
-  .ctrl-btn.play-main:active { background: var(--accent2); }
+  /* Кнопки управления */
+  .main-ctrls { display: flex; justify-content: center; align-items: center; gap: 32px; }
+  .ctrl-btn { background: none; border: none; color: var(--text); font-size: 32px; transition: transform 0.1s; }
+  .ctrl-btn:active { transform: scale(0.9); }
+  .play-huge { width: 72px; height: 72px; border-radius: 50%; background: var(--accent); color: #000; font-size: 32px; display: flex; align-items: center; justify-content: center; }
 
   /* ── TOAST ── */
-  .toast {
-    position: fixed;
-    bottom: calc(var(--player-h) + 10px);
-    left: 50%;
-    transform: translateX(-50%) translateY(10px);
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 18px;
-    border-radius: 20px;
-    font-size: 13px;
-    opacity: 0;
-    transition: all .25s;
-    pointer-events: none;
-    white-space: nowrap;
-    z-index: 200;
-  }
-  .toast.show {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
-  }
+  .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%) translateY(-20px); background: var(--surface2); color: var(--text); padding: 12px 24px; border-radius: 30px; font-size: 14px; font-weight: bold; opacity: 0; transition: all .3s; pointer-events: none; z-index: 2000; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+  .empty { text-align: center; padding: 60px 24px; color: var(--text-dim); }
+  .empty .empty-icon { font-size: 48px; margin-bottom: 12px; }
+  
   audio { display: none; }
-
-  /* ── QUEUE PAGE ── */
-  .queue-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px;
-  }
-  .queue-header h3 { font-size: 17px; }
-  .clear-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: 8px;
-    padding: 5px 12px;
-    font-size: 13px;
-    cursor: pointer;
-  }
-  .clear-btn:active { background: var(--surface2); }
 </style>
 </head>
 <body>
 
 <!-- NAV -->
 <div class="tabs">
-  <div class="tab active" onclick="showTab('search')">
-    <span class="tab-icon">🔍</span>Поиск
-  </div>
-  <div class="tab" onclick="showTab('favs')">
-    <span class="tab-icon">❤️</span>Избранное
-  </div>
-  <div class="tab" onclick="showTab('playlists')">
-    <span class="tab-icon">📋</span>Плейлисты
-  </div>
-  <div class="tab" onclick="showTab('queue')">
-    <span class="tab-icon">🎵</span>Очередь
-  </div>
-  <div class="tab" onclick="showTab('history')">
-    <span class="tab-icon">🕒</span>История
-  </div>
+  <div class="tab active" onclick="showTab('search')"><span class="tab-icon">🔍</span>Поиск</div>
+  <div class="tab" onclick="showTab('favs')"><span class="tab-icon">❤️</span>Избранное</div>
+  <div class="tab" onclick="showTab('queue')"><span class="tab-icon">🎵</span>Очередь</div>
 </div>
 
 <!-- SEARCH PAGE -->
 <div class="page active" id="page-search">
   <div class="search-wrap">
     <div class="search-row">
-      <input class="search-input" id="search-input" type="text" placeholder="Артист, трек..." autocomplete="off">
-      <button class="search-btn" onclick="doSearch()">🔎</button>
+      <input class="search-input" id="search-input" type="text" placeholder="Трек, артист, подкаст..." autocomplete="off">
+      <button class="search-btn" onclick="doSearch()">Найти</button>
     </div>
   </div>
   <ul class="track-list" id="search-results"></ul>
@@ -396,47 +139,63 @@
 
 <!-- FAVS PAGE -->
 <div class="page" id="page-favs">
-  <div class="section-header">❤️ Избранное</div>
-  <ul class="track-list" id="favs-list"></ul>
-</div>
-
-<!-- PLAYLISTS PAGE -->
-<div class="page" id="page-playlists">
-  <div class="pl-tabs" id="pl-tabs"></div>
-  <ul class="track-list" id="pl-tracks"></ul>
+  <ul class="track-list" id="favs-list" style="margin-top: 12px;"></ul>
 </div>
 
 <!-- QUEUE PAGE -->
 <div class="page" id="page-queue">
-  <div class="queue-header">
-    <h3>🎵 Очередь</h3>
-    <button class="clear-btn" onclick="clearQueue()">Очистить</button>
-  </div>
-  <ul class="track-list" id="queue-list"></ul>
+  <ul class="track-list" id="queue-list" style="margin-top: 12px;"></ul>
 </div>
 
-<!-- HISTORY PAGE -->
-<div class="page" id="page-history">
-  <div class="section-header">🕒 Недавно прослушанное</div>
-  <ul class="track-list" id="history-list"></ul>
+<!-- MINI PLAYER -->
+<div class="mini-player" id="mini-player" onclick="openFullscreen()">
+  <div class="mp-progress" id="mp-progress"></div>
+  <div class="mp-cover" id="mp-cover"><img src="" onerror="this.style.display='none'"></div>
+  <div class="mp-info">
+    <div class="mp-title" id="mp-title">Выбери трек</div>
+    <div class="mp-artist" id="mp-artist"></div>
+  </div>
+  <button class="mp-btn" id="mp-play" onclick="togglePlay(event)">▶</button>
+  <button class="mp-btn" onclick="playNext(event)">⏭</button>
 </div>
 
-<!-- PLAYER BAR -->
-<div class="player-bar" id="player-bar">
-  <div class="player-progress" id="progress-bar" onclick="seekTo(event)">
-    <div class="player-progress-fill" id="progress-fill"></div>
+<!-- FULLSCREEN PLAYER -->
+<div class="fs-player" id="fs-player">
+  <div class="fs-header">
+    <button class="fs-btn" onclick="closeFullscreen()">🡣</button>
+    <div style="font-size: 12px; font-weight: bold; letter-spacing: 1px; color: var(--text-dim);">СЕЙЧАС ИГРАЕТ</div>
+    <div style="width: 24px;"></div>
   </div>
-  <div class="player-main">
-    <div class="player-cover" id="player-cover">🎵</div>
-    <div class="player-info">
-      <div class="player-title" id="player-title">Выбери трек</div>
-      <div class="player-artist" id="player-artist"></div>
-      <div class="player-time" id="player-time">0:00 / 0:00</div>
+  
+  <div class="fs-cover-wrap">
+    <img src="" class="fs-cover" id="fs-cover" onerror="this.src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='">
+  </div>
+  
+  <div class="fs-controls">
+    <div class="fs-meta">
+      <div class="fs-texts">
+        <div class="fs-title" id="fs-title">Title</div>
+        <div class="fs-artist" id="fs-artist">Artist</div>
+      </div>
+      <button class="fs-fav" id="fs-fav" onclick="toggleFav()">♡</button>
     </div>
-    <div class="player-controls">
-      <button class="ctrl-btn" onclick="playPrev()" title="Назад">⏮</button>
-      <button class="ctrl-btn play-main" id="play-btn" onclick="togglePlay()">▶</button>
-      <button class="ctrl-btn" onclick="playNext()" title="Вперёд">⏭</button>
+    
+    <div class="seek-bar-container" id="seek-container">
+      <div class="seek-bg">
+        <div class="seek-fill" id="seek-fill"></div>
+        <div class="seek-thumb" id="seek-thumb"></div>
+      </div>
+    </div>
+    
+    <div class="time-row">
+      <div id="time-current">0:00</div>
+      <div id="time-total">0:00</div>
+    </div>
+    
+    <div class="main-ctrls">
+      <button class="ctrl-btn" onclick="playPrev()">⏮</button>
+      <button class="ctrl-btn play-huge" id="fs-play" onclick="togglePlay(event)">▶</button>
+      <button class="ctrl-btn" onclick="playNext()">⏭</button>
     </div>
   </div>
 </div>
@@ -447,224 +206,152 @@
 <script>
 const tg = window.Telegram.WebApp;
 tg.expand();
-tg.enableClosingConfirmation();
+tg.setHeaderColor('#000000');
+tg.setBackgroundColor('#000000');
 
 const audio = document.getElementById('audio');
-const playBtn = document.getElementById('play-btn');
-
-let allData = { favs: [], history: [], playlists: {}, queue: [] };
-let currentQueue = [];   // активный список для авто-следующего
+let allData = { favs: [], queue: [] };
+let currentQueue = [];   
 let currentIdx = -1;
+let currentTrack = null;
 let searchTimeout = null;
-let currentPlName = null;
 
-// ── TABS ───────────────────────────────────────────────────────
 function showTab(name) {
   document.querySelectorAll('.tab').forEach((t, i) => {
-    t.classList.toggle('active', ['search','favs','playlists','queue','history'][i] === name);
+    t.classList.toggle('active', ['search','favs','queue'][i] === name);
   });
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
 }
 
-// ── DATA LOAD ──────────────────────────────────────────────────
 async function loadData() {
   try {
-    const res = await fetch('/api/tracks', {
-      headers: { 'Authorization': tg.initData }
-    });
-    if (!res.ok) throw new Error(res.status);
-    allData = await res.json();
-    renderFavs();
-    renderHistory();
-    renderPlaylists();
-    renderQueue();
-  } catch(e) {
-    console.error('Load error', e);
-    showToast('⚠️ Не удалось загрузить данные');
-  }
+    const res = await fetch('/api/tracks', { headers: { 'Authorization': tg.initData } });
+    if(res.ok) {
+      allData = await res.json();
+      renderFavs(); renderQueue();
+    }
+  } catch(e) {}
 }
 
-// ── SEARCH ─────────────────────────────────────────────────────
-document.getElementById('search-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') doSearch();
-});
 document.getElementById('search-input').addEventListener('input', e => {
   clearTimeout(searchTimeout);
-  const q = e.target.value.trim();
-  if (q.length >= 3) searchTimeout = setTimeout(doSearch, 700);
+  if (e.target.value.trim().length >= 3) searchTimeout = setTimeout(doSearch, 700);
 });
 
 async function doSearch() {
   const q = document.getElementById('search-input').value.trim();
   if (!q) return;
   const list = document.getElementById('search-results');
-  list.innerHTML = '<li class="spinner"></li>';
+  list.innerHTML = '<div class="empty"><p>Ищем...</p></div>';
   try {
     const res = await fetch('/api/search?q=' + encodeURIComponent(q));
     const tracks = await res.json();
-    if (!tracks.length) {
-      list.innerHTML = '<li><div class="empty"><div class="empty-icon">😶</div><p>Ничего не нашли<br>Попробуй другой запрос</p></div></li>';
-      return;
-    }
     renderTrackList(tracks, list, tracks);
-  } catch(e) {
-    list.innerHTML = '<li><div class="empty"><p>Ошибка поиска 💀</p></div></li>';
-  }
-}
-
-// ── RENDER ─────────────────────────────────────────────────────
-function srcBadge(src) {
-  if (src === 'SoundCloud') return '<span class="src-badge src-sc">SC</span>';
-  if (src === 'YouTube Music') return '<span class="src-badge src-yt">YT</span>';
-  return '';
+  } catch(e) { list.innerHTML = '<div class="empty"><p>Ошибка 💀</p></div>'; }
 }
 
 function makeItem(track, queueRef, idx) {
   const li = document.createElement('li');
   li.className = 'track-item';
   li.dataset.id = track.id;
-
-  const cover = track.artwork_url
-    ? `<img src="${escHtml(track.artwork_url)}" loading="lazy" onerror="this.style.display='none'">`
-    : '🎵';
-
+  
+  const cover = track.artwork_url ? track.artwork_url : '';
+  
   li.innerHTML = `
     <div class="track-cover">
-      ${cover}
-      <div class="play-over">▶</div>
+      ${cover ? `<img src="${cover}">` : `<div style="width:100%;height:100%;background:#333;"></div>`}
+      <div class="eq-mini">
+        <div class="eq-bar"></div><div class="eq-bar"></div><div class="eq-bar"></div>
+      </div>
     </div>
     <div class="track-meta">
-      <div class="track-title">${escHtml(track.title)}</div>
-      <div class="track-artist">${escHtml(track.artist)}</div>
+      <div class="track-title">${track.title}</div>
+      <div class="track-artist">${track.artist}</div>
     </div>
     <div class="track-actions">
-      ${track.duration ? `<span class="track-dur">${track.duration}</span>` : ''}
-      ${srcBadge(track.source || 'SoundCloud')}
       <button class="btn-queue" title="В очередь" onclick="addToQueue(event, ${JSON.stringify(JSON.stringify(track))})">＋</button>
     </div>
   `;
-  li.addEventListener('click', () => {
-    currentQueue = queueRef;
-    currentIdx = idx;
-    playTrack(track);
-  });
+  li.addEventListener('click', () => { currentQueue = queueRef; currentIdx = idx; playTrack(track); });
   return li;
 }
 
 function renderTrackList(tracks, container, queueRef) {
   container.innerHTML = '';
   if (!tracks.length) {
-    container.innerHTML = '<li><div class="empty"><div class="empty-icon">🕳</div><p>Здесь пусто</p></div></li>';
+    container.innerHTML = '<div class="empty"><div class="empty-icon">🕳</div><p>Здесь пусто</p></div>';
     return;
   }
   tracks.forEach((t, i) => container.appendChild(makeItem(t, queueRef, i)));
+  highlightPlaying();
 }
 
-function renderFavs() {
-  const list = document.getElementById('favs-list');
-  if (!allData.favs.length) {
-    list.innerHTML = '<li><div class="empty"><div class="empty-icon">❤️</div><p>Нажимай ❤️ под треками в боте<br>чтобы сохранять сюда</p></div></li>';
-    return;
-  }
-  renderTrackList(allData.favs, list, allData.favs);
-}
+function renderFavs() { renderTrackList(allData.favs, document.getElementById('favs-list'), allData.favs); }
+function renderQueue() { renderTrackList(allData.queue, document.getElementById('queue-list'), allData.queue); }
 
-function renderHistory() {
-  const list = document.getElementById('history-list');
-  renderTrackList(allData.history, list, allData.history);
-}
-
-function renderPlaylists() {
-  const pls = allData.playlists || {};
-  const names = Object.keys(pls);
-  const tabs = document.getElementById('pl-tabs');
-  const tracks = document.getElementById('pl-tracks');
-
-  if (!names.length) {
-    tabs.innerHTML = '';
-    tracks.innerHTML = '<li><div class="empty"><div class="empty-icon">📋</div><p>Создавай плейлисты через бота<br>кнопкой «📋 В плейлист» под треком</p></div></li>';
-    return;
-  }
-
-  if (!currentPlName || !pls[currentPlName]) currentPlName = names[0];
-
-  tabs.innerHTML = names.map(n =>
-    `<div class="pl-chip ${n === currentPlName ? 'active' : ''}" onclick="selectPlaylist('${escHtml(n)}')">${escHtml(n)} (${pls[n].length})</div>`
-  ).join('');
-
-  const plTracks = pls[currentPlName] || [];
-  renderTrackList(plTracks, tracks, plTracks);
-}
-
-function selectPlaylist(name) {
-  currentPlName = name;
-  renderPlaylists();
-}
-
-function renderQueue() {
-  const list = document.getElementById('queue-list');
-  renderTrackList(allData.queue, list, allData.queue);
-}
-
-// ── QUEUE ──────────────────────────────────────────────────────
 function addToQueue(e, trackJson) {
   e.stopPropagation();
   const track = JSON.parse(trackJson);
-  // добавляем локально для немедленного отображения
-  const already = allData.queue.some(t => t.id === track.id);
-  if (!already) {
+  if (!allData.queue.some(t => t.id === track.id)) {
     allData.queue.push(track);
     renderQueue();
   }
-  showToast('➕ Добавлено в очередь');
+  showToast('🎵 Добавлено в очередь');
 }
 
-function clearQueue() {
-  allData.queue = [];
-  renderQueue();
-  showToast('🗑 Очередь очищена');
-}
-
-// ── PLAYER ─────────────────────────────────────────────────────
+// ── УПРАВЛЕНИЕ ПЛЕЕРОМ ──
 function playTrack(track) {
-  if (track.id.startsWith('yt_')) {
-    showToast('▶️ YouTube треки можно скачать через бота');
-    return;
-  }
+  if (track.id.startsWith('yt_')) { showToast('YouTube только в боте'); return; }
+  currentTrack = track;
 
-  document.getElementById('player-bar').classList.add('visible');
-  document.getElementById('player-title').textContent = track.title;
-  document.getElementById('player-artist').textContent = track.artist;
+  document.getElementById('mini-player').classList.add('visible');
+  document.getElementById('mp-title').textContent = track.title;
+  document.getElementById('mp-artist').textContent = track.artist;
+  document.getElementById('fs-title').textContent = track.title;
+  document.getElementById('fs-artist').textContent = track.artist;
 
-  const coverEl = document.getElementById('player-cover');
-  if (track.artwork_url) {
-    coverEl.innerHTML = `<img src="${escHtml(track.artwork_url)}" onerror="this.parentElement.innerHTML='🎵'">`;
-  } else {
-    coverEl.innerHTML = '🎵';
-  }
+  const cover = track.artwork_url || '';
+  document.querySelector('#mp-cover img').src = cover;
+  document.querySelector('#mp-cover img').style.display = cover ? 'block' : 'none';
+  document.getElementById('fs-cover').src = cover;
 
-  // Подсвечиваем текущий трек
-  document.querySelectorAll('.track-item').forEach(el => {
-    el.classList.toggle('playing', el.dataset.id === String(track.id));
-  });
+  checkFavState();
+  highlightPlaying();
 
   audio.src = `/api/stream/${encodeURIComponent(track.id)}`;
-  audio.play().catch(() => showToast('⚠️ Не удалось воспроизвести'));
-  playBtn.textContent = '⏸';
+  audio.play().catch(e => {
+    console.error(e);
+    showToast('⚠️ Ошибка стрима. Переключаю...');
+    setTimeout(playNext, 1500); // Автоскип если трек заблокирован (403 от SC)
+  });
+  updatePlayBtns(true);
 }
 
-function togglePlay() {
-  if (audio.paused) {
-    audio.play();
-    playBtn.textContent = '⏸';
-  } else {
-    audio.pause();
-    playBtn.textContent = '▶';
-  }
+function highlightPlaying() {
+  document.querySelectorAll('.track-item').forEach(el => {
+    el.classList.toggle('playing', currentTrack && el.dataset.id === String(currentTrack.id));
+  });
 }
 
-function playNext() {
+function togglePlay(e) {
+  if(e) e.stopPropagation();
+  if (audio.paused) { audio.play(); updatePlayBtns(true); } 
+  else { audio.pause(); updatePlayBtns(false); }
+}
+
+function updatePlayBtns(isPlaying) {
+  document.getElementById('mp-play').textContent = isPlaying ? '⏸' : '▶';
+  document.getElementById('fs-play').textContent = isPlaying ? '⏸' : '▶';
+  
+  // При паузе останавливаем эквалайзер
+  document.querySelectorAll('.eq-bar').forEach(el => {
+    el.style.animationPlayState = isPlaying ? 'running' : 'paused';
+  });
+}
+
+function playNext(e) {
+  if(e) e.stopPropagation();
   if (currentQueue.length === 0) return;
   currentIdx = (currentIdx + 1) % currentQueue.length;
   playTrack(currentQueue[currentIdx]);
@@ -677,55 +364,91 @@ function playPrev() {
   playTrack(currentQueue[currentIdx]);
 }
 
-function seekTo(e) {
-  const bar = document.getElementById('progress-bar');
-  const ratio = e.offsetX / bar.offsetWidth;
-  if (audio.duration) audio.currentTime = ratio * audio.duration;
+audio.addEventListener('ended', playNext);
+audio.addEventListener('error', () => {
+  showToast('❌ Ошибка воспроизведения трека');
+  setTimeout(playNext, 1500);
+});
+
+// ── ПЕРЕМОТКА ──
+const seekContainer = document.getElementById('seek-container');
+seekContainer.addEventListener('pointerdown', (e) => {
+  if(!audio.duration) return;
+  const rect = seekContainer.getBoundingClientRect();
+  const setTime = (ev) => {
+    let pct = (ev.clientX - rect.left) / rect.width;
+    pct = Math.max(0, Math.min(1, pct));
+    audio.currentTime = pct * audio.duration;
+    updateSeekUI();
+  };
+  setTime(e);
+  
+  const moveHandler = (ev) => setTime(ev);
+  const upHandler = () => {
+    document.removeEventListener('pointermove', moveHandler);
+    document.removeEventListener('pointerup', upHandler);
+  };
+  document.addEventListener('pointermove', moveHandler);
+  document.addEventListener('pointerup', upHandler);
+});
+
+function fmtTime(s) {
+  if (isNaN(s)) return "0:00";
+  return `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 }
 
-audio.addEventListener('timeupdate', () => {
+function updateSeekUI() {
   if (!audio.duration) return;
   const pct = (audio.currentTime / audio.duration) * 100;
-  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('mp-progress').style.width = pct + '%';
+  document.getElementById('seek-fill').style.width = pct + '%';
+  document.getElementById('seek-thumb').style.left = pct + '%';
+  document.getElementById('time-current').textContent = fmtTime(audio.currentTime);
+  document.getElementById('time-total').textContent = fmtTime(audio.duration);
+}
 
-  const fmt = s => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
-  document.getElementById('player-time').textContent =
-    `${fmt(audio.currentTime)} / ${fmt(audio.duration)}`;
-});
+audio.addEventListener('timeupdate', updateSeekUI);
 
-audio.addEventListener('ended', () => {
-  // если есть очередь — играем из неё
-  if (allData.queue.length > 0) {
-    const next = allData.queue.shift();
-    renderQueue();
-    playTrack(next);
-  } else {
-    playNext();
-  }
-});
+// ── FULLSCREEN ──
+function openFullscreen() { document.getElementById('fs-player').classList.add('open'); }
+function closeFullscreen() { document.getElementById('fs-player').classList.remove('open'); }
 
-audio.addEventListener('error', () => {
-  showToast('❌ Ошибка потока. Попробуй другой трек.');
-  playBtn.textContent = '▶';
-});
+// ── ИЗБРАННОЕ ──
+function checkFavState() {
+  if(!currentTrack) return;
+  const isFav = allData.favs.some(t => t.id === currentTrack.id);
+  const btn = document.getElementById('fs-fav');
+  btn.classList.toggle('active', isFav);
+  btn.textContent = isFav ? '♥' : '♡';
+}
 
-// ── TOAST ──────────────────────────────────────────────────────
-let toastTimer = null;
+async function toggleFav() {
+  if(!currentTrack) return;
+  try {
+    const url = `/api/fav_add?id=${encodeURIComponent(currentTrack.id)}&title=${encodeURIComponent(currentTrack.title)}&artist=${encodeURIComponent(currentTrack.artist)}`;
+    await fetch(url, { headers: { 'Authorization': tg.initData }});
+    
+    // Обновляем локально
+    const exists = allData.favs.findIndex(t => t.id === currentTrack.id);
+    if(exists === -1) {
+      allData.favs.push(currentTrack);
+      showToast('❤️ Добавлено в избранное');
+    }
+    checkFavState();
+    renderFavs();
+  } catch(e) { showToast('❌ Ошибка сохранения'); }
+}
+
+// ── TOAST ──
+let toastTimer;
 function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
 }
 
-// ── UTILS ──────────────────────────────────────────────────────
-function escHtml(str) {
-  return String(str).replace(/[&<>"']/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-// ── INIT ───────────────────────────────────────────────────────
 loadData();
 </script>
 </body>
