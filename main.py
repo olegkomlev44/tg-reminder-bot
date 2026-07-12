@@ -973,7 +973,7 @@ async def show_music_page(message_or_callback, mode, query, page):
             await message_or_callback.answer("❌ Ничего не нашли ни на одной площадке 💀")
         return
 
-    _src_icons = {"SoundCloud": "🔊", "Deezer": "💿", "YouTube Music": "▶️"}
+    _src_icons = {"SoundCloud": "🔊", "YouTube Music": "▶️"}
     buttons = []
     for t in tracks:
         icon = _src_icons.get(t.get("source", ""), "🎵")
@@ -1042,12 +1042,11 @@ async def send_track_to_user(target_obj, track_id: str):
     
     # 2. ФОРМИРУЕМ текст с уже готовым хештегом и тегом Explicit
     _src = track.get("source", "SoundCloud")
-    _src_icon = {"SoundCloud": "🔊", "Deezer": "💿", "YouTube Music": "▶️"}.get(_src, "🎵")
-    _preview_note = "\n⚠️ _30-сек превью (Deezer)_" if track.get("deezer_preview") else ""
+    _src_icon = {"SoundCloud": "🔊", "YouTube Music": "▶️"}.get(_src, "🎵")
     caption = (
         f"🎧 *{track['artist']} — {track['title']}*{explicit}\n\n"
         f"🎼 *Жанр:* {genre_tag}\n"
-        f"{_src_icon} *Источник:* {_src}{_preview_note}"
+        f"{_src_icon} *Источник:* {_src}"
     )
 
 
@@ -1097,7 +1096,7 @@ async def send_track_to_user(target_obj, track_id: str):
         caption = (
             f"🎧 *{track['artist']} — {track['title']}*\n\n"
             f"🎼 *Жанр:* {genre_tag}\n"
-            f"{_src_icon} *Источник:* {_src}{_preview_note}{geek_data}"
+            f"{_src_icon} *Источник:* {_src}{geek_data}"
         )
 
         audio_bytes = add_id3_tags(audio_bytes, track['title'], track['artist'], cover_bytes)
@@ -1318,7 +1317,7 @@ async def cmd_my_music(message: types.Message):
     buttons = []
     for f in page_favs:
         explicit = get_explicit_tag(f['title'])
-        source_icon = {"SoundCloud": "🔊", "Deezer": "💿", "YouTube Music": "▶️"}.get(f.get("source", ""), "🎵")
+        source_icon = {"SoundCloud": "🔊", "YouTube Music": "▶️"}.get(f.get("source", ""), "🎵")
         buttons.append([InlineKeyboardButton(
             text=f"{source_icon} {f['artist']} — {f['title']}{explicit}",
             callback_data=f"dl_sc:{f['id']}"
