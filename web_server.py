@@ -66,6 +66,8 @@ async def api_search(request):
 
 async def api_stream_track(request):
     track_id = request.match_info["track_id"]
+    app.router.add_get("/api/fav_add", api_fav_add)
+
     # YouTube треки — редиректим на yt
     if track_id.startswith("yt_"):
         return _cors(web.json_response({"error": "YT stream not supported in browser"}, status=422))
