@@ -1517,11 +1517,6 @@ async def cmd_music_dashboard(message: types.Message):
     # Замени web_app_url на свой домен в BotHost (например, bot-12345.bothost.ru)
 # Обязательно с https://
 web_app_url = "https://bot-твой-id.bothost.ru" 
-
-keyboard = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🌐 Открыть плеер", web_app=WebAppInfo(url=web_app_url))],
-    # ... остальные кнопки
-
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -1536,13 +1531,15 @@ keyboard = InlineKeyboardMarkup(inline_keyboard=[
             InlineKeyboardButton(text="📋 Плейлисты", callback_data="show_playlists"),
             InlineKeyboardButton(text="🎵 Очередь", callback_data="queue_show")
         ],
-        [InlineKeyboardButton(text="🚀 Радар релизов", callback_data="radar_releases")]
+        [InlineKeyboardButton(text="🚀 Радар релизов", callback_data="radar_releases"),
+        [InlineKeyboardButton(text="🌐 Открыть плеер", web_app=WebAppInfo(url=web_app_url))],
+        ]
     ])
     
     text = (
         "🎶 *MUSIC DASHBOARD*\n\n"
         "Добро пожаловать в хаб. Выбирай, какой вайб тебе нужен сейчас.\n"
-        "Или ищи треки напрямую: `@твой_бот [название]`"
+        "Или ищи треки напрямую: `@Betboomers_bot [название]`"
     )
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
