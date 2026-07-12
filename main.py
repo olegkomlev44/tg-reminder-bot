@@ -1513,12 +1513,9 @@ async def cmd_my_music(message: types.Message):
 async def cmd_music_dashboard(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     
-    # Кнопка Web App (заглушка для Визуала 1)
-    # Замени web_app_url на свой домен в BotHost (например, bot-12345.bothost.ru)
-# Обязательно с https://
     web_app_url = "https://nl12.bothost.ru" 
     
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🌊 Моя Волна", callback_data="start_wave"),
             InlineKeyboardButton(text="🔥 Чарты", callback_data="mus_pg:chart:none:0")
