@@ -1513,7 +1513,7 @@ async def cmd_my_music(message: types.Message):
 async def cmd_music_dashboard(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     
-    web_app_url = "https://nl12.bothost.ru" 
+    web_app_url = "https://bot-1783869505-4307-olegbff.bothost.tech/" 
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
