@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Music Player</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            background-color: #121212; color: white;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0; padding: 0; padding-bottom: 100px;
+        }
+        h2 { margin: 20px 15px 10px; font-size: 20px; }
+        .track-list { list-style: none; padding: 0; margin: 0; }
+        .track-item {
+            display: flex; align-items: center; padding: 12px 15px; border-bottom: 1px solid #282828; cursor: pointer;
+        }
+        .track-item:active { background-color: #282828; }
+        .track-info { display: flex; flex-direction: column; margin-left: 15px; }
+        .track-title { font-size: 16px; font-weight: bold; margin-bottom: 4px; }
+        .track-artist { font-size: 14px; color: #b3b3b3; }
+        .play-icon { font-size: 20px; color: #1DB954; }
+        
+        /* Фиксированный плеер внизу */
+        .player-bar {
+            position: fixed; bottom: 0; left: 0; right: 0; background-color: #181818;
+            border-top: 1px solid #282828; padding: 15px; display: flex; flex-direction: column; align-items: center;
+        }
+        .player-info { width: 100%; display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .controls button {
+            background: none; border: none; color: white; font-size: 30px; cursor: pointer;
+        }
+        #audio-element { display: none; }
+        #progress-bar { width: 100%; height: 4px; background: #535353; border-radius: 2px; position: relative; margin-top: 5px; }
+        #progress-fill { width: 0%; height: 100%; background: #1DB954; border-radius: 2px; transition: width 0.1s linear;}
+    </style>
+</head>
+<body>
+
+    <h2>❤️ Избранное</h2>
+    <ul class="track-list" id="favs-list"></ul>
+
+    <h2>🕒 Недавно прослушанное</h2>
+    <ul class="track-list" id="history-list"></ul>
+
+    <div class="player-bar" id="player-bar" style="display: none;">
+        <div class="player-info">
+            <div>
+                <div class="track-title" id="now-playing-title">Выбери трек</div>
+                <div class="track-artist" id="now-playing-artist"></div>
+            </div>
+            <div class="controls">
+                <button id="play-pause-btn" onclick="togglePlay()">▶️</button>
+            </div>
+        </div>
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+        <audio id="audio-element" ontimeupdate="updateProgress()" onended="playNext()"></audio>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand(); // Открыть на весь экран
+
+        let currentTracks = [];
+        let currentIndex = -1;
+        const audio = document.getElementById('audio-element');
+        const playPauseBtn = document.getElementById('play-pause-btn');
+        const progressFill = document.getElementById('progress-fill');
+
+        // Загрузка данных при старте
+        async function loadTracks() {
+            const initData = tg.initData;
+            try {
+                const res = await fetch('/api/tracks', {
+                    headers: { 'Authorization': initData }
+                });
+                const data = await res.json();
+                renderList(data.favs, 'favs-list');
+                renderList(data.history, 'history-list');
+                // Объединяем для плейлиста
+                currentTracks = [...data.favs, ...data.history];
+            } catch (e) {
+                console.error("Ошибка загрузки", e);
+            }
+        }
+
+        function renderList(tracks, elementId) {
+            const list = document.getElementById(elementId);
+            list.innerHTML = '';
+            tracks.forEach((track) => {
+                const li = document.createElement('li');
+                li.className = 'track-item';
+                li.innerHTML = `
+                    <div class="play-icon">▶</div>
+                    <div class="track-info">
+                        <span class="track-title">${track.title}</span>
+                        <span class="track-artist">${track.artist}</span>
+                    </div>
+                `;
+                li.onclick = () => playTrack(track);
+                list.appendChild(li);
+            });
+        }
+
+        function playTrack(track) {
+            document.getElementById('player-bar').style.display = 'flex';
+            document.getElementById('now-playing-title').innerText = track.title;
+            document.getElementById('now-playing-artist').innerText = track.artist;
+            
+            // Запрашиваем стрим через наш сервер
+            audio.src = `/api/stream/${track.id}`;
+            audio.play();
+            playPauseBtn.innerText = '⏸';
+            
+            currentIndex = currentTracks.findIndex(t => t.id === track.id);
+        }
+
+        function togglePlay() {
+            if (audio.paused) { audio.play(); playPauseBtn.innerText = '⏸'; } 
+            else { audio.pause(); playPauseBtn.innerText = '▶️'; }
+        }
+
+        function updateProgress() {
+            if (audio.duration) {
+                const percent = (audio.currentTime / audio.duration) * 100;
+                progressFill.style.width = percent + '%';
+            }
+        }
+
+        function playNext() {
+            if (currentIndex >= 0 && currentIndex < currentTracks.length - 1) {
+                playTrack(currentTracks[currentIndex + 1]);
+            }
+        }
+
+        loadTracks();
+    </script>
+</body>
+</html>
