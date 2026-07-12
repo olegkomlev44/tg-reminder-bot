@@ -277,7 +277,7 @@ def load_data():
             data = json.load(f)
             if "ai_random_replies_enabled" not in data: data["ai_random_replies_enabled"] = True
             if "track_cache" not in data: data["track_cache"] = {}
-            if "user_history" not in data: data["user_history"] = {} # НОВОЕ: История
+            if "user_history" not in data: data["user_history"] = {} 
             return data
             
     data = {
@@ -1515,14 +1515,10 @@ async def cmd_music_dashboard(message: types.Message):
     WEB_APP_URL = os.getenv("WEB_APP_URL", "https://bot-1783869505-4307-olegbff.bothost.tech/")
 
     # WebAppInfo работает ТОЛЬКО в ReplyKeyboardMarkup (обычная клавиатура)
-    # В InlineKeyboardMarkup нужно использовать url
-    reply_kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🎵 Открыть плеер", web_app=WebAppInfo(url=WEB_APP_URL))]],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
-
+    # В InlineKeyboardMarkup нужно использовать url или web_app аргумент
+    
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎵 Открыть плеер (WebApp)", web_app=WebAppInfo(url=WEB_APP_URL))],
         [
             InlineKeyboardButton(text="🌊 Моя Волна", callback_data="start_wave"),
             InlineKeyboardButton(text="🔥 Чарты", callback_data="mus_pg:chart:none:0")
@@ -1543,9 +1539,16 @@ async def cmd_music_dashboard(message: types.Message):
         "Добро пожаловать в хаб. Выбирай вайб или открой плеер кнопкой снизу.\n"
         "Или ищи треки напрямую: <code>@Betboomers_bot [название]</code>"
     )
-    # Сначала шлём reply-клавиатуру с кнопкой плеера
-    await message.answer("🎵", reply_markup=reply_kb)
-    # Потом основной дашборд с инлайн-кнопками
+    
+    # В личных сообщениях отправляем и обычную кнопку снизу, и инлайн
+    if message.chat.type == "private":
+        reply_kb = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="🎵 Открыть плеер", web_app=WebAppInfo(url=WEB_APP_URL))]],
+            resize_keyboard=True,
+            one_time_keyboard=False
+        )
+        await message.answer("🎵", reply_markup=reply_kb)
+        
     await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
 
 # --- ИЗБРАННОЕ ИНЛАЙН-КНОПКАМИ ---
