@@ -1516,7 +1516,7 @@ async def cmd_music_dashboard(message: types.Message):
     # Кнопка Web App (заглушка для Визуала 1)
     # Замени web_app_url на свой домен в BotHost (например, bot-12345.bothost.ru)
 # Обязательно с https://
-web_app_url = "https://bot-твой-id.bothost.ru" 
+    web_app_url = "https://nl12.bothost.ru" 
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
