@@ -81,3 +81,46 @@ def get_user_history(user_id):
     rows = c.fetchall()
     conn.close()
     return [{"id": r[0], "title": r[1], "artist": r[2]} for r in rows]
+
+
+# ── Плейлисты (JSON в отдельной таблице) ──────────────────────────────────
+def init_db_extended():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS playlists
+                 (user_id TEXT, name TEXT, track_id TEXT, title TEXT, artist TEXT, source TEXT,
+                  UNIQUE(user_id, name, track_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS queue
+                 (user_id TEXT, track_id TEXT, title TEXT, artist TEXT, source TEXT, pos INTEGER)""")
+    conn.commit()
+    conn.close()
+
+
+def get_playlists(user_id) -> dict:
+    """Возвращает {playlist_name: [{id, title, artist, source}, ...]}"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT name, track_id, title, artist, source FROM playlists WHERE user_id=? ORDER BY name, rowid",
+                  (str(user_id),))
+        rows = c.fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+    result: dict = {}
+    for name, tid, title, artist, source in rows:
+        result.setdefault(name, []).append({"id": tid, "title": title, "artist": artist, "source": source or "SoundCloud"})
+    return result
+
+
+def get_user_queue(user_id) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT track_id, title, artist, source FROM queue WHERE user_id=? ORDER BY pos",
+                  (str(user_id),))
+        rows = c.fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+    return [{"id": r[0], "title": r[1], "artist": r[2], "source": r[3] or "SoundCloud"} for r in rows]
