@@ -1510,19 +1510,13 @@ async def cmd_my_music(message: types.Message):
 
 
 async def cmd_music_dashboard(message: types.Message):
-    await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
-
+    # УБРАЛИ auto_delete_later, чтобы бот не удалял команду пользователя в группах
+    
     WEB_APP_URL = os.getenv("WEB_APP_URL", "https://bot-1783869505-4307-olegbff.bothost.tech/")
 
-    # WebAppInfo работает ТОЛЬКО в ReplyKeyboardMarkup (обычная клавиатура)
-    # В InlineKeyboardMarkup нужно использовать url
-    reply_kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🎵 Открыть плеер", web_app=WebAppInfo(url=WEB_APP_URL))]],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
-
+    # Перенесли кнопку Web App в Inline-клавиатуру (так надежнее для групп)
     inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎵 Открыть плеер (Web App)", web_app=WebAppInfo(url=WEB_APP_URL))],
         [
             InlineKeyboardButton(text="🌊 Моя Волна", callback_data="start_wave"),
             InlineKeyboardButton(text="🔥 Чарты", callback_data="mus_pg:chart:none:0")
@@ -1540,12 +1534,9 @@ async def cmd_music_dashboard(message: types.Message):
 
     text = (
         "🎶 <b>MUSIC DASHBOARD</b>\n\n"
-        "Добро пожаловать в хаб. Выбирай вайб или открой плеер кнопкой снизу.\n"
-        "Или ищи треки напрямую: <code>@Betboomers_bot [название]</code>"
+        "Добро пожаловать в хаб. Выбирай вайб или открывай полноценный плеер кнопкой ниже."
     )
-    # Сначала шлём reply-клавиатуру с кнопкой плеера
-    await message.answer("🎵", reply_markup=reply_kb)
-    # Потом основной дашборд с инлайн-кнопками
+    # Отправляем только одно сообщение с инлайн-клавиатурой
     await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
 
 # --- ИЗБРАННОЕ ИНЛАЙН-КНОПКАМИ ---
