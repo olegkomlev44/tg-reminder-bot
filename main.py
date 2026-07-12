@@ -1518,7 +1518,7 @@ async def cmd_music_dashboard(message: types.Message):
 # Обязательно с https://
     web_app_url = "https://nl12.bothost.ru" 
     
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🌊 Моя Волна", callback_data="start_wave"),
             InlineKeyboardButton(text="🔥 Чарты", callback_data="mus_pg:chart:none:0")
@@ -1531,9 +1531,8 @@ async def cmd_music_dashboard(message: types.Message):
             InlineKeyboardButton(text="📋 Плейлисты", callback_data="show_playlists"),
             InlineKeyboardButton(text="🎵 Очередь", callback_data="queue_show")
         ],
-        [InlineKeyboardButton(text="🚀 Радар релизов", callback_data="radar_releases"),
-        [InlineKeyboardButton(text="🌐 Открыть плеер", web_app=WebAppInfo(url=web_app_url))],
-        ]
+        [InlineKeyboardButton(text="🚀 Радар релизов", callback_data="radar_releases")],
+        [InlineKeyboardButton(text="🌐 Открыть плеер", web_app=WebAppInfo(url=web_app_url))]
     ])
     
     text = (
