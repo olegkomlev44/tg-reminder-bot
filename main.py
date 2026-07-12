@@ -1467,7 +1467,6 @@ async def cmd_wrapped(message: types.Message):
         await status_msg.edit_text(f"❌ Инфографика не сгенерировалась: {e}")
 
 # --- ВИЗУАЛ 6: ГЛАВНЫЙ ДАШБОРД ---
-from aiogram.types import WebAppInfo
 
 async def cmd_my_music(message: types.Message):
     """Показывает избранное пользователя — аналог /music > Избранное, но одной командой."""
@@ -1512,10 +1511,18 @@ async def cmd_my_music(message: types.Message):
 
 async def cmd_music_dashboard(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
-    
-    web_app_url = "https://bot-1783869505-4307-olegbff.bothost.tech/" 
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+
+    WEB_APP_URL = os.getenv("WEB_APP_URL", "https://bot-1783869505-4307-olegbff.bothost.tech/")
+
+    # WebAppInfo работает ТОЛЬКО в ReplyKeyboardMarkup (обычная клавиатура)
+    # В InlineKeyboardMarkup нужно использовать url
+    reply_kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🎵 Открыть плеер", web_app=WebAppInfo(url=WEB_APP_URL))]],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🌊 Моя Волна", callback_data="start_wave"),
             InlineKeyboardButton(text="🔥 Чарты", callback_data="mus_pg:chart:none:0")
@@ -1529,17 +1536,17 @@ async def cmd_music_dashboard(message: types.Message):
             InlineKeyboardButton(text="🎵 Очередь", callback_data="queue_show")
         ],
         [InlineKeyboardButton(text="🚀 Радар релизов", callback_data="radar_releases")],
-        [InlineKeyboardButton(text="🌐 Открыть плеер", web_app=WebAppInfo(url=web_app_url))]
     ])
-    
-    # ПЕРЕВЕЛИ НА HTML: <b> это жирный шрифт, <code> это моноширинный
+
     text = (
         "🎶 <b>MUSIC DASHBOARD</b>\n\n"
-        "Добро пожаловать в хаб. Выбирай, какой вайб тебе нужен сейчас.\n"
+        "Добро пожаловать в хаб. Выбирай вайб или открой плеер кнопкой снизу.\n"
         "Или ищи треки напрямую: <code>@Betboomers_bot [название]</code>"
     )
-    # Используем parse_mode="HTML" вместо Markdown
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    # Сначала шлём reply-клавиатуру с кнопкой плеера
+    await message.answer("🎵", reply_markup=reply_kb)
+    # Потом основной дашборд с инлайн-кнопками
+    await message.answer(text, reply_markup=inline_kb, parse_mode="HTML")
 
 # --- ИЗБРАННОЕ ИНЛАЙН-КНОПКАМИ ---
 async def callback_show_favs(callback: types.CallbackQuery):
