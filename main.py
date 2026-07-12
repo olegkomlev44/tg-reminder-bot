@@ -1532,12 +1532,14 @@ async def cmd_music_dashboard(message: types.Message):
         [InlineKeyboardButton(text="🌐 Открыть плеер", web_app=WebAppInfo(url=web_app_url))]
     ])
     
+    # ПЕРЕВЕЛИ НА HTML: <b> это жирный шрифт, <code> это моноширинный
     text = (
-        "🎶 *MUSIC DASHBOARD*\n\n"
+        "🎶 <b>MUSIC DASHBOARD</b>\n\n"
         "Добро пожаловать в хаб. Выбирай, какой вайб тебе нужен сейчас.\n"
-        "Или ищи треки напрямую: `@Betboomers_bot [название]`"
+        "Или ищи треки напрямую: <code>@Betboomers_bot [название]</code>"
     )
-    await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+    # Используем parse_mode="HTML" вместо Markdown
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 # --- ИЗБРАННОЕ ИНЛАЙН-КНОПКАМИ ---
 async def callback_show_favs(callback: types.CallbackQuery):
