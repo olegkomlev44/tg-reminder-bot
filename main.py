@@ -13,7 +13,7 @@ import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 import io
 import textwrap
-from aiogram.types import BufferedInputFile, InlineQueryResultArticle, InputTextMessageContent
+from aiogram.types import BufferedInputFile, InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultCachedAudio
 from music_engine import music_engine, add_id3_tags  
 try:
     from google import genai
@@ -1422,34 +1422,61 @@ async def callback_back_to_dash(callback: types.CallbackQuery):
 
 async def inline_music_search(inline_query: types.InlineQuery):
     query = inline_query.query.strip()
-    if not query: return
-    
-    tracks = await music_engine.search_multi(query, limit=10)
+    if not query:
+        return
+
+    # Telegram позволяет максимум 50 результатов за один ответ
+    tracks = await music_engine.search_multi(query, limit=50)
     results = []
     bot_user = await inline_query.bot.me()
-    
+    fallback_img = "https://i.imgur.com/8mX1wGg.png"
+    _src_icons = {"SoundCloud": "🔊", "YouTube Music": "▶️"}
+
     for t in tracks:
-        deep_link = f"https://t.me/{bot_user.username}?start=track_{t['id']}"
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬇️ Скачать трек", url=deep_link)]])
-        
-        fallback_img = "https://i.imgur.com/8mX1wGg.png"
-        thumb = t.get('artwork_url') if t.get('artwork_url') else fallback_img
-        
-        results.append(
-            InlineQueryResultArticle(
-                id=str(t['id']),
-                title=f"{t['artist']} — {t['title']}",
-                description=f"Длительность: {t['duration']}",
-                thumbnail_url=thumb,
-                input_message_content=InputTextMessageContent(
-                    message_text=f"🎧 Я нашел трек: *{t['artist']}* — {t['title']}\n\nЧтобы послушать и скачать, перейди в бота:",
-                    parse_mode="Markdown"
-                ),
-                reply_markup=keyboard
+        track_id = str(t['id'])
+        cached_file_id = get_cached_file_id(track_id)
+        src_icon = _src_icons.get(t.get("source", ""), "🎵")
+        thumb = t.get('artwork_url') or fallback_img
+
+        if cached_file_id:
+            # Трек уже скачан и лежит в TG — кидаем аудио прямо в чат
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❤️ В избранное", callback_data=f"fav_sc:{track_id}"),
+                InlineKeyboardButton(text="🧠 Похожее", callback_data=f"rec_sc:{track_id}")
+            ]])
+            results.append(
+                InlineQueryResultCachedAudio(
+                    id=f"cached_{track_id}",
+                    audio_file_id=cached_file_id,
+                    caption=f"{src_icon} *{t['artist']} — {t['title']}* [{t['duration']}]",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
             )
-        )
-        
-    await inline_query.answer(results, cache_time=300)
+        else:
+            # Трека нет в кэше — карточка с кнопкой «Слушать» (deep link → бот скачает и закэширует)
+            deep_link = f"https://t.me/{bot_user.username}?start=track_{track_id}"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="▶️ Слушать / скачать", url=deep_link)
+            ]])
+            results.append(
+                InlineQueryResultArticle(
+                    id=f"art_{track_id}",
+                    title=f"{t['artist']} — {t['title']}",
+                    description=f"⏱ {t['duration']}  {src_icon} {t.get('source', 'SC')}  •  нажми чтобы открыть",
+                    thumbnail_url=thumb,
+                    input_message_content=InputTextMessageContent(
+                        message_text=(
+                            f"🎧 *{t['artist']} — {t['title']}*\n"
+                            f"⏱ {t['duration']}  {src_icon} {t.get('source', 'SoundCloud')}"
+                        ),
+                        parse_mode="Markdown"
+                    ),
+                    reply_markup=keyboard
+                )
+            )
+
+    await inline_query.answer(results, cache_time=60, is_personal=True)
 
 async def cmd_meme(message: types.Message):
     if not gemini_client: return
