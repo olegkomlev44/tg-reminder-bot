@@ -73,7 +73,21 @@ async def api_stream_track(request):
     if track and track.get("stream_url"):
         return web.HTTPFound(track["stream_url"])
     return web.Response(status=404, text="Track stream not found")
-
+    
+async def api_fav_add(request):
+    init_data = request.headers.get("Authorization", "")
+    user = verify_telegram_data(init_data)
+    if not user:
+        return _cors(web.json_response({"error": "Unauthorized"}, status=401))
+    
+    track_id = request.query.get("id")
+    title = request.query.get("title", "Unknown")
+    artist = request.query.get("artist", "Unknown")
+    
+    if track_id:
+        save_music_fav(user["id"], {"id": track_id, "title": title, "artist": artist})
+        
+    return _cors(web.json_response({"status": "ok"}))
 
 async def api_track_info(request):
     """Детали трека (обложка, жанр и т.д.)"""
