@@ -2596,6 +2596,11 @@ async def main():
     logger.info("🟡 инициализация бота...")
     _startup_selftest()
 
+    # --- ЗАПУСКАЕМ БД И ВЕБ-СЕРВЕР ---
+    init_db()
+    await start_web_server()
+    # ---------------------------------
+
     bot = Bot(token=TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
