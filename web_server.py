@@ -5,7 +5,7 @@ import hashlib
 from urllib.parse import parse_qsl
 from aiohttp import web, ClientSession
 from music_engine import music_engine
-from db import get_music_favs, get_user_history, get_playlists, get_user_queue
+from db import get_music_favs, get_user_history, get_playlists, get_user_queue, save_music_fav
 import logging
 
 logger = logging.getLogger(__name__)
