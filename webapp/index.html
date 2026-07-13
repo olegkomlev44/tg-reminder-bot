@@ -116,7 +116,8 @@ ul { list-style: none; }
 #mini-player.vis { transform: translateY(0); }
 #mini-prog { position: absolute; bottom: 0; left: 16px; right: 16px; height: 2px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
 #mini-prog-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.1s linear; }
-.mi-cover { width: 40px; height: 40px; border-radius: 6px; background: var(--border); overflow: hidden; display: flex; align-items: center; justify-content: center; font-size: 18px; pointer-events: none; }
+.mini-body { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease; }
+.mi-cover { width: 40px; height: 40px; border-radius: 6px; background: var(--border); overflow: hidden; display: flex; align-items: center; justify-content: center; font-size: 18px; pointer-events: none; flex-shrink: 0; }
 .mi-cover img { width: 100%; height: 100%; object-fit: cover; }
 .mi-info { flex: 1; min-width: 0; pointer-events: none; }
 .mi-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -215,6 +216,7 @@ audio { display: none; }
 <div id="app">
 
 <div class="pages" id="pages">
+  <!-- ВОЛНА -->
   <div class="page on" id="page-wave">
     <div class="wave-hero">
       <h1>Моя Волна</h1>
@@ -226,6 +228,7 @@ audio { display: none; }
     <div id="wave-more" class="spin" style="display:none"></div>
   </div>
 
+  <!-- ПОИСК -->
   <div class="page" id="page-search">
     <div class="search-bar">
       <input id="q" type="text" placeholder="Трек, артист..." autocomplete="off">
@@ -234,17 +237,20 @@ audio { display: none; }
     <ul id="search-list"><div class="empty"><div class="empty-ico">🔍</div><p>Введи название трека</p></div></ul>
   </div>
 
+  <!-- ПЛЕЙЛИСТЫ -->
   <div class="page" id="page-playlists">
     <div class="pl-chips" id="pl-chips"></div>
     <div id="pl-header" style="padding: 10px 16px 0;"></div>
     <ul id="pl-list"></ul>
   </div>
 
+  <!-- ИСТОРИЯ -->
   <div class="page" id="page-history">
     <div class="sec">Недавно прослушанные</div>
     <ul id="hist-list"></ul>
   </div>
 
+  <!-- ПРОФИЛЬ -->
   <div class="page" id="page-profile">
     <div class="profile-header">
       <img id="prof-avatar" class="prof-avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23555' d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/></svg>">
@@ -259,6 +265,7 @@ audio { display: none; }
   </div>
 </div>
 
+<!-- BOTTOM TABS -->
 <div class="tabs" id="tabs">
   <div class="tab on" onclick="nav('wave')">
     <svg viewBox="0 0 24 24"><path d="M12 3v18M8 8v8M4 11v2M16 6v12M20 9v6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -282,11 +289,14 @@ audio { display: none; }
   </div>
 </div>
 
+<!-- MINI PLAYER -->
 <div id="mini-player">
-  <div class="mi-cover" id="mini-cover">🎵</div>
-  <div class="mi-info">
-    <div class="mi-title" id="mini-title">Выбери трек</div>
-    <div class="mi-artist" id="mini-artist"></div>
+  <div class="mini-body" id="mini-body">
+    <div class="mi-cover" id="mini-cover">🎵</div>
+    <div class="mi-info">
+      <div class="mi-title" id="mini-title">Выбери трек</div>
+      <div class="mi-artist" id="mini-artist"></div>
+    </div>
   </div>
   <button class="mi-play" id="mini-play">
     <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
@@ -294,6 +304,7 @@ audio { display: none; }
   <div id="mini-prog"><div id="mini-prog-fill"></div></div>
 </div>
 
+<!-- FULL SCREEN PLAYER -->
 <div id="full-player">
   <div class="fp-bg" id="fp-bg"></div>
   <div class="fp-top">
@@ -333,8 +344,10 @@ audio { display: none; }
   </div>
 </div>
 
+<!-- MODALS -->
 <div class="modal-overlay" id="overlay" onclick="closeModals()"></div>
 
+<!-- EQ MODAL -->
 <div class="sheet-modal" id="eq-panel">
   <div class="modal-head">
     <span>🎚 Эквалайзер</span>
@@ -344,6 +357,7 @@ audio { display: none; }
   <div class="eq-bars" id="eq-bars"></div>
 </div>
 
+<!-- PLAYLIST MODAL -->
 <div class="sheet-modal" id="pl-modal">
   <div class="modal-head">
     <span>Добавить в плейлист</span>
@@ -359,7 +373,8 @@ audio { display: none; }
 <div id="toast"></div>
 <audio id="aud" crossorigin="anonymous"></audio>
 
-</div><script>
+</div><!-- /app -->
+<script>
 const tg = window.Telegram.WebApp;
 tg.expand();
 tg.setHeaderColor('#000000');
@@ -628,8 +643,8 @@ async function favToggle(btn, trackJsonStr) {
   const trackId = String(track.id);
   const loved = isFav(trackId);
 
-  if (loved) { allData.favs = allData.favs.filter(t => String(t.id) !== trackId); toast('Убрано из коллекции'); } 
-  else { allData.favs.unshift(track); toast('Добавлено в коллекцию'); }
+  if (loved) { allData.favs = allData.favs.filter(t => String(t.id) !== trackId); toast('Убрано из любимых'); } 
+  else { allData.favs.unshift(track); toast('Добавлено в профиль'); }
   
   renderFavs(); updateAllHeartButtons();
   if (qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === trackId) updateFavBtnPlayer();
@@ -711,6 +726,12 @@ async function logHistoryToServer(track) {
 function setPlayState(playing) {
   const svgPlay = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
   const svgPause = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
+  
+  // Если пауза, убеждаемся, что мини-плеер видимый
+  if (!playing && document.getElementById('mini-player').style.transform !== '') {
+      document.getElementById('mini-player').classList.add('vis');
+  }
+
   document.getElementById('mini-play').innerHTML = playing ? svgPause : svgPlay;
   document.getElementById('fp-play').innerHTML = playing ? svgPause : svgPlay;
   if(playing) { 
@@ -755,13 +776,148 @@ aud.addEventListener('play', () => setPlayState(true));
 aud.addEventListener('error', () => { toast('Ошибка потока'); setTimeout(playNext, 1500); });
 function seekClick(e) { const bar = document.getElementById('fp-prog'); if (aud.duration) aud.currentTime = (e.offsetX / bar.offsetWidth) * aud.duration; }
 
-// ── FULLSCREEN MANAGEMENT ──
-function openFull() { document.getElementById('full-player').classList.add('vis'); }
-function closeFull() { document.getElementById('full-player').classList.remove('vis'); }
 
-let touchStartY = 0;
-document.getElementById('full-player').addEventListener('touchstart', e => touchStartY = e.touches[0].clientY, {passive: true});
-document.getElementById('full-player').addEventListener('touchend', e => { if (e.changedTouches[0].clientY - touchStartY > 80) closeFull(); }, {passive: true});
+// ── ANIMATED FULL SCREEN DRAG & CLOSE ──
+function openFull() { 
+  const fp = document.getElementById('full-player');
+  fp.style.transform = ''; 
+  fp.classList.add('vis'); 
+}
+function closeFull() { 
+  const fp = document.getElementById('full-player');
+  fp.style.transform = ''; 
+  fp.classList.remove('vis'); 
+}
+
+const fp = document.getElementById('full-player');
+let fpStartY = 0, fpCurrentY = 0, fpDragging = false;
+
+fp.addEventListener('touchstart', e => {
+  // Запрет драга при взаимодействии с ползунками или кнопками
+  if (e.target.closest('.fp-prog') || e.target.closest('.fp-ctrl') || e.target.closest('.fp-top')) return;
+  fpStartY = e.touches[0].clientY;
+  fpDragging = true;
+  fp.style.transition = 'none'; // Следование за пальцем без задержки
+}, {passive: true});
+
+fp.addEventListener('touchmove', e => {
+  if (!fpDragging) return;
+  fpCurrentY = e.touches[0].clientY;
+  let dy = fpCurrentY - fpStartY;
+  if (dy > 0) { // Только вниз
+    fp.style.transform = `translateY(${dy}px)`;
+  }
+}, {passive: true});
+
+fp.addEventListener('touchend', e => {
+  if (!fpDragging) return;
+  fpDragging = false;
+  fp.style.transition = ''; // Возвращаем CSS-анимацию
+  
+  let dy = fpCurrentY - fpStartY;
+  if (dy > 120) { // Порог закрытия (если потянули сильно)
+    closeFull();
+  } else {
+    // Иначе отскок обратно вверх
+    fp.style.transform = '';
+  }
+  fpCurrentY = 0;
+}, {passive: true});
+
+
+// ── ANIMATED MINI PLAYER GESTURES ──
+const mp = document.getElementById('mini-player');
+const mpBody = document.getElementById('mini-body');
+let mpStartX = 0, mpStartY = 0;
+let mpDragging = false;
+
+mp.addEventListener('touchstart', e => {
+  // Игнорируем нажатия на кнопку плей
+  if (e.target.closest('.mi-play')) return;
+  mpStartX = e.touches[0].clientX;
+  mpStartY = e.touches[0].clientY;
+  mpDragging = true;
+  mp.style.transition = 'none';
+}, {passive: true});
+
+mp.addEventListener('touchmove', e => {
+  if (!mpDragging) return;
+  let dy = e.touches[0].clientY - mpStartY;
+  let dx = e.touches[0].clientX - mpStartX;
+  
+  // Если тянем вниз — плеер физически следует за пальцем (прилипание)
+  if (dy > 0 && Math.abs(dy) > Math.abs(dx)) {
+    mp.style.transform = `translateY(${dy}px)`;
+  }
+}, {passive: true});
+
+mp.addEventListener('touchend', e => {
+  if (!mpDragging) return;
+  mpDragging = false;
+  mp.style.transition = ''; // Возвращаем анимации CSS
+  
+  if (e.target.closest('.mi-play')) {
+     mp.style.transform = ''; 
+     return; 
+  }
+
+  let endX = e.changedTouches[0].clientX;
+  let endY = e.changedTouches[0].clientY;
+  let diffX = mpStartX - endX;
+  let diffY = mpStartY - endY;
+
+  // Порог срабатывания свайпа (40px)
+  if (Math.abs(diffX) > 40 || Math.abs(diffY) > 40) {
+    if (Math.abs(diffX) > Math.abs(diffY)) {
+      // ── ГОРИЗОНТАЛЬНЫЙ СВАЙП ──
+      mp.style.transform = ''; // Возвращаем сам плеер на базу
+      
+      if (diffX > 0) {
+        // ВЛЕВО (<--) -> Предыдущий трек
+        mpBody.style.transform = 'translateX(-30px)';
+        mpBody.style.opacity = '0';
+        setTimeout(() => { 
+            playPrev(); 
+            mpBody.style.transform = 'translateX(30px)'; 
+            setTimeout(() => {
+                mpBody.style.transform = 'translateX(0)'; 
+                mpBody.style.opacity = '1';
+            }, 50); 
+        }, 200);
+      } else {
+        // ВПРАВО (-->) -> Следующий трек
+        mpBody.style.transform = 'translateX(30px)';
+        mpBody.style.opacity = '0';
+        setTimeout(() => { 
+            playNext(); 
+            mpBody.style.transform = 'translateX(-30px)'; 
+            setTimeout(() => {
+                mpBody.style.transform = 'translateX(0)'; 
+                mpBody.style.opacity = '1';
+            }, 50); 
+        }, 200);
+      }
+    } else {
+      // ── ВЕРТИКАЛЬНЫЙ СВАЙП ──
+      if (diffY > 0) {
+        // ВВЕРХ (^) -> Открыть полный плеер
+        mp.style.transform = '';
+        openFull();
+      } else {
+        // ВНИЗ (v) -> Скрыть и нажать паузу
+        if (!aud.paused) togglePlay(); 
+        mp.classList.remove('vis');
+        // Очищаем инлайн стиль, чтобы он спрятался через CSS-класс translateY(200%)
+        setTimeout(() => { mp.style.transform = ''; }, 300);
+      }
+    }
+  } else {
+    // ── ОБЫЧНЫЙ ТАП (КЛИК) ──
+    mp.style.transform = ''; // Отскок на место
+    openFull();
+  }
+}, {passive: true});
+
 
 // ── MODALS & EQ ──
 function closeModals() {
@@ -849,48 +1005,6 @@ function createNewPlaylist() {
   input.value = '';
   addToPlaylist(name);
 }
-
-// ── MINI PLAYER GESTURES (ПО ТЗ ЮЗЕРА) ──
-const mp = document.getElementById('mini-player');
-let mpStartX = 0, mpStartY = 0;
-
-mp.addEventListener('touchstart', e => {
-  mpStartX = e.touches[0].clientX;
-  mpStartY = e.touches[0].clientY;
-}, {passive: true});
-
-mp.addEventListener('touchend', e => {
-  // Игнорируем нажатие, если кликнули по кнопке Play внутри мини-плеера
-  if (e.target.closest('.mi-play')) return;
-
-  let endX = e.changedTouches[0].clientX;
-  let endY = e.changedTouches[0].clientY;
-  
-  let diffX = mpStartX - endX;
-  let diffY = mpStartY - endY;
-
-  // Если свайп достаточно длинный
-  if (Math.abs(diffX) > 40 || Math.abs(diffY) > 40) {
-    if (Math.abs(diffX) > Math.abs(diffY)) {
-      // Горизонтальный свайп
-      if (diffX > 0) playPrev(); // Свайп влево <-
-      else playNext();           // Свайп вправо ->
-    } else {
-      // Вертикальный свайп
-      if (diffY > 0) {
-        openFull();              // Свайп вверх ^
-      } else {
-        // Свайп вниз v
-        if (!aud.paused) togglePlay(); 
-        mp.classList.remove('vis');
-      }
-    }
-  } else {
-    // Короткий тап — просто раскрываем плеер
-    openFull();
-  }
-}, {passive: true});
-
 
 let toastT;
 function toast(msg) {
