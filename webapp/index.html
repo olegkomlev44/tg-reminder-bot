@@ -50,6 +50,7 @@ body, html {
 .prof-stat { display: flex; flex-direction: column; align-items: center; }
 .prof-stat span { font-size: 18px; font-weight: 700; color: var(--text); }
 
+/* ── BOTTOM TABS ── */
 .tabs {
   position: absolute; bottom: 0; width: 100%; height: var(--nav-height);
   background: var(--surface-alpha); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
@@ -65,6 +66,7 @@ body, html {
 .tab.on { color: var(--text); }
 .tab.on svg { fill: var(--accent); transform: scale(1.1); }
 
+/* ── UI ELEMENTS ── */
 .sec { padding: 20px 16px 10px; font-size: 22px; font-weight: 700; display: flex; align-items: center; }
 .search-bar { padding: 16px; position: sticky; top: 0; background: var(--bg); z-index: 10; display: flex; gap: 10px;}
 .search-bar input {
@@ -87,6 +89,8 @@ ul { list-style: none; }
 .fav-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; transition: 0.2s; }
 .fav-btn.loved svg { fill: var(--accent); stroke: var(--accent); animation: pop 0.3s ease; }
 @keyframes pop { 0% { transform: scale(1); } 50% { transform: scale(1.3); } 100% { transform: scale(1); } }
+.del-btn { background: none; border: none; color: var(--red); padding: 10px; cursor: pointer; opacity: 0.7; transition: 0.2s; }
+.del-btn:active { opacity: 1; transform: scale(0.9); }
 
 .wave-hero { padding: 40px 20px; text-align: center; background: linear-gradient(180deg, rgba(255, 204, 0, 0.15) 0%, var(--bg) 100%); }
 .wave-hero h1 { font-size: 32px; font-weight: 800; margin-bottom: 8px; }
@@ -98,7 +102,11 @@ ul { list-style: none; }
 .pl-chips::-webkit-scrollbar { display: none; }
 .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 8px 16px; font-size: 14px; white-space: nowrap; cursor: pointer; flex-shrink: 0; transition: 0.15s; }
 .chip.on { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600; }
+.pl-actions { display: flex; gap: 8px; }
+.pl-action-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; font-weight: 600; color: var(--text-sec); cursor: pointer; font-size: 13px; }
+.pl-action-btn.danger { color: var(--red); border-color: rgba(239, 68, 68, 0.3); }
 
+/* ── MINI PLAYER ── */
 #mini-player {
   position: absolute; bottom: calc(var(--nav-height) + 12px); left: 12px; right: 12px; height: var(--mini-player-height);
   background: var(--surface-alpha); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px);
@@ -108,9 +116,9 @@ ul { list-style: none; }
 #mini-player.vis { transform: translateY(0); }
 #mini-prog { position: absolute; bottom: 0; left: 16px; right: 16px; height: 2px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
 #mini-prog-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.1s linear; }
-.mi-cover { width: 40px; height: 40px; border-radius: 6px; background: var(--border); overflow: hidden; display: flex; align-items: center; justify-content: center; font-size: 18px; }
+.mi-cover { width: 40px; height: 40px; border-radius: 6px; background: var(--border); overflow: hidden; display: flex; align-items: center; justify-content: center; font-size: 18px; pointer-events: none; }
 .mi-cover img { width: 100%; height: 100%; object-fit: cover; }
-.mi-info { flex: 1; min-width: 0; }
+.mi-info { flex: 1; min-width: 0; pointer-events: none; }
 .mi-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mi-artist { font-size: 12px; color: var(--text-sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mi-play svg { width: 24px; height: 24px; fill: var(--text); }
@@ -127,7 +135,6 @@ ul { list-style: none; }
 .fp-icon-btn { background: none; border: none; color: var(--text); padding: 10px; cursor: pointer; display: flex; align-items: center; }
 .fp-icon-btn svg { width: 28px; height: 28px; fill: currentColor; }
 
-/* COVER ANIMATION */
 .fp-cover-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 20px; perspective: 1000px; }
 .fp-cover {
   width: min(85vw, 380px); aspect-ratio: 1; border-radius: 24px; overflow: hidden; background: var(--surface);
@@ -165,7 +172,7 @@ ul { list-style: none; }
 .fp-play.is-playing svg { margin-left: 0; }
 .fp-play:active { transform: scale(0.9); }
 
-/* ── EQUALIZER MODAL ── */
+/* ── MODALS ── */
 .sheet-modal {
   position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-radius: 24px 24px 0 0;
   padding: 24px; z-index: 200; transform: translateY(100%); transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -186,10 +193,8 @@ ul { list-style: none; }
 .eq-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); cursor: pointer; margin-left: -5px; }
 .eq-label { font-size: 10px; color: var(--text-sec); text-align: center; margin-top: 8px; }
 
-/* ── PLAYLIST MODAL ── */
 #pl-list-modal { max-height: 40vh; overflow-y: auto; margin-bottom: 16px; }
 .pl-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
-.pl-row:active { opacity: 0.7; }
 .pl-row-icon { width: 40px; height: 40px; border-radius: 8px; background: var(--border); display: flex; align-items: center; justify-content: center; font-size: 20px; }
 .pl-new-wrap { display: flex; gap: 10px; }
 .pl-new-wrap input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px; color: var(--text); font-size: 16px; outline: none; }
@@ -210,7 +215,6 @@ audio { display: none; }
 <div id="app">
 
 <div class="pages" id="pages">
-  <!-- ВОЛНА -->
   <div class="page on" id="page-wave">
     <div class="wave-hero">
       <h1>Моя Волна</h1>
@@ -222,7 +226,6 @@ audio { display: none; }
     <div id="wave-more" class="spin" style="display:none"></div>
   </div>
 
-  <!-- ПОИСК -->
   <div class="page" id="page-search">
     <div class="search-bar">
       <input id="q" type="text" placeholder="Трек, артист..." autocomplete="off">
@@ -231,20 +234,17 @@ audio { display: none; }
     <ul id="search-list"><div class="empty"><div class="empty-ico">🔍</div><p>Введи название трека</p></div></ul>
   </div>
 
-  <!-- ПЛЕЙЛИСТЫ -->
   <div class="page" id="page-playlists">
     <div class="pl-chips" id="pl-chips"></div>
     <div id="pl-header" style="padding: 10px 16px 0;"></div>
     <ul id="pl-list"></ul>
   </div>
 
-  <!-- ИСТОРИЯ -->
   <div class="page" id="page-history">
     <div class="sec">Недавно прослушанные</div>
     <ul id="hist-list"></ul>
   </div>
 
-  <!-- ПРОФИЛЬ -->
   <div class="page" id="page-profile">
     <div class="profile-header">
       <img id="prof-avatar" class="prof-avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23555' d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/></svg>">
@@ -259,7 +259,6 @@ audio { display: none; }
   </div>
 </div>
 
-<!-- BOTTOM TABS -->
 <div class="tabs" id="tabs">
   <div class="tab on" onclick="nav('wave')">
     <svg viewBox="0 0 24 24"><path d="M12 3v18M8 8v8M4 11v2M16 6v12M20 9v6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -283,20 +282,18 @@ audio { display: none; }
   </div>
 </div>
 
-<!-- MINI PLAYER -->
-<div id="mini-player" onclick="openFull()">
+<div id="mini-player">
   <div class="mi-cover" id="mini-cover">🎵</div>
   <div class="mi-info">
     <div class="mi-title" id="mini-title">Выбери трек</div>
     <div class="mi-artist" id="mini-artist"></div>
   </div>
-  <button class="mi-play" id="mini-play" onclick="event.stopPropagation();togglePlay()">
+  <button class="mi-play" id="mini-play">
     <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
   </button>
   <div id="mini-prog"><div id="mini-prog-fill"></div></div>
 </div>
 
-<!-- FULL SCREEN PLAYER -->
 <div id="full-player">
   <div class="fp-bg" id="fp-bg"></div>
   <div class="fp-top">
@@ -336,10 +333,8 @@ audio { display: none; }
   </div>
 </div>
 
-<!-- OVERLAY FOR MODALS -->
 <div class="modal-overlay" id="overlay" onclick="closeModals()"></div>
 
-<!-- EQ MODAL -->
 <div class="sheet-modal" id="eq-panel">
   <div class="modal-head">
     <span>🎚 Эквалайзер</span>
@@ -349,7 +344,6 @@ audio { display: none; }
   <div class="eq-bars" id="eq-bars"></div>
 </div>
 
-<!-- PLAYLIST MODAL -->
 <div class="sheet-modal" id="pl-modal">
   <div class="modal-head">
     <span>Добавить в плейлист</span>
@@ -365,8 +359,7 @@ audio { display: none; }
 <div id="toast"></div>
 <audio id="aud" crossorigin="anonymous"></audio>
 
-</div><!-- /app -->
-<script>
+</div><script>
 const tg = window.Telegram.WebApp;
 tg.expand();
 tg.setHeaderColor('#000000');
@@ -402,7 +395,7 @@ const EQ_PRESETS = {
 };
 let currentPreset = 'Flat';
 
-// ── SWIPE LOGIC ──
+// ── SWIPE LOGIC FOR PAGES ──
 let startX = 0;
 const pagesEl = document.getElementById('pages');
 const tabsOrder = ['wave', 'search', 'playlists', 'history', 'profile'];
@@ -521,7 +514,9 @@ function makeItem(t, ctx) {
 
   let rightBtn = '';
   if (ctx === 'playlist') {
-    rightBtn = `<button class="fav-btn" style="color:var(--red);" onclick="event.stopPropagation();removeFromPlaylist('${esc(currentPl)}', '${esc(String(t.id))}')"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg></button>`;
+    rightBtn = `<button class="del-btn" onclick="event.stopPropagation();removeFromPlaylist('${esc(currentPl)}', '${esc(String(t.id))}')">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+    </button>`;
   } else {
     rightBtn = `<button class="fav-btn ${loved ? 'loved' : ''}" onclick="event.stopPropagation();favToggle(this, '${trackJson}')">
       <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg>
@@ -594,9 +589,9 @@ function renderPlaylists() {
     header.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
          <h3 style="font-size:18px; margin:0; color:var(--text);">${esc(currentPl)}</h3>
-         <div style="display:flex; gap:8px;">
-             <button onclick="renamePlaylist('${esc(currentPl)}')" style="background:var(--surface); border:1px solid var(--border); color:var(--text-sec); border-radius:8px; padding:6px 12px; font-weight:600; cursor:pointer;">✏️</button>
-             <button onclick="deletePlaylist('${esc(currentPl)}')" style="background:var(--surface); border:1px solid var(--red); color:var(--red); border-radius:8px; padding:6px 12px; font-weight:600; cursor:pointer;">🗑</button>
+         <div class="pl-actions">
+             <button class="pl-action-btn" onclick="renamePlaylist('${esc(currentPl)}')">✏️ Изменить</button>
+             <button class="pl-action-btn danger" onclick="deletePlaylist('${esc(currentPl)}')">🗑 Удалить</button>
          </div>
       </div>
     `;
@@ -633,8 +628,8 @@ async function favToggle(btn, trackJsonStr) {
   const trackId = String(track.id);
   const loved = isFav(trackId);
 
-  if (loved) { allData.favs = allData.favs.filter(t => String(t.id) !== trackId); toast('Убрано из любимых'); } 
-  else { allData.favs.unshift(track); toast('Добавлено в профиль'); }
+  if (loved) { allData.favs = allData.favs.filter(t => String(t.id) !== trackId); toast('Убрано из коллекции'); } 
+  else { allData.favs.unshift(track); toast('Добавлено в коллекцию'); }
   
   renderFavs(); updateAllHeartButtons();
   if (qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === trackId) updateFavBtnPlayer();
@@ -759,6 +754,8 @@ aud.addEventListener('pause', () => setPlayState(false));
 aud.addEventListener('play', () => setPlayState(true));
 aud.addEventListener('error', () => { toast('Ошибка потока'); setTimeout(playNext, 1500); });
 function seekClick(e) { const bar = document.getElementById('fp-prog'); if (aud.duration) aud.currentTime = (e.offsetX / bar.offsetWidth) * aud.duration; }
+
+// ── FULLSCREEN MANAGEMENT ──
 function openFull() { document.getElementById('full-player').classList.add('vis'); }
 function closeFull() { document.getElementById('full-player').classList.remove('vis'); }
 
@@ -852,6 +849,48 @@ function createNewPlaylist() {
   input.value = '';
   addToPlaylist(name);
 }
+
+// ── MINI PLAYER GESTURES (ПО ТЗ ЮЗЕРА) ──
+const mp = document.getElementById('mini-player');
+let mpStartX = 0, mpStartY = 0;
+
+mp.addEventListener('touchstart', e => {
+  mpStartX = e.touches[0].clientX;
+  mpStartY = e.touches[0].clientY;
+}, {passive: true});
+
+mp.addEventListener('touchend', e => {
+  // Игнорируем нажатие, если кликнули по кнопке Play внутри мини-плеера
+  if (e.target.closest('.mi-play')) return;
+
+  let endX = e.changedTouches[0].clientX;
+  let endY = e.changedTouches[0].clientY;
+  
+  let diffX = mpStartX - endX;
+  let diffY = mpStartY - endY;
+
+  // Если свайп достаточно длинный
+  if (Math.abs(diffX) > 40 || Math.abs(diffY) > 40) {
+    if (Math.abs(diffX) > Math.abs(diffY)) {
+      // Горизонтальный свайп
+      if (diffX > 0) playPrev(); // Свайп влево <-
+      else playNext();           // Свайп вправо ->
+    } else {
+      // Вертикальный свайп
+      if (diffY > 0) {
+        openFull();              // Свайп вверх ^
+      } else {
+        // Свайп вниз v
+        if (!aud.paused) togglePlay(); 
+        mp.classList.remove('vis');
+      }
+    }
+  } else {
+    // Короткий тап — просто раскрываем плеер
+    openFull();
+  }
+}, {passive: true});
+
 
 let toastT;
 function toast(msg) {
