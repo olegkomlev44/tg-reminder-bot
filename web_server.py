@@ -1,29 +1,34 @@
-import os, json, hmac, hashlib, aiohttp
-import random
+import os, json, hmac, hashlib, aiohttp, random
 from urllib.parse import parse_qsl
 from aiohttp import web
 from music_engine import music_engine
 from db import (get_music_favs, get_user_history, get_playlists,
-                get_user_queue, save_music_fav, log_track_history, save_playlist_track, init_db_extended)
+                get_user_queue, save_music_fav, rename_playlist, 
+                remove_track_from_playlist, delete_playlist_db)
 import logging
 
 logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHUNK = 32 * 1024
 
-init_db_extended()
 
 def verify(init_data: str):
     if not init_data or init_data == 'test_mode':
         return {"id": "123456789", "first_name": "TestUser"}
     try:
         d = dict(parse_qsl(init_data))
-        if "user" in d:
-            user_obj = json.loads(d["user"])
-            return user_obj
-    except Exception as e:
-        logger.error(f"Verify user parse error: {e}")
+        if "hash" in d:
+            h = d.pop("hash")
+            s = "\n".join(f"{k}={v}" for k, v in sorted(d.items()))
+            sk = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+            if hmac.new(sk, s.encode(), hashlib.sha256).hexdigest() == h:
+                return json.loads(d["user"])
+        elif "user" in d: # Фоллбэк для надежности
+            return json.loads(d["user"])
+    except Exception:
+        pass
     return {"id": "123456789", "first_name": "DevUser"}
+
 
 def cors(r):
     r.headers.update({
@@ -33,14 +38,17 @@ def cors(r):
     })
     return r
 
+
 async def handle_index(request):
     p = os.path.join(os.path.dirname(__file__), "webapp", "index.html")
-    if not os.path.exists(p): p = os.path.join(os.path.dirname(__file__), "index.html")
+    if not os.path.exists(p):
+        p = os.path.join(os.path.dirname(__file__), "index.html")
     return web.Response(text=open(p, encoding="utf-8").read(), content_type="text/html")
+
 
 async def api_get_tracks(request):
     user = verify(request.headers.get("Authorization", ""))
-    uid = user["id"]
+    uid = user["id"] if user else "123456789"
     return cors(web.json_response({
         "favs": get_music_favs(uid),
         "history": get_user_history(uid),
@@ -48,83 +56,87 @@ async def api_get_tracks(request):
         "queue": get_user_queue(uid),
     }))
 
+
 async def api_search(request):
     q = request.rel_url.query.get("q", "").strip()
-    if not q: return cors(web.json_response([]))
+    if not q:
+        return cors(web.json_response([]))
     tracks = await music_engine.search_multi(q, limit=20)
     return cors(web.json_response(tracks))
 
+
 async def api_wave(request):
+    """Умная волна с предохранителем от пустых результатов"""
     limit = int(request.rel_url.query.get("limit", 20))
     offset = int(request.rel_url.query.get("offset", 0))
     user = verify(request.headers.get("Authorization", ""))
-    uid = user["id"]
-    favs = get_music_favs(uid)
     
-    if len(favs) < 3 or offset > 0:
-        tracks = await music_engine.get_charts(limit=limit, offset=offset)
-        random.shuffle(tracks)
-        return cors(web.json_response(tracks))
+    # 1. Пробуем получить чарты
+    tracks = await music_engine.get_charts(limit=limit, offset=offset)
+    
+    # 2. Если чарты пустые (API SC лагает), ищем гарантированные хиты
+    if not tracks:
+        logger.info("Чарты пустые, используем fallback-поиск для Волны")
+        fallback_query = random.choice(["rap hits", "phonk", "pop 2024", "lofi beats", "rock", "synthwave"])
+        tracks = await music_engine.search_multi(fallback_query, limit=limit, offset=offset)
         
-    try:
-        artists = list(set([f.get("artist") for f in favs if f.get("artist")]))
-        random.shuffle(artists)
-        target_artist = artists[0]
-        
-        tracks = await music_engine.search_sc(target_artist, limit=limit)
-        chart_tracks = await music_engine.get_charts(limit=5)
-        combined = tracks + chart_tracks
-        random.shuffle(combined)
-        
-        seen = set()
-        unique_tracks = []
-        for t in combined:
-            if t['id'] not in seen:
-                seen.add(t['id'])
-                unique_tracks.append(t)
-        return cors(web.json_response(unique_tracks[:limit]))
-    except Exception as e:
-        tracks = await music_engine.get_charts(limit=limit, offset=offset)
-        return cors(web.json_response(tracks))
+    # 3. Подмешиваем любимых исполнителей пользователя (только на первой странице)
+    if user and offset == 0:
+        favs = get_music_favs(user["id"])
+        if favs:
+            try:
+                artist = random.choice(favs)["artist"]
+                recs = await music_engine.search_multi(artist, limit=5)
+                tracks = recs + tracks
+            except:
+                pass
+                
+    # 4. Убираем дубликаты и мешаем
+    seen = set()
+    unique_tracks = []
+    for t in tracks:
+        if t['id'] not in seen:
+            seen.add(t['id'])
+            unique_tracks.append(t)
+            
+    random.shuffle(unique_tracks)
+    return cors(web.json_response(unique_tracks[:limit]))
+
 
 async def api_fav_add(request):
     user = verify(request.headers.get("Authorization", ""))
+    if not user: return cors(web.json_response({"error": "Unauthorized"}, status=401))
     try:
         body = await request.json()
         tid = str(body["track_id"])
-        t_data = body.get("track_data")
-    except Exception:
-        return cors(web.json_response({"error": "bad body"}, status=400))
-
-    if t_data and "title" in t_data:
-        ok = save_music_fav(user["id"], t_data)
-        return cors(web.json_response({"ok": ok}))
-        
+    except: return cors(web.json_response({"error": "bad body"}, status=400))
     track = await music_engine.get_track_details(tid)
-    if track:
-        ok = save_music_fav(user["id"], track)
-        return cors(web.json_response({"ok": ok}))
-    return cors(web.json_response({"error": "track not found"}, status=404))
+    if not track: return cors(web.json_response({"error": "track not found"}, status=404))
+    ok = save_music_fav(user["id"], {"id": tid, "title": track["title"], "artist": track["artist"]})
+    return cors(web.json_response({"ok": ok}))
 
-async def api_history_add(request):
+# --- Эндпоинты управления плейлистами ---
+async def api_pl_rename(request):
     user = verify(request.headers.get("Authorization", ""))
-    try:
-        body = await request.json()
-        t_data = body.get("track_data")
-        if t_data:
-            log_track_history(user["id"], t_data)
-            return cors(web.json_response({"ok": True}))
-    except Exception: pass
-    return cors(web.json_response({"error": "bad request"}, status=400))
+    if not user: return cors(web.json_response({"error": "Auth"}, status=401))
+    data = await request.json()
+    rename_playlist(user["id"], data["old_name"], data["new_name"])
+    return cors(web.json_response({"ok": True}))
 
-async def api_playlist_add(request):
+async def api_pl_remove_track(request):
     user = verify(request.headers.get("Authorization", ""))
-    try:
-        body = await request.json()
-        save_playlist_track(user["id"], body["name"], body["track_data"])
-        return cors(web.json_response({"ok": True}))
-    except Exception as e:
-        return cors(web.json_response({"error": str(e)}, status=400))
+    if not user: return cors(web.json_response({"error": "Auth"}, status=401))
+    data = await request.json()
+    remove_track_from_playlist(user["id"], data["name"], data["track_id"])
+    return cors(web.json_response({"ok": True}))
+    
+async def api_pl_delete(request):
+    user = verify(request.headers.get("Authorization", ""))
+    if not user: return cors(web.json_response({"error": "Auth"}, status=401))
+    data = await request.json()
+    delete_playlist_db(user["id"], data["name"])
+    return cors(web.json_response({"ok": True}))
+# ----------------------------------------
 
 async def api_track_info(request):
     tid = request.match_info["track_id"]
@@ -149,10 +161,10 @@ async def api_stream_track(request):
                 if cr := up.headers.get("Content-Range"): rh["Content-Range"] = cr
                 resp = web.StreamResponse(status=up.status, headers=rh)
                 await resp.prepare(request)
-                async for chunk in up.content.iter_chunked(CHUNK):
-                    await resp.write(chunk)
+                async for chunk in up.content.iter_chunked(CHUNK): await resp.write(chunk)
                 return resp
     except Exception as e:
+        logger.error(f"Stream error: {e}")
         return cors(web.Response(status=502, text=str(e)))
 
 async def start_web_server():
@@ -162,8 +174,11 @@ async def start_web_server():
     app.router.add_get("/api/search", api_search)
     app.router.add_get("/api/wave", api_wave)
     app.router.add_post("/api/fav", api_fav_add)
-    app.router.add_post("/api/history", api_history_add)
-    app.router.add_post("/api/playlist/add", api_playlist_add)
+    # Новые роуты плейлистов
+    app.router.add_post("/api/playlist/rename", api_pl_rename)
+    app.router.add_post("/api/playlist/remove_track", api_pl_remove_track)
+    app.router.add_post("/api/playlist/delete", api_pl_delete)
+    
     app.router.add_get("/api/stream/{track_id}", api_stream_track)
     app.router.add_get("/api/track/{track_id}", api_track_info)
     app.router.add_options("/{path_info:.*}", lambda r: cors(web.Response()))
