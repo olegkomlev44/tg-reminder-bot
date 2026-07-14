@@ -161,22 +161,33 @@ ul { list-style: none; }
 .wave-btn { background: var(--accent); color: #000; border: none; border-radius: 30px; padding: 16px 40px; font-size: 18px; font-weight: 700; cursor: pointer; box-shadow: 0 8px 30px var(--accent-glow); transition: transform 0.2s; }
 .wave-btn:active { transform: scale(0.95); }
 
-#wave-active { display: none; flex-direction: column; align-items: center; justify-content: center; position: absolute; inset: 0; padding-bottom: var(--nav-height); background-color: var(--bg); overflow: hidden; }
-.wa-bg-color { position: absolute; inset: -50%; z-index: 1; background: radial-gradient(circle at 50% 40%, var(--cover-color) 0%, var(--bg) 70%); opacity: 0.5; animation: breathe-bg 8s ease-in-out infinite alternate; transition: background 1s ease; }
-@keyframes breathe-bg { 0% { transform: scale(1); opacity: 0.4; } 100% { transform: scale(1.3); opacity: 0.7; } }
-.wa-bg { position: absolute; inset: -100px; background-size: cover; background-position: center; filter: blur(80px) brightness(0.4); z-index: 2; transition: background-image 0.8s ease; }
-.wa-top { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: center; z-index: 10; font-weight: 700; font-size: 16px; color: var(--accent); }
-.wa-huge-artist { position: absolute; top: 9%; width: 100%; text-align: center; z-index: 3; font-size: 16vw; font-weight: 900; color: rgba(255,255,255,0.9); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: clip; letter-spacing: -2px; }
-.wa-cover-container { position: relative; z-index: 4; width: 65vw; max-width: 320px; aspect-ratio: 1; border-radius: 20px; overflow: hidden; box-shadow: 0 30px 60px rgba(0,0,0,0.8); margin-bottom: 40px; cursor: pointer; transition: transform 0.2s; background: var(--surface); }
-.wa-cover-container:active { transform: scale(0.95); }
+#wave-active { display: none; flex-direction: column; align-items: center; justify-content: flex-start; position: absolute; inset: 0; padding-bottom: var(--nav-height); background-color: var(--bg); overflow: hidden; }
+.wa-bg-color { position: absolute; inset: -30%; z-index: 1; background: radial-gradient(circle at 50% 50%, var(--cover-color) 0%, var(--bg) 70%); opacity: 0.85; transition: background 1s ease; }
+.wa-bg { position: absolute; inset: -50px; background-size: cover; background-position: center; filter: blur(90px) brightness(0.5); z-index: 2; transition: background-image 0.8s ease; }
+.wa-top { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: center; z-index: 10; font-weight: 700; font-size: 16px; color: rgba(255,255,255,0.8); }
+
+/* Огромное имя артиста с переносом строк */
+.wa-huge-artist { position: relative; z-index: 4; width: 90%; margin-top: 15vh; text-align: center; font-size: 17vw; font-weight: 900; color: #fff; text-transform: uppercase; line-height: 0.95; letter-spacing: -2px; text-shadow: 0 10px 40px rgba(0,0,0,0.4); word-wrap: break-word; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+
+/* Пульсирующее свечение под обложкой */
+.wa-pulse-glow { position: absolute; top: 52%; left: 50%; transform: translate(-50%, -50%); width: 45vw; max-width: 220px; aspect-ratio: 1; border-radius: 50%; background: var(--cover-color); filter: blur(50px); opacity: 0.6; z-index: 3; pointer-events: none; transition: background 1s ease; }
+
+/* Уменьшенная обложка по центру */
+.wa-cover-container { position: relative; z-index: 4; width: 45vw; max-width: 220px; aspect-ratio: 1; border-radius: 24px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.6); margin-top: auto; margin-bottom: 5vh; cursor: pointer; background: var(--surface); transition: transform 0.05s ease-out; }
+.wa-cover-container:active { transform: scale(0.95) !important; }
 .wa-cover-container img { width: 100%; height: 100%; object-fit: cover; }
-.wa-pill { position: relative; z-index: 4; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.15); backdrop-filter: blur(25px); -webkit-backdrop-filter: blur(25px); border: 1px solid rgba(255,255,255,0.1); border-radius: 100px; padding: 8px 16px 8px 8px; width: 85vw; max-width: 400px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); cursor: pointer; overflow: hidden; }
-.wa-pill-prog { position: absolute; top: 0; left: 0; bottom: 0; width: 0%; background: rgba(255, 255, 255, 0.2); z-index: 0; pointer-events: none; transition: width 0.1s linear; }
+
+/* Капсула управления в стиле Яндекс Музыки */
+.wa-pill { position: relative; z-index: 4; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.12); backdrop-filter: blur(40px); -webkit-backdrop-filter: blur(40px); border: 1px solid rgba(255,255,255,0.08); border-radius: 100px; padding: 6px; width: 85vw; max-width: 400px; box-shadow: 0 15px 40px rgba(0,0,0,0.3); margin-bottom: 5vh; cursor: pointer; overflow: hidden; }
+.wa-pill-prog { position: absolute; top: 0; left: 0; bottom: 0; width: 0%; background: rgba(255, 255, 255, 0.1); z-index: 0; pointer-events: none; transition: width 0.1s linear; }
 .wa-play, .wa-info, .wa-pill .fav-btn { position: relative; z-index: 1; }
-.wa-play { width: 50px; height: 50px; border-radius: 50%; background: rgba(0,0,0,0.3); border: none; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; }
-.wa-play svg { width: 24px; height: 24px; fill: #fff; }
+.wa-play { width: 54px; height: 54px; border-radius: 50%; background: rgba(255,255,255,0.15); border: none; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; transition: 0.2s; }
+.wa-play:active { background: rgba(255,255,255,0.3); transform: scale(0.9); }
+.wa-play svg { width: 28px; height: 28px; fill: #fff; }
 .wa-info { flex: 1; min-width: 0; margin: 0 16px; text-align: center; }
-.wa-title { font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wa-title { font-size: 17px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+.wa-pill .fav-btn { width: 54px; height: 54px; background: rgba(0,0,0,0.2); border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+.wa-pill .fav-btn svg { width: 26px; height: 26px; }
 
 /* ── PLAYLIST CHIPS ── */
 .pl-chips { display: flex; gap: 8px; padding: 8px 16px; overflow-x: auto; scrollbar-width: none; }
@@ -437,24 +448,34 @@ audio {
       <ul id="wave-list"></ul>
       <div id="wave-more" class="spin" style="display:none"></div>
     </div>
-    <div id="wave-active">
+        <div id="wave-active">
       <div class="wa-bg-color" id="wa-bg-color"></div>
       <div class="wa-bg" id="wa-bg"></div>
+      
       <div class="wa-top">
         <span>Моя волна</span>
         <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" onclick="haptic();nav('search');"><path d="M15.5 14h-.79l-.28-.27A6.5 6.5 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14"/></svg>
       </div>
+
+      <!-- Имя артиста (теперь в несколько строк) -->
       <div class="wa-huge-artist" id="wa-huge-artist">ARTIST</div>
+
+      <!-- Свечение, которое будет пульсировать под бит -->
+      <div class="wa-pulse-glow" id="wa-pulse-glow"></div>
+
+      <!-- Обложка -->
       <div class="wa-cover-container" onclick="openFull()">
         <img id="wa-cover" src="" crossorigin="anonymous">
       </div>
+
+      <!-- Капсула управления как в Яндексе -->
       <div class="wa-pill" onclick="openFull()">
         <div class="wa-pill-prog" id="wa-pill-prog"></div>
-        <button class="wa-play" id="wa-play" onclick="event.stopPropagation();togglePlay()">
+        <button class="wa-play" id="wa-play" onclick="event.stopPropagation(); haptic(); togglePlay()">
           <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
         </button>
         <div class="wa-info"><div class="wa-title" id="wa-pill-title">Title</div></div>
-        <button class="fav-btn" id="wa-fav" onclick="event.stopPropagation();toggleFavFromPlayer()">
+        <button class="fav-btn" id="wa-fav" onclick="event.stopPropagation(); haptic(); toggleFavFromPlayer()">
           <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg>
         </button>
       </div>
@@ -1038,6 +1059,11 @@ aud.play().then(() => {
 });
 
 logHistoryToServer(t);
+    setPlayState(true); logHistoryToServer(t);
+    // Добавляем инициализацию аудио-контекста и запуск пульсации
+    initAudioCtx();
+    if (actx && actx.state === 'suspended') actx.resume();
+    startWavePulse();
   }, 300);
 }
 
@@ -1625,6 +1651,74 @@ function shuffleArtistTracks() {
     acCurrentY = 0;
   }, { passive: true });
 })();
+  // ── АНИМАЦИЯ ВОЛНЫ ПОД БИТ (Яндекс Стайл) ──
+let waveAnalyser = null;
+let waveDataArray = null;
+let wavePulseRaf = null;
+
+function startWavePulse() {
+    // Если аудиоконтекст еще не создан, ждем
+    if (!actx) return;
+
+    // Создаем отдельный анализатор для Волны, чтобы не ломать основной визуал
+    if (!waveAnalyser) {
+        waveAnalyser = actx.createAnalyser();
+        waveAnalyser.fftSize = 64; // Идеально для улавливания басов (бочки)
+        if (srcNode) srcNode.connect(waveAnalyser);
+        waveDataArray = new Uint8Array(waveAnalyser.frequencyBinCount);
+    }
+
+    const glow = document.getElementById('wa-pulse-glow');
+    const cover = document.querySelector('.wa-cover-container');
+    const pageWave = document.getElementById('page-wave');
+    const waveActive = document.getElementById('wave-active');
+
+    function pulseLoop() {
+        // Запускаем анимацию только если открыта Волна и трек не на паузе
+        if (pageWave.classList.contains('on') && waveActive.style.display !== 'none' && !aud.paused) {
+            waveAnalyser.getByteFrequencyData(waveDataArray);
+            
+            // Вычисляем среднюю громкость нижних частот (басов)
+            let bassSum = 0;
+            const bassBins = 6; // Берем первые 6 полос (самые низкие частоты)
+            for (let i = 0; i < bassBins; i++) {
+                bassSum += waveDataArray[i];
+            }
+            const bassAvg = bassSum / bassBins;
+            
+            // Нормализуем значение от 0 до 1 (255 - максимум для getByteFrequencyData)
+            const bassNormal = Math.min(1, (bassAvg / 255) * 1.2); 
+            
+            // Изменяем масштаб и прозрачность в такт басам
+            if (glow) {
+                // Свечение сильно расширяется и становится ярче
+                const glowScale = 1 + (bassNormal * 0.5); 
+                const glowOpacity = 0.4 + (bassNormal * 0.4);
+                glow.style.transform = `translate(-50%, -50%) scale(${glowScale})`;
+                glow.style.opacity = glowOpacity;
+            }
+            if (cover) {
+                // Сама обложка слегка "прыгает"
+                const coverScale = 1 + (bassNormal * 0.06);
+                cover.style.transform = `scale(${coverScale})`;
+            }
+        } else {
+            // Плавное затухание, если музыка на паузе
+            if (glow) {
+                glow.style.transform = 'translate(-50%, -50%) scale(1)';
+                glow.style.opacity = '0.4';
+            }
+            if (cover) {
+                cover.style.transform = 'scale(1)';
+            }
+        }
+        wavePulseRaf = requestAnimationFrame(pulseLoop);
+    }
+    
+    // Очищаем предыдущий цикл, если он был, и запускаем новый
+    if (wavePulseRaf) cancelAnimationFrame(wavePulseRaf);
+    pulseLoop();
+}
 
 loadData().then(() => loadWave(true));
 </script>
