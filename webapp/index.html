@@ -904,7 +904,7 @@ async function dislikeTrack() {
 function shareTrack() {
   if (qIdx < 0 || !queue[qIdx]) return;
   const t = queue[qIdx];
-  const query = `🎵 Я слушаю: ${t.artist} - ${t.title}`;
+  const query = `${t.artist} - ${t.title}`;
   try { tg.switchInlineQuery(query); } catch(e) { toast('Недоступно в этом клиенте'); }
 }
 
@@ -925,16 +925,54 @@ function applyDominantColor(imgUrl) {
 // ── MEDIA SESSION API ──
 function updateMediaSession(t) {
   if ('mediaSession' in navigator) {
+    const cover = t.artwork_url || 'https://via.placeholder.com/512x512.png?text=Music';
+    
+    // Передаем системе метаданные и набор обложек разного размера
     navigator.mediaSession.metadata = new MediaMetadata({
-      title: t.title, artist: t.artist,
-      artwork: [{ src: t.artwork_url || 'https://via.placeholder.com/512x512.png?text=Music', sizes: '512x512', type: 'image/png' }]
+      title: t.title || 'Неизвестный трек',
+      artist: t.artist || 'Неизвестный исполнитель',
+      album: 'Telegram Music',
+      artwork: [
+        { src: cover, sizes: '96x96', type: 'image/jpeg' },
+        { src: cover, sizes: '128x128', type: 'image/jpeg' },
+        { src: cover, sizes: '192x192', type: 'image/jpeg' },
+        { src: cover, sizes: '256x256', type: 'image/jpeg' },
+        { src: cover, sizes: '384x384', type: 'image/jpeg' },
+        { src: cover, sizes: '512x512', type: 'image/jpeg' }
+      ]
     });
-    navigator.mediaSession.setActionHandler('play', togglePlay);
-    navigator.mediaSession.setActionHandler('pause', togglePlay);
+
+    // Привязываем кнопки из шторки уведомлений к нашим функциям
+    navigator.mediaSession.setActionHandler('play', () => { aud.play(); setPlayState(true); });
+    navigator.mediaSession.setActionHandler('pause', () => { aud.pause(); setPlayState(false); });
     navigator.mediaSession.setActionHandler('previoustrack', playPrev);
     navigator.mediaSession.setActionHandler('nexttrack', playNext);
+    
+    // Обработчик перемотки (если юзер потянет ползунок на экране блокировки)
+    navigator.mediaSession.setActionHandler('seekto', (details) => {
+      if (details.fastSeek && 'fastSeek' in aud) {
+        aud.fastSeek(details.seekTime);
+      } else {
+        aud.currentTime = details.seekTime;
+      }
+      updatePositionState();
+    });
   }
 }
+
+// Функция синхронизации времени трека с плеером телефона
+function updatePositionState() {
+  if ('mediaSession' in navigator && aud.duration && !isNaN(aud.duration)) {
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: Math.max(0, aud.duration),
+        playbackRate: aud.playbackRate,
+        position: Math.max(0, aud.currentTime)
+      });
+    } catch (e) {} // Глушим ошибку, если данные еще не прогрузились
+  }
+}
+
 
 // ── PLAYER LOGIC ──
 function playWaveFromStart() {
@@ -1031,9 +1069,20 @@ aud.addEventListener('ended', () => {
     if (repeat) { aud.currentTime = 0; aud.play(); } else { playNext(); }
     if (sleepTimerType === 'track') executeSleepTimer();
 });
-aud.addEventListener('pause', () => setPlayState(false));
-aud.addEventListener('play', () => setPlayState(true));
-aud.addEventListener('error', () => { toast('Ошибка потока'); setTimeout(playNext, 1500); });
+aud.addEventListener('pause', () => { 
+  setPlayState(false); 
+  updatePositionState(); 
+});
+aud.addEventListener('play', () => { 
+  setPlayState(true); 
+  updatePositionState(); 
+});
+aud.addEventListener('loadeddata', updatePositionState);
+aud.addEventListener('seeked', updatePositionState);
+aud.addEventListener('error', () => { 
+  toast('Ошибка потока'); 
+  setTimeout(playNext, 1500); 
+});
 
 // ── FULLSCREEN MANAGEMENT ──
 function openFull() {
