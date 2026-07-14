@@ -85,14 +85,17 @@ class MusicEngine:
                             if not t.get("streamable"):
                                 continue
                             dur = t.get("duration", 0)
-                            artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
+                            user_obj = t.get("user", {})
+                            artwork = t.get("artwork_url") or user_obj.get("avatar_url") or ""
                             artwork = artwork.replace("large", "t500x500") if artwork else ""
+                            avatar = user_obj.get("avatar_url", "").replace("large", "t500x500")
                             results.append({
                                 "id": str(t.get("id")),
                                 "title": t.get("title", "Unknown"),
-                                "artist": t.get("user", {}).get("username", "Unknown"),
+                                "artist": user_obj.get("username", "Unknown"),
                                 "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
                                 "artwork_url": artwork,
+                                "artist_avatar": avatar,
                                 "source": "SoundCloud"
                             })
                         return results
@@ -176,14 +179,17 @@ class MusicEngine:
                             if not t.get("streamable"):
                                 continue
                             dur = t.get("duration", 0)
-                            artwork = t.get("artwork_url") or t.get("user", {}).get("avatar_url") or ""
+                            user_obj = t.get("user", {})
+                            artwork = t.get("artwork_url") or user_obj.get("avatar_url") or ""
                             artwork = artwork.replace("large", "t500x500") if artwork else ""
+                            avatar = user_obj.get("avatar_url", "").replace("large", "t500x500")
                             results.append({
                                 "id": str(t.get("id")),
                                 "title": t.get("title", "Unknown"),
-                                "artist": t.get("user", {}).get("username", "Unknown"),
+                                "artist": user_obj.get("username", "Unknown"),
                                 "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
                                 "artwork_url": artwork,
+                                "artist_avatar": avatar,
                                 "source": "SoundCloud"
                             })
                         return results
@@ -229,12 +235,14 @@ class MusicEngine:
 
                     user = data.get("user", {})
                     artwork = (data.get("artwork_url") or "").replace("large", "t500x500")
+                    avatar = (user.get("avatar_url") or "").replace("large", "t500x500")
                     return {
                         "id": str(data.get("id", "")),
                         "title": data.get("title", "Unknown"),
                         "artist": user.get("username", "Unknown"),
                         "stream_url": real_url,
                         "artwork_url": artwork,
+                        "artist_avatar": avatar,
                         "genre": data.get("genre") or "Неизвестен",
                         "source": "SoundCloud"
                     }
