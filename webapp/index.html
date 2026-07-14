@@ -213,20 +213,40 @@ ul { list-style: none; }
 .mi-play { background: none; border: none; padding: 10px; cursor: pointer; display: flex; align-items: center; }
 
 /* ── FULL SCREEN PLAYER ── */
-#full-player { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; transform: translateY(100%); transition: transform 0.42s cubic-bezier(0.22, 1, 0.36, 1); background: #0f0f15; overflow: hidden; }
-#full-player.vis { transform: translateY(0); }
-.fp-color-bg { position: absolute; inset: -50%; background: radial-gradient(circle at 50% 30%, var(--cover-color) 0%, var(--bg) 80%); opacity: 0.7; z-index: -2; transition: background 1s ease; }
-.fp-bg { position: absolute; inset: -50px; background-size: cover; background-position: center; filter: blur(70px) brightness(0.3); z-index: -1; transition: background-image 0.5s ease; }
-.fp-top { display: flex; align-items: center; justify-content: space-between; padding: 20px 16px 10px; }
-.fp-top-title { font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 0.5px; }
-.fp-icon-btn { background: none; border: none; color: var(--text); padding: 10px; cursor: pointer; display: flex; align-items: center; transition: 0.2s; }
-.fp-icon-btn svg { width: 26px; height: 26px; fill: currentColor; opacity: 0.8; }
-.fp-icon-btn:active { transform: scale(0.8); }
-
+.fp-top { display: flex; align-items: center; justify-content: space-between; padding: 20px 20px 10px; }
+.fp-top-title { font-size: 14px; font-weight: 700; color: rgba(255,255,255,0.9); text-transform: uppercase; letter-spacing: 0.5px; }
+.fp-lyrics-layer {
+  position: absolute;
+  width: calc(100% - 60px); max-width: 400px; aspect-ratio: 1;
+  left: 50%; top: 50%; transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px);
+  border-radius: 12px; z-index: 10;
+  display: flex; flex-direction: column;
+  opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
+  padding: 20px; overflow-y: auto; scroll-behavior: smooth;
+  /* Мягкое затухание текста сверху и снизу */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 15%, black 85%, transparent 100%);
+}
+.fp-lyrics-layer.vis { opacity: 1; pointer-events: all; }
+.lyric-line {
+  font-size: 18px; font-weight: 700; color: rgba(255, 255, 255, 0.4);
+  margin: 8px 0; transition: 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  cursor: pointer; text-align: left; line-height: 1.3;
+}
+.lyric-line.active { color: #fff; font-size: 24px; text-shadow: 0 4px 15px rgba(0,0,0,0.8); }
+.fp-icon-btn.active-icon { color: var(--accent); opacity: 1; }
+/* Стили для кнопок в меню «Три точки» */
+.menu-item-btn {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer;
+  margin-bottom: 8px; transition: 0.2s; display: flex; align-items: center; gap: 12px;
+}
+.menu-item-btn:active { background: var(--accent); color: #000; }
 /* Visualizer Overlay */
 #vis-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 5; border-radius: 12px; pointer-events: none; opacity: 0; transition: opacity 0.3s; }
 #vis-canvas.active { opacity: 1; }
-
 .fp-cover-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 10px 30px; perspective: 1000px; position: relative;}
 .fp-cover { width: 100%; max-width: 400px; aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: 0 20px 50px rgba(0,0,0,0.6); transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease; display: flex; align-items: center; justify-content: center; position: relative; }
 .fp-cover.paused { transform: scale(0.95); }
@@ -584,12 +604,13 @@ audio {
   <div class="fp-top">
     <button class="fp-icon-btn" onclick="haptic();closeFull()"><svg viewBox="0 0 24 24"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg></button>
     <div class="fp-top-title">Моя волна <span id="sleep-timer-display"></span></div>
-    <button class="fp-icon-btn" onclick="haptic();openSleepTimer()"><svg viewBox="0 0 24 24"><path d="M11 2h2v4h-2zm0 16h2v4h-2zm9.9-10.9l-1.4-1.4-2.8 2.8 1.4 1.4 2.8-2.8zM4.5 9.9l1.4-1.4 2.8 2.8-1.4 1.4-2.8-2.8zm15 3.1h-4v2h4v-2zm-16 0H1v2h2.5v-2zM12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0 8c-1.65 0-3-1.35-3-3s1.35-3 3-3 3 1.35 3 3-1.35 3-3 3z"/></svg></button>
+    <button class="fp-icon-btn" onclick="haptic();openMenuModal()"><svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg></button>
   </div>
   
   <div class="fp-cover-wrap" id="fp-cover-wrap">
     <canvas id="vis-canvas"></canvas>
     <div class="fp-cover paused" id="fp-cover">🎵</div>
+    <div class="fp-lyrics-layer" id="fp-lyrics-layer"></div>
   </div>
   
   <div class="fp-info">
@@ -599,8 +620,7 @@ audio {
     </div>
     <div class="fp-actions">
       <button class="fp-icon-btn" onclick="haptic();dislikeTrack()"><svg viewBox="0 0 24 24"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05C1.05 11.5 1 11.74 1 12v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg></button>
-      <button class="fp-icon-btn" onclick="haptic();openLyrics()"><svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg></button>
-      <button class="fp-icon-btn" onclick="haptic();toggleVisualizer()"><svg viewBox="0 0 24 24"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg></button>
+      <button class="fp-icon-btn" id="btn-lyrics-toggle" onclick="haptic();toggleLyricsLayer()"><svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg></button>
     </div>
   </div>
   
@@ -614,12 +634,19 @@ audio {
     <button class="fp-ctrl-btn" onclick="haptic();playNext()"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
     <button class="fav-btn" id="fp-fav" onclick="haptic();toggleFavFromPlayer()"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></button>
   </div>
-  
-  <div class="fp-bottom-banner" onclick="haptic();shareTrack()">
-    Поделиться треком в Telegram<br>
-    <span id="fp-banner-title">▶ Название</span>
-  </div>
 </div>
+
+<div class="modal-overlay" id="overlay" onclick="closeModals()"></div>
+
+<div class="sheet-modal" id="menu-modal">
+  <div class="modal-head"><span>Опции</span><button class="close-modal" onclick="closeModals()">✕</button></div>
+  <button class="menu-item-btn" onclick="haptic();closeModals();setTimeout(openEQ, 200)">🎚 Эквалайзер</button>
+  <button class="menu-item-btn" onclick="haptic();closeModals();setTimeout(openSleepTimer, 200)">🌙 Таймер сна</button>
+  <button class="menu-item-btn" onclick="haptic();closeModals();setTimeout(openPlaylistModal, 200)">📋 Добавить в плейлист</button>
+  <button class="menu-item-btn" onclick="haptic();closeModals();toggleVisualizer()">🎆 Визуализатор</button>
+  <button class="menu-item-btn" onclick="haptic();closeModals();shareTrack()">🔗 Поделиться в Telegram</button>
+</div>
+
 
 <div class="modal-overlay" id="overlay" onclick="closeModals()"></div>
 
@@ -1012,6 +1039,12 @@ function playWaveFromStart() {
 
 function playTrack(t, dir = 1) {
   if (!t) return;
+  // Сбрасываем текст при переключении трека
+  parsedLyrics = [];
+  currentLyricIdx = -1;
+  if(isLyricsOpen) fetchAndParseLyrics(t);
+  else document.getElementById('fp-lyrics-layer').innerHTML = '';
+  
   const coverEl = document.getElementById('fp-cover');
   coverEl.classList.add(dir > 0 ? 'slide-out-left' : 'slide-out-right');
   
@@ -1102,6 +1135,29 @@ aud.addEventListener('timeupdate', () => {
   document.getElementById('wa-pill-prog').style.width = (p * 100) + '%';
   if(!isScrubbing) { document.getElementById('fp-fill').style.width = (p * 100) + '%'; document.getElementById('fp-thumb').style.left = (p * 100) + '%'; document.getElementById('fp-cur').textContent = fmt(aud.currentTime); }
   document.getElementById('fp-dur').textContent = fmt(aud.duration);
+    // СИНХРОНИЗАЦИЯ ТЕКСТА ПЕСНИ (Караоке)
+  if (isLyricsOpen && parsedLyrics.length > 0 && !isScrubbing) {
+    const ct = aud.currentTime;
+    let activeIdx = -1;
+    for (let i = 0; i < parsedLyrics.length; i++) {
+      if (ct >= parsedLyrics[i].time - 0.3) activeIdx = i; // 0.3 сек заранее для плавности
+      else break;
+    }
+    if (activeIdx !== -1 && currentLyricIdx !== activeIdx) {
+      currentLyricIdx = activeIdx;
+      const lines = document.getElementById('fp-lyrics-layer').querySelectorAll('.lyric-line');
+      lines.forEach((el, i) => {
+        if (i === activeIdx) {
+          el.classList.add('active');
+          // Плавно центрируем текущую строчку
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+          el.classList.remove('active');
+        }
+      });
+    }
+  }
+
   
   // PRELOADING
   if (aud.duration - aud.currentTime < 15 && queue[qIdx+1]) {
@@ -1213,46 +1269,110 @@ mp.addEventListener('touchend', e => {
   } else { mp.style.transform = ''; openFull(); }
 }, {passive: true});
 
-// ── MODALS (EQ, Playlist, Lyrics, Timer) ──
-function closeModals() { ['eq-panel', 'pl-modal', 'lyrics-modal', 'timer-modal'].forEach(id => document.getElementById(id).classList.remove('vis')); document.getElementById('overlay').classList.remove('vis'); }
+// ── MODALS (EQ, Playlist, Menu, Timer) ──
+function closeModals() { 
+  ['eq-panel', 'pl-modal', 'menu-modal', 'timer-modal'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.classList.remove('vis');
+  }); 
+  document.getElementById('overlay').classList.remove('vis'); 
+}
 
-// ── LYRICS ──
-async function openLyrics() {
-  if (qIdx < 0 || !queue[qIdx]) return;
-  const t = queue[qIdx];
-  const lyricsContent = document.getElementById('lyrics-content');
-  const lyricsModal = document.getElementById('lyrics-modal');
-  const overlayEl = document.getElementById('overlay');
+function openMenuModal() {
+  document.getElementById('menu-modal').classList.add('vis');
+  document.getElementById('overlay').classList.add('vis');
+}
 
-  lyricsContent.innerHTML = '<div class="spin"></div>';
-  lyricsModal.classList.add('vis');
-  overlayEl.classList.add('vis');
+// ── УМНЫЙ ТЕКСТ ПЕСНИ (Караоке) ──
+let parsedLyrics = [];
+let isLyricsOpen = false;
+let currentLyricIdx = -1;
+
+async function fetchAndParseLyrics(t) {
+  const layer = document.getElementById('fp-lyrics-layer');
+  layer.innerHTML = '<div class="spin" style="margin:auto"></div>';
+  parsedLyrics = [];
+  currentLyricIdx = -1;
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
-    const r = await fetch(
-      `/api/lyrics?title=${encodeURIComponent(t.title)}&artist=${encodeURIComponent(t.artist)}`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timeoutId);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const d = await r.json();
-    if (d.lyrics && d.lyrics.trim()) {
-      lyricsContent.innerHTML = '';
-      lyricsContent.textContent = d.lyrics;
+    // Очищаем название от мусора типа (feat. xxx) для точного поиска
+    const cleanTitle = t.title.replace(/\(.*\)|\[.*\]/g, '').trim();
+    const cleanArtist = t.artist.replace(/\(.*\)|\[.*\]/g, '').trim();
+    const q = encodeURIComponent(`${cleanArtist} ${cleanTitle}`);
+    
+    // Идем в обход бекенда напрямую в LrcLib (это решит проблему "Не найдено")
+    const r = await fetch(`https://lrclib.net/api/search?q=${q}`);
+    const data = await r.json();
+
+    let found = null;
+    if (data && data.length > 0) {
+      found = data.find(x => x.syncedLyrics) || data[0]; // Ищем с таймингами
+    }
+
+    if (found && found.syncedLyrics) {
+      parsedLyrics = parseLRC(found.syncedLyrics);
+      renderLyrics();
+    } else if (found && found.plainLyrics) {
+      layer.innerHTML = `<div style="white-space:pre-wrap; text-align:left; color:#fff; font-size:18px; line-height:1.4; padding: 20px 0;">${found.plainLyrics}</div>`;
     } else {
-      lyricsContent.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">😔<br><br>Текст песни не найден</div>';
+      layer.innerHTML = '<div class="empty"><div class="empty-ico" style="font-size:32px">😔</div><p>Текст не найден</p></div>';
     }
   } catch (e) {
-    if (e.name === 'AbortError') {
-      lyricsContent.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">⏱<br><br>Таймаут загрузки</div>';
-    } else {
-      lyricsContent.innerHTML = `<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">⚠️<br><br>Ошибка загрузки текста</div>`;
-      console.error('Lyrics error:', e);
-    }
+    layer.innerHTML = '<div class="empty"><p>Ошибка загрузки</p></div>';
   }
 }
+
+// Парсер LRC формата [01:23.45]
+function parseLRC(lrc) {
+  const lines = lrc.split('\n');
+  const result = [];
+  const regex = /\[(\d{2}):(\d{2}\.\d{2,3})\](.*)/;
+  lines.forEach(line => {
+    const match = line.match(regex);
+    if (match) {
+      const min = parseInt(match[1]);
+      const sec = parseFloat(match[2]);
+      const text = match[3].trim();
+      if(text) result.push({ time: min * 60 + sec, text });
+    }
+  });
+  return result;
+}
+
+function renderLyrics() {
+  const layer = document.getElementById('fp-lyrics-layer');
+  layer.innerHTML = '<div style="height: 40%;"></div>'; // Отступ сверху
+  parsedLyrics.forEach((line, i) => {
+    const div = document.createElement('div');
+    div.className = 'lyric-line';
+    div.textContent = line.text;
+    // При клике на строчку - перематываем песню!
+    div.onclick = (e) => { 
+      e.stopPropagation(); haptic();
+      if(aud.duration) aud.currentTime = line.time; 
+    };
+    layer.appendChild(div);
+  });
+  layer.innerHTML += '<div style="height: 40%;"></div>'; // Отступ снизу
+}
+
+function toggleLyricsLayer() {
+  isLyricsOpen = !isLyricsOpen;
+  const layer = document.getElementById('fp-lyrics-layer');
+  const btn = document.getElementById('btn-lyrics-toggle');
+  
+  if (isLyricsOpen) {
+    layer.classList.add('vis');
+    btn.classList.add('active-icon');
+    if (parsedLyrics.length === 0 && queue[qIdx]) {
+      fetchAndParseLyrics(queue[qIdx]);
+    }
+  } else {
+    layer.classList.remove('vis');
+    btn.classList.remove('active-icon');
+  }
+}
+
 
 // ── SLEEP TIMER ──
 let sleepTimerId = null; let sleepTimerType = null;
