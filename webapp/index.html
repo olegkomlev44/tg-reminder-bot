@@ -552,7 +552,7 @@ audio {
     <div class="mi-cover" id="mini-cover">🎵</div>
     <div class="mi-info"><div class="mi-title" id="mini-title">Выбери трек</div><div class="mi-artist" id="mini-artist"></div></div>
   </div>
-  <button class="mi-play" id="mini-play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+   <button class="mi-play" id="mini-play" onclick="event.stopPropagation(); haptic(); togglePlay();"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
   <div id="mini-prog"><div id="mini-prog-fill"></div></div>
 </div>
 
