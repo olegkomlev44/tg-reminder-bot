@@ -20,13 +20,101 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 .page.on { opacity: 1; pointer-events: all; transform: translateX(0); }
 .page.slide-left { transform: translateX(-20px); }
 
-/* ── PROFILE HEADER ── */
-.profile-header { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 20px 20px; background: linear-gradient(180deg, rgba(255,255,255,0.05) 0%, var(--bg) 100%); }
-.prof-avatar { width: 90px; height: 90px; border-radius: 50%; background: var(--surface); object-fit: cover; border: 2px solid var(--border); box-shadow: 0 10px 20px rgba(0,0,0,0.5); margin-bottom: 16px; }
-.prof-name { font-size: 24px; font-weight: 800; color: var(--text); margin-bottom: 8px; }
-.prof-stats { display: flex; gap: 20px; color: var(--text-sec); font-size: 14px; }
-.prof-stat { display: flex; flex-direction: column; align-items: center; }
-.prof-stat span { font-size: 18px; font-weight: 700; color: var(--text); }
+/* ── PROFILE ── */
+#page-profile { padding-bottom: calc(var(--nav-height) + var(--mini-player-height) + 20px); }
+.prof-hero {
+  position: relative; overflow: hidden;
+  min-height: 220px; display: flex; flex-direction: column;
+  justify-content: flex-end; padding: 0;
+}
+.prof-hero-bg {
+  position: absolute; inset: 0;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 40%, #0f3460 100%);
+  z-index: 0;
+}
+.prof-hero-particles {
+  position: absolute; inset: 0; z-index: 1; overflow: hidden;
+}
+.prof-hero-particles::before,
+.prof-hero-particles::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,204,0,0.15) 0%, transparent 70%);
+}
+.prof-hero-particles::before { width: 300px; height: 300px; top: -80px; right: -60px; }
+.prof-hero-particles::after  { width: 200px; height: 200px; bottom: 20px; left: -40px; }
+
+.prof-hero-content {
+  position: relative; z-index: 2;
+  display: flex; align-items: flex-end; gap: 18px;
+  padding: 24px 20px 20px;
+}
+.prof-avatar-wrap {
+  position: relative; flex-shrink: 0;
+}
+.prof-avatar {
+  width: 80px; height: 80px; border-radius: 50%;
+  background: var(--surface); object-fit: cover;
+  border: 3px solid rgba(255,204,0,0.6);
+  box-shadow: 0 0 0 4px rgba(255,204,0,0.15), 0 8px 24px rgba(0,0,0,0.6);
+}
+.prof-online-dot {
+  position: absolute; bottom: 3px; right: 3px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #22c55e; border: 2px solid #0f0f15;
+}
+.prof-hero-info { flex: 1; min-width: 0; padding-bottom: 4px; }
+.prof-name { font-size: 22px; font-weight: 900; color: #fff; margin-bottom: 4px; }
+.prof-tg-handle { font-size: 13px; color: rgba(255,255,255,0.5); margin-bottom: 10px; }
+.prof-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.prof-badge {
+  background: rgba(255,204,0,0.15); border: 1px solid rgba(255,204,0,0.3);
+  color: var(--accent); border-radius: 20px;
+  padding: 3px 10px; font-size: 11px; font-weight: 600;
+}
+
+.prof-stats-row {
+  display: flex; gap: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.prof-stat-item {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  padding: 14px 8px; position: relative;
+}
+.prof-stat-item:not(:last-child)::after {
+  content: ''; position: absolute; right: 0; top: 20%; bottom: 20%;
+  width: 1px; background: var(--border);
+}
+.prof-stat-num { font-size: 20px; font-weight: 800; color: var(--text); line-height: 1; }
+.prof-stat-lbl { font-size: 11px; color: var(--text-sec); margin-top: 4px; text-align: center; }
+
+.prof-section { padding: 20px 16px 8px; font-size: 17px; font-weight: 700; color: var(--text); }
+
+.prof-recent-scroll {
+  display: flex; gap: 12px; padding: 4px 16px 16px;
+  overflow-x: auto; scrollbar-width: none;
+}
+.prof-recent-scroll::-webkit-scrollbar { display: none; }
+.prof-recent-card {
+  flex-shrink: 0; width: 120px; cursor: pointer;
+  transition: transform 0.15s;
+}
+.prof-recent-card:active { transform: scale(0.95); }
+.prof-recent-cover {
+  width: 120px; height: 120px; border-radius: 12px;
+  background: var(--surface); overflow: hidden;
+  margin-bottom: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.prof-recent-cover img { width: 100%; height: 100%; object-fit: cover; }
+.prof-recent-cover .prof-recent-emoji { font-size: 40px; display: flex; align-items: center; justify-content: center; height: 100%; }
+.prof-recent-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prof-recent-artist { font-size: 11px; color: var(--text-sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+
+.prof-divider { height: 1px; background: var(--border); margin: 0 16px; }
+
 
 /* ── BOTTOM TABS ── */
 .tabs { position: absolute; bottom: 0; width: 100%; height: var(--nav-height); background: var(--surface-alpha); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--border); display: flex; justify-content: space-around; align-items: center; z-index: 20; }
@@ -386,15 +474,50 @@ audio { display: none; }
   </div>
 
   <div class="page" id="page-profile">
-    <div class="profile-header">
-      <img id="prof-avatar" class="prof-avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23555' d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/></svg>">
-      <div class="prof-name" id="prof-name">Пользователь</div>
-      <div class="prof-stats">
-        <div class="prof-stat"><span id="stat-favs">0</span>Треков</div>
-        <div class="prof-stat"><span id="stat-hist">0</span>Прослушано</div>
+    <!-- Hero banner -->
+    <div class="prof-hero">
+      <div class="prof-hero-bg" id="prof-hero-bg"></div>
+      <div class="prof-hero-particles"></div>
+      <div class="prof-hero-content">
+        <div class="prof-avatar-wrap">
+          <img id="prof-avatar" class="prof-avatar" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23555' d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/></svg>" alt="">
+          <div class="prof-online-dot"></div>
+        </div>
+        <div class="prof-hero-info">
+          <div class="prof-name" id="prof-name">Пользователь</div>
+          <div class="prof-tg-handle" id="prof-handle">@username</div>
+          <div class="prof-badges">
+            <div class="prof-badge">🎵 Меломан</div>
+            <div class="prof-badge" id="prof-badge-streak">🔥 Сегодня</div>
+          </div>
+        </div>
       </div>
     </div>
-    <div class="sec">Мне нравится</div>
+
+    <!-- Stats row -->
+    <div class="prof-stats-row">
+      <div class="prof-stat-item">
+        <div class="prof-stat-num" id="stat-favs">0</div>
+        <div class="prof-stat-lbl">В избранном</div>
+      </div>
+      <div class="prof-stat-item">
+        <div class="prof-stat-num" id="stat-hist">0</div>
+        <div class="prof-stat-lbl">Прослушано</div>
+      </div>
+      <div class="prof-stat-item">
+        <div class="prof-stat-num" id="stat-pls">0</div>
+        <div class="prof-stat-lbl">Плейлистов</div>
+      </div>
+    </div>
+
+    <!-- Recently played horizontal scroll -->
+    <div class="prof-section" id="prof-recent-title" style="display:none">Недавно слушал</div>
+    <div class="prof-recent-scroll" id="prof-recent-scroll"></div>
+
+    <div class="prof-divider"></div>
+
+    <!-- Favs list -->
+    <div class="prof-section">Мне нравится</div>
     <ul id="favs-list"></ul>
   </div>
 </div>
@@ -546,6 +669,8 @@ let preloadedTrack = null;
 
 // Initial render from Cache
 renderFavs(); renderHistory(); renderPlaylists();
+// Build profile from cache immediately
+try { updateProfileUI(); } catch(e) {}
 
 // ── SWIPE LOGIC FOR PAGES ──
 let startX = 0; const pagesEl = document.getElementById('pages'); const tabsOrder = ['wave', 'search', 'playlists', 'history', 'profile'];
@@ -589,10 +714,77 @@ async function loadData() {
       allData = await r.json();
       localStorage.setItem('music_data', JSON.stringify(allData));
       renderFavs(); renderHistory(); renderPlaylists();
-      document.getElementById('stat-favs').textContent = allData.favs.length;
-      document.getElementById('stat-hist').textContent = allData.history.length;
+      updateProfileUI();
     }
   } catch (e) {}
+}
+
+function updateProfileUI() {
+  document.getElementById('stat-favs').textContent = allData.favs.length;
+  document.getElementById('stat-hist').textContent = allData.history.length;
+  const plCount = Object.keys(allData.playlists || {}).length;
+  document.getElementById('stat-pls').textContent = plCount;
+
+  // Streak badge
+  const badge = document.getElementById('prof-badge-streak');
+  const h = allData.history.length;
+  if (h >= 50) badge.textContent = '🔥 Меломан';
+  else if (h >= 20) badge.textContent = '🎧 Активный';
+  else if (h >= 5) badge.textContent = '🎵 Слушатель';
+  else badge.textContent = '🌱 Новичок';
+
+  // Populate TG user info
+  try {
+    const u = tg.initDataUnsafe?.user;
+    if (u) {
+      document.getElementById('prof-name').textContent = [u.first_name, u.last_name].filter(Boolean).join(' ') || 'Пользователь';
+      document.getElementById('prof-handle').textContent = u.username ? '@' + u.username : '';
+      if (u.photo_url) document.getElementById('prof-avatar').src = u.photo_url;
+      // Use accent color based on user id for hero bg
+      const colors = [
+        'linear-gradient(135deg,#1a1a2e,#16213e,#0f3460)',
+        'linear-gradient(135deg,#1a0a2e,#2e1060,#1a0a44)',
+        'linear-gradient(135deg,#0a1a0a,#0f3020,#0a2810)',
+        'linear-gradient(135deg,#1a0a0a,#3e1616,#600f0f)',
+        'linear-gradient(135deg,#0a1a1a,#103030,#0a2828)',
+      ];
+      const idx = (u.id || 0) % colors.length;
+      document.getElementById('prof-hero-bg').style.background = colors[idx];
+    }
+  } catch(e) {}
+
+  // Recent tracks horizontal scroll
+  const recent = allData.history.slice(0, 12);
+  const scroll = document.getElementById('prof-recent-scroll');
+  const title = document.getElementById('prof-recent-title');
+  scroll.innerHTML = '';
+  if (recent.length > 0) {
+    title.style.display = 'block';
+    recent.forEach(t => {
+      const card = document.createElement('div');
+      card.className = 'prof-recent-card';
+      const coverContent = t.artwork_url
+        ? `<img src="${esc(t.artwork_url)}" loading="lazy" onerror="this.parentElement.innerHTML='🎵'">`
+        : `<div class="prof-recent-emoji">🎵</div>`;
+      card.innerHTML = `
+        <div class="prof-recent-cover">${coverContent}</div>
+        <div class="prof-recent-title">${esc(t.title)}</div>
+        <div class="prof-recent-artist">${esc(t.artist)}</div>
+      `;
+      card.addEventListener('click', () => {
+        haptic();
+        // Play from history queue
+        queue = [...allData.history];
+        qIdx = queue.findIndex(x => String(x.id) === String(t.id));
+        if (qIdx < 0) { queue.unshift(t); qIdx = 0; }
+        playTrack(t, 1);
+        checkMiniPlayerVis('profile');
+      });
+      scroll.appendChild(card);
+    });
+  } else {
+    title.style.display = 'none';
+  }
 }
 async function loadWave(reset = false) {
   if (waveLoading) return;
@@ -1230,26 +1422,44 @@ function closeArtistCard() {
 async function loadArtistTracks(artist, fallbackArtwork) {
   artistCardTracks = [];
   try {
+    // Search with higher limit to get more tracks
     const r = await fetch(`/api/search?q=${encodeURIComponent(artist)}`, { headers: { Authorization: authStr } });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const tracks = await r.json();
 
-    // Filter to only tracks by this artist (case-insensitive partial match)
-    const artistLower = artist.toLowerCase();
-    artistCardTracks = tracks.filter(t =>
-      t.artist && t.artist.toLowerCase().includes(artistLower.split(' ')[0])
-    ).slice(0, 15);
+    if (!tracks || !tracks.length) throw new Error('empty');
 
-    // Update listener count placeholder from track count
+    // Soft filter: prefer tracks where artist field matches, but keep rest too
+    const artistLower = artist.toLowerCase().trim();
+    const matched = tracks.filter(t =>
+      t.artist && t.artist.toLowerCase().includes(artistLower)
+    );
+    // If good match count, use filtered; otherwise show all search results
+    artistCardTracks = (matched.length >= 3 ? matched : tracks).slice(0, 15);
+
     const meta = document.getElementById('ac-meta');
-    meta.textContent = artistCardTracks.length > 0
-      ? `${artistCardTracks.length} треков найдено`
-      : '';
+    meta.textContent = `${artistCardTracks.length} популярных треков`;
 
     renderArtistTracks();
   } catch(e) {
+    // Fallback: try searching just first word of artist name
+    try {
+      const firstWord = artist.split(' ')[0];
+      if (firstWord && firstWord !== artist) {
+        const r2 = await fetch(`/api/search?q=${encodeURIComponent(firstWord)}`, { headers: { Authorization: authStr } });
+        if (r2.ok) {
+          const tracks2 = await r2.json();
+          artistCardTracks = (tracks2 || []).slice(0, 15);
+          if (artistCardTracks.length) {
+            document.getElementById('ac-meta').textContent = `${artistCardTracks.length} треков`;
+            renderArtistTracks();
+            return;
+          }
+        }
+      }
+    } catch(e2) {}
     document.getElementById('ac-tracks').innerHTML =
-      '<div class="ac-empty">Не удалось загрузить треки 😔</div>';
+      '<div class="ac-empty">😔<br><br>Треки не найдены</div>';
   }
 }
 
