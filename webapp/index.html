@@ -64,7 +64,10 @@ ul { list-style: none; }
 
 /* ── WAVE STATES ── */
 #wave-idle { display: block; }
-.wave-hero { padding: 50px 20px; text-align: center; background: linear-gradient(180deg, rgba(255, 204, 0, 0.1) 0%, var(--bg) 100%); }
+.wave-hero { padding: 50px 20px 28px; text-align: center; position: relative; overflow: hidden; }
+.wave-hero-canvas-wrap { position: absolute; inset: 0; z-index: 0; }
+#wave-hero-canvas { width: 100%; height: 100%; display: block; }
+.wave-hero-content { position: relative; z-index: 1; }
 .wave-hero h1 { font-size: 36px; font-weight: 800; margin-bottom: 8px; }
 .wave-hero p { color: var(--text-sec); font-size: 15px; margin-bottom: 28px; }
 .wave-btn { background: var(--accent); color: #000; border: none; border-radius: 30px; padding: 16px 40px; font-size: 18px; font-weight: 700; cursor: pointer; box-shadow: 0 8px 30px var(--accent-glow); transition: transform 0.2s; }
@@ -111,7 +114,7 @@ ul { list-style: none; }
 .mi-play { background: none; border: none; padding: 10px; cursor: pointer; display: flex; align-items: center; }
 
 /* ── FULL SCREEN PLAYER ── */
-#full-player { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; transform: translateY(100%); transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); background: #0f0f15; overflow: hidden; }
+#full-player { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; transform: translateY(100%); transition: transform 0.42s cubic-bezier(0.22, 1, 0.36, 1); background: #0f0f15; overflow: hidden; }
 #full-player.vis { transform: translateY(0); }
 .fp-color-bg { position: absolute; inset: -50%; background: radial-gradient(circle at 50% 30%, var(--cover-color) 0%, var(--bg) 80%); opacity: 0.7; z-index: -2; transition: background 1s ease; }
 .fp-bg { position: absolute; inset: -50px; background-size: cover; background-position: center; filter: blur(70px) brightness(0.3); z-index: -1; transition: background-image 0.5s ease; }
@@ -162,7 +165,7 @@ ul { list-style: none; }
 .fp-bottom-banner span { color: #fff; font-weight: 700; }
 
 /* ── MODALS ── */
-.sheet-modal { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-radius: 24px 24px 0 0; padding: 24px; z-index: 200; transform: translateY(100%); transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); box-shadow: 0 -10px 40px rgba(0,0,0,0.8); display: flex; flex-direction: column; max-height: 85vh;}
+.sheet-modal { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-radius: 24px 24px 0 0; padding: 24px; z-index: 200; transform: translateY(100%); transition: transform 0.38s cubic-bezier(0.22, 1, 0.36, 1); box-shadow: 0 -10px 40px rgba(0,0,0,0.8); display: flex; flex-direction: column; max-height: 85vh;}
 .sheet-modal.vis { transform: translateY(0); }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 199; opacity: 0; pointer-events: none; transition: 0.3s; }
 .modal-overlay.vis { opacity: 1; pointer-events: all; }
@@ -207,9 +210,12 @@ audio { display: none; }
   <div class="page on" id="page-wave">
     <div id="wave-idle">
       <div class="wave-hero">
-        <h1>Моя Волна</h1>
-        <p>Музыка под твой вкус</p>
-        <button class="wave-btn" onclick="haptic();playWaveFromStart()">▶ Слушать</button>
+        <div class="wave-hero-canvas-wrap"><canvas id="wave-hero-canvas"></canvas></div>
+        <div class="wave-hero-content">
+          <h1>Моя Волна</h1>
+          <p>Музыка под твой вкус</p>
+          <button class="wave-btn" onclick="haptic();playWaveFromStart()">▶ Слушать</button>
+        </div>
       </div>
       <div class="sec">Рекомендации</div>
       <ul id="wave-list"></ul>
@@ -609,7 +615,8 @@ function playTrack(t, dir = 1) {
     document.getElementById('mini-cover').innerHTML = imgHtml; coverEl.innerHTML = imgHtml;
     
     const fpAvatar = document.getElementById('fp-avatar');
-    if (t.artwork_url) { fpAvatar.src = t.artwork_url; fpAvatar.style.display = 'block'; } else { fpAvatar.style.display = 'none'; }
+    const avatarSrc = t.artist_avatar || '';
+    if (avatarSrc) { fpAvatar.src = avatarSrc; fpAvatar.style.display = 'block'; } else { fpAvatar.style.display = 'none'; }
     document.getElementById('wa-cover').src = t.artwork_url || ''; document.getElementById('wa-cover').style.display = t.artwork_url ? 'block' : 'none';
     
     applyDominantColor(t.artwork_url); 
@@ -686,16 +693,70 @@ aud.addEventListener('play', () => setPlayState(true));
 aud.addEventListener('error', () => { toast('Ошибка потока'); setTimeout(playNext, 1500); });
 
 // ── FULLSCREEN MANAGEMENT ──
-function openFull() { document.getElementById('full-player').classList.add('vis'); }
-function closeFull() { document.getElementById('full-player').classList.remove('vis'); }
+function openFull() {
+  const fp = document.getElementById('full-player');
+  fp.style.transition = 'transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)';
+  fp.style.transform = '';
+  fp.classList.add('vis');
+}
+function closeFull() {
+  const fp = document.getElementById('full-player');
+  fp.style.transition = 'transform 0.38s cubic-bezier(0.4, 0, 0.6, 1)';
+  fp.style.transform = 'translateY(100%)';
+  setTimeout(() => {
+    fp.classList.remove('vis');
+    fp.style.transform = '';
+    fp.style.transition = '';
+  }, 380);
+}
 
 const fp = document.getElementById('full-player');
 let fpStartX = 0, fpStartY = 0, fpCurrentY = 0, fpDragging = false, fpSwipeDir = null;
 const fpCoverWrap = document.getElementById('fp-cover-wrap');
 
 fpCoverWrap.addEventListener('touchstart', e => { fpStartX = e.touches[0].clientX; fpStartY = e.touches[0].clientY; fpDragging = true; fpSwipeDir = null; fp.style.transition = 'none'; }, {passive: true});
-fpCoverWrap.addEventListener('touchmove', e => { if (!fpDragging) return; let dx = e.touches[0].clientX - fpStartX, dy = e.touches[0].clientY - fpStartY; if (!fpSwipeDir) fpSwipeDir = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v'; if (fpSwipeDir === 'v' && dy > 0) { fpCurrentY = dy; fp.style.transform = `translateY(${dy}px)`; } }, {passive: true});
-fpCoverWrap.addEventListener('touchend', e => { if (!fpDragging) return; fpDragging = false; fp.style.transition = ''; let dx = fpStartX - e.changedTouches[0].clientX; if (fpSwipeDir === 'v') { if (fpCurrentY > 120) closeFull(); else fp.style.transform = ''; } else if (fpSwipeDir === 'h') { fp.style.transform = ''; if (Math.abs(dx) > 50) { if (dx > 0) playNext(); else playPrev(); } } fpCurrentY = 0; }, {passive: true});
+fpCoverWrap.addEventListener('touchmove', e => {
+  if (!fpDragging) return;
+  let dx = e.touches[0].clientX - fpStartX, dy = e.touches[0].clientY - fpStartY;
+  if (!fpSwipeDir) fpSwipeDir = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';
+  if (fpSwipeDir === 'v' && dy > 0) {
+    fpCurrentY = dy;
+    // Resistance above 100px
+    const travel = dy < 100 ? dy : 100 + (dy - 100) * 0.3;
+    fp.style.transform = `translateY(${travel}px)`;
+  }
+}, {passive: true});
+fpCoverWrap.addEventListener('touchend', e => {
+  if (!fpDragging) return; fpDragging = false;
+  let dx = fpStartX - e.changedTouches[0].clientX;
+  if (fpSwipeDir === 'v') {
+    if (fpCurrentY > 100) {
+      // Animate rest of the way down then close
+      fp.style.transition = 'transform 0.3s cubic-bezier(0.4, 0, 0.6, 1)';
+      fp.style.transform = 'translateY(100%)';
+      setTimeout(() => {
+        fp.classList.remove('vis');
+        fp.style.transform = '';
+        fp.style.transition = '';
+      }, 300);
+    } else {
+      // Snap back up
+      fp.style.transition = 'transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)';
+      fp.style.transform = 'translateY(0)';
+      setTimeout(() => { fp.style.transition = ''; }, 350);
+    }
+  } else if (fpSwipeDir === 'h') {
+    fp.style.transition = 'transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)';
+    fp.style.transform = 'translateY(0)';
+    setTimeout(() => { fp.style.transition = ''; }, 350);
+    if (Math.abs(dx) > 50) { if (dx > 0) playNext(); else playPrev(); }
+  } else {
+    fp.style.transition = 'transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)';
+    fp.style.transform = 'translateY(0)';
+    setTimeout(() => { fp.style.transition = ''; }, 350);
+  }
+  fpCurrentY = 0;
+}, {passive: true});
 
 // ── MINI PLAYER GESTURES ──
 const mp = document.getElementById('mini-player'); const mpBody = document.getElementById('mini-body'); let mpStartX = 0, mpStartY = 0; let mpDragging = false;
@@ -718,14 +779,40 @@ function closeModals() { ['eq-panel', 'pl-modal', 'lyrics-modal', 'timer-modal']
 
 // ── LYRICS ──
 async function openLyrics() {
-  if (qIdx < 0 || !queue[qIdx]) return; const t = queue[qIdx];
-  document.getElementById('lyrics-content').innerHTML = '<div class="spin"></div>';
-  document.getElementById('lyrics-modal').classList.add('vis'); document.getElementById('overlay').classList.add('vis');
+  if (qIdx < 0 || !queue[qIdx]) return;
+  const t = queue[qIdx];
+  const lyricsContent = document.getElementById('lyrics-content');
+  const lyricsModal = document.getElementById('lyrics-modal');
+  const overlayEl = document.getElementById('overlay');
+
+  lyricsContent.innerHTML = '<div class="spin"></div>';
+  lyricsModal.classList.add('vis');
+  overlayEl.classList.add('vis');
+
   try {
-      const r = await fetch(`/api/lyrics?title=${encodeURIComponent(t.title)}&artist=${encodeURIComponent(t.artist)}`);
-      const d = await r.json();
-      document.getElementById('lyrics-content').textContent = d.lyrics || 'Текст песни не найден 😔';
-  } catch (e) { document.getElementById('lyrics-content').textContent = 'Ошибка загрузки'; }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const r = await fetch(
+      `/api/lyrics?title=${encodeURIComponent(t.title)}&artist=${encodeURIComponent(t.artist)}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeoutId);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    if (d.lyrics && d.lyrics.trim()) {
+      lyricsContent.innerHTML = '';
+      lyricsContent.textContent = d.lyrics;
+    } else {
+      lyricsContent.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">😔<br><br>Текст песни не найден</div>';
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      lyricsContent.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">⏱<br><br>Таймаут загрузки</div>';
+    } else {
+      lyricsContent.innerHTML = `<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">⚠️<br><br>Ошибка загрузки текста</div>`;
+      console.error('Lyrics error:', e);
+    }
+  }
 }
 
 // ── SLEEP TIMER ──
@@ -813,6 +900,138 @@ async function addToPlaylist(name) {
 function createNewPlaylist() { const input = document.getElementById('pl-new-name'); const name = input.value.trim(); if (!name) return; input.value = ''; addToPlaylist(name); }
 
 let toastT; function toast(msg) { const el = document.getElementById('toast'); el.textContent = msg; el.classList.add('vis'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('vis'), 2000); }
+
+// ── ANIMATED HERO WAVE (Яндекс Музыка style) ──
+(function initHeroWave() {
+  const canvas = document.getElementById('wave-hero-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0;
+  // Wave colour — starts with accent, updates from cover color
+  let waveR = 255, waveG = 204, waveB = 0;
+  let targetR = 255, targetG = 204, targetB = 0;
+
+  function resizeCanvas() {
+    const wrap = canvas.parentElement;
+    W = wrap.offsetWidth; H = wrap.offsetHeight || 180;
+    canvas.width = W; canvas.height = H;
+  }
+
+  // Expose colour updater so applyDominantColor can call it
+  window.setHeroWaveColor = function(r, g, b) {
+    targetR = r; targetG = g; targetB = b;
+  };
+
+  const WAVE_COUNT = 4;
+  const waves = Array.from({length: WAVE_COUNT}, (_, i) => ({
+    amp: 18 + i * 6,          // amplitude
+    freq: 0.012 - i * 0.002,  // spatial frequency
+    speed: 0.018 + i * 0.006, // how fast phase advances
+    phase: i * Math.PI * 0.5, // initial phase offset
+    yBase: 0.55 + i * 0.08,   // vertical position (fraction of height)
+    alpha: 0.18 - i * 0.03,   // opacity
+  }));
+
+  let t = 0;
+  let rafId = null;
+
+  function lerp(a, b, f) { return a + (b - a) * f; }
+
+  function drawFrame() {
+    resizeCanvas();
+    t += 1;
+
+    // Smoothly lerp toward target colour
+    waveR = lerp(waveR, targetR, 0.03);
+    waveG = lerp(waveG, targetG, 0.03);
+    waveB = lerp(waveB, targetB, 0.03);
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Background gradient using wave colour
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, `rgba(${~~waveR},${~~waveG},${~~waveB},0.18)`);
+    grad.addColorStop(1, 'rgba(10,10,15,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw waves back to front
+    for (let wi = WAVE_COUNT - 1; wi >= 0; wi--) {
+      const w = waves[wi];
+      const phase = w.phase + t * w.speed;
+      const yBase = w.yBase * H;
+
+      ctx.beginPath();
+      ctx.moveTo(0, H);
+
+      for (let x = 0; x <= W; x += 2) {
+        // Multi-sine for organic feel
+        const y = yBase
+          + Math.sin(x * w.freq + phase) * w.amp
+          + Math.sin(x * w.freq * 1.7 + phase * 0.8) * (w.amp * 0.4)
+          + Math.sin(x * w.freq * 0.5 + phase * 1.3) * (w.amp * 0.6);
+        ctx.lineTo(x, y);
+      }
+
+      ctx.lineTo(W, H);
+      ctx.closePath();
+
+      const wGrad = ctx.createLinearGradient(0, 0, W, 0);
+      wGrad.addColorStop(0,   `rgba(${~~waveR},${~~waveG},${~~waveB},${w.alpha * 0.6})`);
+      wGrad.addColorStop(0.5, `rgba(${~~waveR},${~~waveG},${~~waveB},${w.alpha})`);
+      wGrad.addColorStop(1,   `rgba(${~~waveR},${~~waveG},${~~waveB},${w.alpha * 0.6})`);
+      ctx.fillStyle = wGrad;
+      ctx.fill();
+    }
+
+    rafId = requestAnimationFrame(drawFrame);
+  }
+
+  // Start/stop when wave tab is visible
+  const observer = new MutationObserver(() => {
+    const waveIdle = document.getElementById('wave-idle');
+    const pageWave = document.getElementById('page-wave');
+    const isVisible = pageWave && pageWave.classList.contains('on') && waveIdle && waveIdle.style.display !== 'none';
+    if (isVisible && !rafId) {
+      rafId = requestAnimationFrame(drawFrame);
+    } else if (!isVisible && rafId) {
+      cancelAnimationFrame(rafId); rafId = null;
+    }
+  });
+  observer.observe(document.getElementById('page-wave'), { attributes: true, attributeFilter: ['class'] });
+  observer.observe(document.getElementById('wave-idle'), { attributes: true, attributeFilter: ['style'] });
+
+  // Initial start
+  resizeCanvas();
+  rafId = requestAnimationFrame(drawFrame);
+  window.addEventListener('resize', resizeCanvas);
+})();
+
+// Patch applyDominantColor to also update hero wave
+const _origApplyColor = applyDominantColor;
+applyDominantColor = function(imgUrl) {
+  _origApplyColor(imgUrl);
+  if (!imgUrl) { window.setHeroWaveColor && window.setHeroWaveColor(255, 204, 0); return; }
+  const img = new Image(); img.crossOrigin = 'Anonymous';
+  img.onload = function() {
+    try {
+      const c = document.createElement('canvas'); c.width = 10; c.height = 10;
+      const cx = c.getContext('2d'); cx.drawImage(img, 0, 0, 10, 10);
+      const d = cx.getImageData(0, 0, 10, 10).data;
+      let r=0, g=0, b=0;
+      for (let i=0; i<d.length; i+=4) { r+=d[i]; g+=d[i+1]; b+=d[i+2]; }
+      const n = d.length/4;
+      // Boost saturation a bit so wave pops
+      const rr=r/n, gg=g/n, bb=b/n;
+      const max=Math.max(rr,gg,bb), min=Math.min(rr,gg,bb);
+      const boost = max > 0 ? Math.min(255/max, 2.2) : 1;
+      window.setHeroWaveColor && window.setHeroWaveColor(
+        Math.min(255, ~~(rr*boost)), Math.min(255, ~~(gg*boost)), Math.min(255, ~~(bb*boost))
+      );
+    } catch(e) {}
+  };
+  img.src = imgUrl;
+};
 
 loadData().then(() => loadWave(true));
 </script>
