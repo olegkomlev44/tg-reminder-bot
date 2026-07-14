@@ -409,7 +409,14 @@ ul { list-style: none; }
 
 #toast { position: fixed; top: 20px; left: 50%; transform: translate(-50%, -20px); background: var(--surface); color: var(--text); padding: 12px 24px; border-radius: 20px; font-size: 14px; font-weight: 500; opacity: 0; pointer-events: none; transition: 0.3s; z-index: 300; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); white-space: nowrap; }
 #toast.vis { opacity: 1; transform: translate(-50%, 0); }
-audio { display: none; }
+audio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
+  pointer-events: none;
+  z-index: -100;
+}
 </style>
 </head>
 <body>
@@ -651,7 +658,7 @@ audio { display: none; }
 </div>
 
 <div id="toast"></div>
-<audio id="aud" crossorigin="anonymous" preload="auto"></audio>
+<audio id="aud" crossorigin="anonymous" preload="auto" controls></audio>
 
 </div><script>
 // ── INIT & UTILS ──
