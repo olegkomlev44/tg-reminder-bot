@@ -658,7 +658,7 @@ audio {
 </div>
 
 <div id="toast"></div>
-<audio id="aud" crossorigin="anonymous" preload="auto" controls></audio>
+<audio id="aud" crossorigin="anonymous" preload="auto" controls title="Telegram Music"></audio>
 
 </div><script>
 // ── INIT & UTILS ──
@@ -1012,7 +1012,7 @@ function playTrack(t, dir = 1) {
     document.getElementById('fp-bg').style.backgroundImage = bgUrl; document.getElementById('wa-bg').style.backgroundImage = bgUrl;
 
     document.querySelectorAll('.track').forEach(li => li.classList.toggle('now', String(li.dataset.id) === String(t.id)));
-    updateFavBtnPlayer(); updateMediaSession(t);
+    updateFavBtnPlayer();
     
     let curTab = tabsOrder.find(t => document.getElementById('page-'+t).classList.contains('on'));
     checkMiniPlayerVis(curTab);
@@ -1021,9 +1021,23 @@ function playTrack(t, dir = 1) {
     coverEl.classList.add(dir > 0 ? 'slide-in-right' : 'slide-in-left');
     void coverEl.offsetWidth; coverEl.classList.remove('slide-in-right', 'slide-in-left');
 
-    aud.src = `/api/stream/${encodeURIComponent(t.id)}`;
-    aud.load(); aud.play().catch(e => console.warn('Autoplay blocked'));
-    setPlayState(true); logHistoryToServer(t);
+aud.src = `/api/stream/${encodeURIComponent(t.id)}`;
+aud.load(); 
+
+// Ждем, пока браузер реально начнет воспроизведение
+aud.play().then(() => {
+    // Вызываем обновление шторки ТОЛЬКО когда звук пошел
+    updateMediaSession(t);
+    if (typeof updatePositionState === 'function') {
+        updatePositionState();
+    }
+    setPlayState(true); 
+}).catch(e => {
+    console.warn('Autoplay blocked', e);
+    setPlayState(false);
+});
+
+logHistoryToServer(t);
   }, 300);
 }
 
