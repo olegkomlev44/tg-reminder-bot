@@ -213,6 +213,16 @@ ul { list-style: none; }
 .mi-play { background: none; border: none; padding: 10px; cursor: pointer; display: flex; align-items: center; }
 
 /* ── FULL SCREEN PLAYER ── */
+#full-player {
+  position: fixed; inset: 0; z-index: 100;
+  background: var(--bg, #0a0a0a);
+  display: flex; flex-direction: column;
+  transform: translateY(100%);
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  will-change: transform;
+  overflow: hidden;
+}
+#full-player.vis { transform: translateY(0); }
 .fp-top { display: flex; align-items: center; justify-content: space-between; padding: 20px 20px 10px; }
 .fp-top-title { font-size: 14px; font-weight: 700; color: rgba(255,255,255,0.9); text-transform: uppercase; letter-spacing: 0.5px; }
 .fp-lyrics-layer {
@@ -646,9 +656,6 @@ audio {
   <button class="menu-item-btn" onclick="haptic();closeModals();toggleVisualizer()">🎆 Визуализатор</button>
   <button class="menu-item-btn" onclick="haptic();closeModals();shareTrack()">🔗 Поделиться в Telegram</button>
 </div>
-
-
-<div class="modal-overlay" id="overlay" onclick="closeModals()"></div>
 
 <div class="sheet-modal" id="eq-panel">
   <div class="modal-head"><span>🎚 Эквалайзер</span><button class="close-modal" onclick="closeModals()">✕</button></div>
@@ -1190,8 +1197,7 @@ aud.addEventListener('error', () => {
 // ── FULLSCREEN MANAGEMENT ──
 function openFull() {
   const fp = document.getElementById('full-player');
-  fp.style.transition = 'transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)';
-  fp.style.transform = '';
+  fp.style.transition = '';
   fp.classList.add('vis');
 }
 function closeFull() {
@@ -1202,7 +1208,7 @@ function closeFull() {
     fp.classList.remove('vis');
     fp.style.transform = '';
     fp.style.transition = '';
-  }, 380);
+  }, 390);
 }
 
 const fp = document.getElementById('full-player');
@@ -1238,17 +1244,17 @@ fpCoverWrap.addEventListener('touchend', e => {
       // Snap back up
       fp.style.transition = 'transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)';
       fp.style.transform = 'translateY(0)';
-      setTimeout(() => { fp.style.transition = ''; }, 350);
+      setTimeout(() => { fp.style.transform = ''; fp.style.transition = ''; }, 350);
     }
   } else if (fpSwipeDir === 'h') {
     fp.style.transition = 'transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)';
     fp.style.transform = 'translateY(0)';
-    setTimeout(() => { fp.style.transition = ''; }, 350);
+    setTimeout(() => { fp.style.transform = ''; fp.style.transition = ''; }, 350);
     if (Math.abs(dx) > 50) { if (dx > 0) playNext(); else playPrev(); }
   } else {
     fp.style.transition = 'transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1)';
     fp.style.transform = 'translateY(0)';
-    setTimeout(() => { fp.style.transition = ''; }, 350);
+    setTimeout(() => { fp.style.transform = ''; fp.style.transition = ''; }, 350);
   }
   fpCurrentY = 0;
 }, {passive: true});
