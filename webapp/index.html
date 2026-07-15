@@ -446,10 +446,12 @@ audio {
 .fp-lyrics-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 32px 24px 32px;
+  /* Формат padding: сверху по-бокам снизу */
+  padding: 32px 24px 80px; 
   scrollbar-width: none;
   -webkit-overflow-scrolling: touch;
 }
+
 .fp-lyrics-scroll::-webkit-scrollbar { display: none; }
 
 .fp-lyrics-placeholder {
