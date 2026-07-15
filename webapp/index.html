@@ -432,7 +432,8 @@ audio {
 
 /* ── LYRICS VIEW (внутри fp-cover-wrap) ── */
 .fp-lyrics-view {
-  position: absolute; inset: 0;
+  position: absolute; 
+  top: 0; left: 0; right: 0; bottom: 30px; /* <-- 30px или больше поднимет нижний край контейнера */
   display: none; flex-direction: column;
   z-index: 10;
   border-radius: 12px;
