@@ -228,7 +228,8 @@ ul { list-style: none; }
 #vis-canvas.active { opacity: 1; }
 
 .fp-cover-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 10px 30px; perspective: 1000px; position: relative;}
-.fp-cover { width: 100%; max-width: 400px; aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: 0 20px 50px rgba(0,0,0,0.6); transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease; display: flex; align-items: center; justify-content: center; position: relative; }
+.fp-cover { width: 100%; max-width: 400px; aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: 0 20px 50px rgba(0,0,0,0.6); transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.4s ease; display: flex; align-items: center; justify-content: center; position: relative; }
+.fp-cover-wrap { position: relative; }
 .fp-cover.paused { transform: scale(0.95); }
 .fp-cover.slide-out-left { transform: translateX(-100vw) scale(0.9); opacity: 0; }
 .fp-cover.slide-out-right { transform: translateX(100vw) scale(0.9); opacity: 0; }
@@ -428,6 +429,104 @@ audio {
   pointer-events: none;
   z-index: -100;
 }
+
+/* ── LYRICS VIEW (внутри fp-cover-wrap) ── */
+.fp-lyrics-view {
+  position: absolute; inset: 0;
+  display: none; flex-direction: column;
+  z-index: 10;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(10,10,15,0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.fp-lyrics-view.active { display: flex; }
+
+.fp-lyrics-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 24px 32px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.fp-lyrics-scroll::-webkit-scrollbar { display: none; }
+
+.fp-lyrics-placeholder {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100%; text-align: center;
+  color: rgba(255,255,255,0.4); font-size: 15px; line-height: 1.8;
+}
+.lyr-spin {
+  width: 28px; height: 28px;
+  border: 3px solid rgba(255,255,255,0.1);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: sp 0.8s linear infinite;
+  margin: 0 auto;
+}
+
+/* Строчки текста */
+.lyr-line {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.55;
+  color: rgba(255,255,255,0.35);
+  transition: color 0.35s ease, font-size 0.25s ease, transform 0.25s ease;
+  margin: 4px 0;
+  cursor: pointer;
+  transform-origin: left center;
+  padding: 2px 0;
+}
+.lyr-line.active {
+  color: #ffffff;
+  font-size: 22px;
+  transform: translateX(4px);
+}
+.lyr-line.past {
+  color: rgba(255,255,255,0.55);
+}
+.lyr-line:empty { height: 14px; }
+
+/* ── SUB-ROW (текст / не нравится / поделиться) ── */
+.fp-sub-row {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  padding: 2px 16px 16px;
+  flex-wrap: wrap;
+}
+.fp-sub-btn {
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 20px;
+  color: rgba(255,255,255,0.7);
+  font-size: 13px; font-weight: 600;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+.fp-sub-btn:active { background: rgba(255,255,255,0.18); color: #fff; }
+.fp-sub-btn.active { background: rgba(255,204,0,0.15); border-color: rgba(255,204,0,0.3); color: var(--accent); }
+
+/* ── MORE MENU ── */
+.more-menu-btn {
+  display: flex; align-items: center; gap: 14px;
+  width: 100%;
+  background: none; border: none;
+  color: var(--text);
+  font-size: 16px; font-weight: 500;
+  padding: 14px 4px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  transition: opacity 0.15s;
+}
+.more-menu-btn:last-child { border-bottom: none; }
+.more-menu-btn:active { opacity: 0.6; }
+.more-menu-btn svg { flex-shrink: 0; opacity: 0.8; }
 </style>
 </head>
 <body>
@@ -583,42 +682,68 @@ audio {
   
   <div class="fp-top">
     <button class="fp-icon-btn" onclick="haptic();closeFull()"><svg viewBox="0 0 24 24"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg></button>
-    <div class="fp-top-title">Моя волна <span id="sleep-timer-display"></span></div>
-    <button class="fp-icon-btn" onclick="haptic();openSleepTimer()"><svg viewBox="0 0 24 24"><path d="M11 2h2v4h-2zm0 16h2v4h-2zm9.9-10.9l-1.4-1.4-2.8 2.8 1.4 1.4 2.8-2.8zM4.5 9.9l1.4-1.4 2.8 2.8-1.4 1.4-2.8-2.8zm15 3.1h-4v2h4v-2zm-16 0H1v2h2.5v-2zM12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0 8c-1.65 0-3-1.35-3-3s1.35-3 3-3 3 1.35 3 3-1.35 3-3 3z"/></svg></button>
+    <div class="fp-top-title" id="fp-top-title">Сейчас играет <span id="sleep-timer-display"></span></div>
+    <div style="width:46px"></div>
   </div>
   
   <div class="fp-cover-wrap" id="fp-cover-wrap">
     <canvas id="vis-canvas"></canvas>
     <div class="fp-cover paused" id="fp-cover">🎵</div>
+    <!-- Lyrics overlay — replaces cover -->
+    <div class="fp-lyrics-view" id="fp-lyrics-view">
+      <div class="fp-lyrics-scroll" id="fp-lyrics-scroll">
+        <div class="fp-lyrics-placeholder" id="fp-lyrics-placeholder">
+          <div class="fp-lyrics-loading" id="fp-lyrics-loading" style="display:none">
+            <div class="lyr-spin"></div>
+          </div>
+          <div id="fp-lyrics-empty" style="display:none">😔<br>Текст не найден</div>
+        </div>
+        <div id="fp-lyrics-lines"></div>
+      </div>
+    </div>
   </div>
   
+  <!-- Info row: track name + fav + 3-dot menu -->
   <div class="fp-info">
     <div class="fp-info-left" onclick="haptic();openArtistCard()">
       <img class="fp-small-avatar" id="fp-avatar" src="">
       <div class="fp-titles"><div class="fp-title" id="fp-title">—</div><div class="fp-artist" id="fp-artist"></div></div>
     </div>
     <div class="fp-actions">
-      <button class="fp-icon-btn" onclick="haptic();dislikeTrack()"><svg viewBox="0 0 24 24"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05C1.05 11.5 1 11.74 1 12v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg></button>
-      <button class="fp-icon-btn" onclick="haptic();openLyrics()"><svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg></button>
-      <button class="fp-icon-btn" onclick="haptic();toggleVisualizer()"><svg viewBox="0 0 24 24"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg></button>
+      <button class="fav-btn" id="fp-fav" onclick="haptic();toggleFavFromPlayer()"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></button>
+      <button class="fp-icon-btn" id="fp-more-btn" onclick="haptic();openMoreMenu()"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
     </div>
   </div>
-  
+
+  <!-- Progress -->
   <div class="fp-prog-area" id="fp-prog-area"><div class="fp-prog" id="fp-prog"><div class="fp-prog-fill" id="fp-fill"></div><div class="fp-thumb" id="fp-thumb"></div></div></div>
   <div class="fp-times"><span id="fp-cur">0:00</span><span id="fp-dur">0:00</span></div>
   
+  <!-- Controls: Яндекс Музыка order: shuffle | prev | play | next | repeat -->
   <div class="fp-ctrl">
     <button class="fp-ctrl-btn sec-btn" id="btn-shuf" onclick="haptic();toggleShuffle()"><svg viewBox="0 0 24 24"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg></button>
     <button class="fp-ctrl-btn" onclick="haptic();playPrev()"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
     <button class="fp-play" id="fp-play" onclick="haptic();togglePlay()"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
     <button class="fp-ctrl-btn" onclick="haptic();playNext()"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
-    <button class="fav-btn" id="fp-fav" onclick="haptic();toggleFavFromPlayer()"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></button>
+    <button class="fp-ctrl-btn sec-btn" id="btn-rep" onclick="haptic();toggleRepeat()"><svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg></button>
   </div>
-  
-  <div class="fp-bottom-banner" onclick="haptic();shareTrack()">
-    Поделиться треком в Telegram<br>
-    <span id="fp-banner-title">▶ Название</span>
+
+  <!-- Lyrics toggle button row (как в ЯМ — под кнопками) -->
+  <div class="fp-sub-row">
+    <button class="fp-sub-btn" id="btn-lyrics-toggle" onclick="haptic();toggleLyricsView()">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm1 7V3.5L18.5 9H15zm-3 9H8v-2h4v2zm4-4H8v-2h8v2z"/></svg>
+      Текст
+    </button>
+    <button class="fp-sub-btn" onclick="haptic();dislikeTrack()">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05C1.05 11.5 1 11.74 1 12v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>
+      Не нравится
+    </button>
+    <button class="fp-sub-btn" onclick="haptic();shareTrack()">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
+      Поделиться
+    </button>
   </div>
+
 </div>
 
 <div class="modal-overlay" id="overlay" onclick="closeModals()"></div>
@@ -634,11 +759,6 @@ audio {
   <div class="pl-new-wrap"><input type="text" id="pl-new-name" placeholder="Новый..."><button onclick="haptic();createNewPlaylist()">Создать</button></div>
 </div>
 
-<div class="sheet-modal" id="lyrics-modal">
-  <div class="modal-head"><span>📝 Текст песни</span><button class="close-modal" onclick="closeModals()">✕</button></div>
-  <div class="lyrics-content" id="lyrics-content"><div class="spin"></div></div>
-</div>
-
 <div class="sheet-modal" id="timer-modal">
   <div class="modal-head"><span>🌙 Таймер сна</span><button class="close-modal" onclick="closeModals()">✕</button></div>
   <button class="timer-btn" onclick="haptic();setSleepTimer(15)">15 минут</button>
@@ -646,6 +766,27 @@ audio {
   <button class="timer-btn" onclick="haptic();setSleepTimer(60)">60 минут</button>
   <button class="timer-btn" onclick="haptic();setSleepTimer('track')">До конца трека</button>
   <button class="timer-btn" style="background:var(--red);border-color:var(--red);" onclick="haptic();setSleepTimer(0)">Выключить таймер</button>
+</div>
+
+<!-- More menu (три точки) -->
+<div class="sheet-modal" id="more-modal">
+  <div class="modal-head"><span>Ещё</span><button class="close-modal" onclick="closeModals()">✕</button></div>
+  <button class="more-menu-btn" onclick="haptic();closeModals();openEQ()">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>
+    Эквалайзер
+  </button>
+  <button class="more-menu-btn" onclick="haptic();closeModals();openSleepTimer()">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M11 2h2v4h-2zm0 16h2v4h-2zm9.9-10.9l-1.4-1.4-2.8 2.8 1.4 1.4 2.8-2.8zM4.5 9.9l1.4-1.4 2.8 2.8-1.4 1.4-2.8-2.8zm15 3.1h-4v2h4v-2zm-16 0H1v2h2.5v-2zM12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0 8c-1.65 0-3-1.35-3-3s1.35-3 3-3 3 1.35 3 3-1.35 3-3 3z"/></svg>
+    Таймер сна <span id="more-timer-hint" style="margin-left:auto;font-size:12px;color:var(--text-sec)"></span>
+  </button>
+  <button class="more-menu-btn" onclick="haptic();closeModals();toggleVisualizer()">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/><circle cx="20" cy="5" r="4" fill="var(--accent)" style="display:none" id="vis-dot"/></svg>
+    Визуализатор
+  </button>
+  <button class="more-menu-btn" onclick="haptic();closeModals();openPlaylistModal()">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 13h2v-2H3zm0 4h2v-2H3zm0-8h2V7H3zm4 4h14v-2H7zm0 4h14v-2H7zm0-10v2h14V7z"/></svg>
+    Добавить в плейлист
+  </button>
 </div>
 
 <div id="artist-card">
@@ -1018,7 +1159,7 @@ function playTrack(t, dir = 1) {
   setTimeout(() => {
     ['mini-title', 'fp-title', 'wa-pill-title'].forEach(id => document.getElementById(id).textContent = t.title);
     ['mini-artist', 'fp-artist', 'wa-huge-artist'].forEach(id => document.getElementById(id).textContent = t.artist);
-    document.getElementById('fp-banner-title').textContent = '▶ ' + t.title;
+    // (banner title removed)
 
     const imgHtml = t.artwork_url ? `<img src="${esc(t.artwork_url)}">` : '🎵';
     document.getElementById('mini-cover').innerHTML = imgHtml; coverEl.innerHTML = imgHtml;
@@ -1041,6 +1182,13 @@ function playTrack(t, dir = 1) {
     coverEl.classList.remove('slide-out-left', 'slide-out-right');
     coverEl.classList.add(dir > 0 ? 'slide-in-right' : 'slide-in-left');
     void coverEl.offsetWidth; coverEl.classList.remove('slide-in-right', 'slide-in-left');
+
+    // Reset lyrics when track changes
+    resetLyricsOnTrackChange();
+
+    // Update fp-top-title
+    const topTitle = document.getElementById('fp-top-title');
+    if (topTitle) topTitle.innerHTML = (t.source || 'Сейчас играет') + ' <span id="sleep-timer-display">' + (document.getElementById('sleep-timer-display')?.textContent || '') + '</span>';
 
 aud.src = `/api/stream/${encodeURIComponent(t.id)}`;
 aud.load(); 
@@ -1213,43 +1361,198 @@ mp.addEventListener('touchend', e => {
   } else { mp.style.transform = ''; openFull(); }
 }, {passive: true});
 
-// ── MODALS (EQ, Playlist, Lyrics, Timer) ──
-function closeModals() { ['eq-panel', 'pl-modal', 'lyrics-modal', 'timer-modal'].forEach(id => document.getElementById(id).classList.remove('vis')); document.getElementById('overlay').classList.remove('vis'); }
+// ── MODALS (EQ, Playlist, Timer, More) ──
+function closeModals() { ['eq-panel', 'pl-modal', 'timer-modal', 'more-modal'].forEach(id => document.getElementById(id).classList.remove('vis')); document.getElementById('overlay').classList.remove('vis'); }
+function openMoreMenu() {
+  const hint = document.getElementById('more-timer-hint');
+  const disp = document.getElementById('sleep-timer-display');
+  hint.textContent = disp ? disp.textContent : '';
+  document.getElementById('more-modal').classList.add('vis');
+  document.getElementById('overlay').classList.add('vis');
+}
 
-// ── LYRICS ──
-async function openLyrics() {
-  if (qIdx < 0 || !queue[qIdx]) return;
-  const t = queue[qIdx];
-  const lyricsContent = document.getElementById('lyrics-content');
-  const lyricsModal = document.getElementById('lyrics-modal');
-  const overlayEl = document.getElementById('overlay');
+// ── LYRICS (inline, karaoke-style) ──
+let lyricsVisible = false;
+let lyricsTrackId = null;
+let syncedLines = [];   // [{time: seconds, text: string}]
+let plainLines = [];    // [string]
+let lyricsRaf = null;
 
-  lyricsContent.innerHTML = '<div class="spin"></div>';
-  lyricsModal.classList.add('vis');
-  overlayEl.classList.add('vis');
+function toggleLyricsView() {
+  lyricsVisible = !lyricsVisible;
+  const view = document.getElementById('fp-lyrics-view');
+  const cover = document.getElementById('fp-cover');
+  const vis = document.getElementById('vis-canvas');
+  const btn = document.getElementById('btn-lyrics-toggle');
+
+  if (lyricsVisible) {
+    view.classList.add('active');
+    cover.style.opacity = '0';
+    vis.style.opacity = '0';
+    btn.classList.add('active');
+    // Load if needed
+    if (qIdx >= 0 && queue[qIdx]) {
+      const t = queue[qIdx];
+      if (lyricsTrackId !== t.id) {
+        loadLyricsForTrack(t);
+      } else {
+        startLyricsSync();
+      }
+    }
+  } else {
+    view.classList.remove('active');
+    cover.style.opacity = '';
+    vis.style.opacity = '';
+    btn.classList.remove('active');
+    stopLyricsSync();
+  }
+}
+
+async function loadLyricsForTrack(t) {
+  if (!t) return;
+  lyricsTrackId = t.id;
+  syncedLines = [];
+  plainLines = [];
+
+  const linesEl = document.getElementById('fp-lyrics-lines');
+  const loading = document.getElementById('fp-lyrics-loading');
+  const empty = document.getElementById('fp-lyrics-empty');
+  const placeholder = document.getElementById('fp-lyrics-placeholder');
+
+  linesEl.innerHTML = '';
+  placeholder.style.display = 'flex';
+  loading.style.display = 'block';
+  empty.style.display = 'none';
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const tid = setTimeout(() => controller.abort(), 10000);
     const r = await fetch(
       `/api/lyrics?title=${encodeURIComponent(t.title)}&artist=${encodeURIComponent(t.artist)}`,
       { signal: controller.signal }
     );
-    clearTimeout(timeoutId);
+    clearTimeout(tid);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
-    if (d.lyrics && d.lyrics.trim()) {
-      lyricsContent.innerHTML = '';
-      lyricsContent.textContent = d.lyrics;
+
+    loading.style.display = 'none';
+
+    if (d.synced && d.synced.trim()) {
+      // Parse LRC format: [mm:ss.xx] text
+      syncedLines = parseLRC(d.synced);
+      renderSyncedLyrics();
+      placeholder.style.display = 'none';
+      startLyricsSync();
+    } else if (d.lyrics && d.lyrics.trim()) {
+      // Plain text — just render static
+      plainLines = d.lyrics.split('\n');
+      renderPlainLyrics();
+      placeholder.style.display = 'none';
     } else {
-      lyricsContent.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">😔<br><br>Текст песни не найден</div>';
+      empty.style.display = 'block';
     }
   } catch (e) {
-    if (e.name === 'AbortError') {
-      lyricsContent.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">⏱<br><br>Таймаут загрузки</div>';
-    } else {
-      lyricsContent.innerHTML = `<div style="text-align:center;padding:40px 20px;color:var(--text-sec)">⚠️<br><br>Ошибка загрузки текста</div>`;
-      console.error('Lyrics error:', e);
+    loading.style.display = 'none';
+    empty.style.display = 'block';
+    if (e.name !== 'AbortError') console.error('Lyrics error:', e);
+  }
+}
+
+function parseLRC(lrc) {
+  const lines = [];
+  const re = /\[(\d{1,2}):(\d{2})[\.,](\d{1,3})\](.*)/;
+  lrc.split('\n').forEach(line => {
+    const m = line.match(re);
+    if (m) {
+      const mins = parseInt(m[1]);
+      const secs = parseInt(m[2]);
+      const ms = parseInt(m[3].padEnd(3, '0').slice(0, 3));
+      const time = mins * 60 + secs + ms / 1000;
+      lines.push({ time, text: m[4].trim() });
+    }
+  });
+  return lines.sort((a, b) => a.time - b.time);
+}
+
+function renderSyncedLyrics() {
+  const el = document.getElementById('fp-lyrics-lines');
+  el.innerHTML = '';
+  syncedLines.forEach((line, i) => {
+    const div = document.createElement('div');
+    div.className = 'lyr-line';
+    div.textContent = line.text || '';
+    div.dataset.idx = i;
+    div.onclick = () => {
+      if (aud.duration) { aud.currentTime = line.time + 0.05; }
+    };
+    el.appendChild(div);
+  });
+}
+
+function renderPlainLyrics() {
+  const el = document.getElementById('fp-lyrics-lines');
+  el.innerHTML = '';
+  plainLines.forEach(line => {
+    const div = document.createElement('div');
+    div.className = 'lyr-line past'; // All visible at once
+    div.textContent = line;
+    el.appendChild(div);
+  });
+}
+
+let lastLyrIdx = -1;
+function startLyricsSync() {
+  stopLyricsSync();
+  if (!syncedLines.length) return;
+  function tick() {
+    const curTime = aud.currentTime;
+    let idx = -1;
+    for (let i = 0; i < syncedLines.length; i++) {
+      if (syncedLines[i].time <= curTime) idx = i;
+      else break;
+    }
+    if (idx !== lastLyrIdx) {
+      lastLyrIdx = idx;
+      highlightLyricsLine(idx);
+    }
+    lyricsRaf = requestAnimationFrame(tick);
+  }
+  lyricsRaf = requestAnimationFrame(tick);
+}
+
+function stopLyricsSync() {
+  if (lyricsRaf) { cancelAnimationFrame(lyricsRaf); lyricsRaf = null; }
+  lastLyrIdx = -1;
+}
+
+function highlightLyricsLine(activeIdx) {
+  const lines = document.querySelectorAll('#fp-lyrics-lines .lyr-line');
+  lines.forEach((el, i) => {
+    el.classList.remove('active', 'past');
+    if (i < activeIdx) el.classList.add('past');
+    else if (i === activeIdx) el.classList.add('active');
+  });
+  // Auto-scroll active line into view (center)
+  if (activeIdx >= 0 && lines[activeIdx]) {
+    lines[activeIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+}
+
+// When track changes, reset lyrics state
+function resetLyricsOnTrackChange() {
+  if (lyricsTrackId !== null && qIdx >= 0 && queue[qIdx] && lyricsTrackId !== queue[qIdx].id) {
+    syncedLines = [];
+    plainLines = [];
+    lyricsTrackId = null;
+    lastLyrIdx = -1;
+    document.getElementById('fp-lyrics-lines').innerHTML = '';
+    document.getElementById('fp-lyrics-placeholder').style.display = 'flex';
+    document.getElementById('fp-lyrics-loading').style.display = 'none';
+    document.getElementById('fp-lyrics-empty').style.display = 'none';
+    stopLyricsSync();
+    // Auto-reload if view is open
+    if (lyricsVisible && qIdx >= 0 && queue[qIdx]) {
+      loadLyricsForTrack(queue[qIdx]);
     }
   }
 }
@@ -1657,70 +1960,4 @@ let waveDataArray = null;
 let wavePulseRaf = null;
 
 function startWavePulse() {
-    // Если аудиоконтекст еще не создан, ждем
-    if (!actx) return;
-
-    // Создаем отдельный анализатор для Волны, чтобы не ломать основной визуал
-    if (!waveAnalyser) {
-        waveAnalyser = actx.createAnalyser();
-        waveAnalyser.fftSize = 64; // Идеально для улавливания басов (бочки)
-        if (srcNode) srcNode.connect(waveAnalyser);
-        waveDataArray = new Uint8Array(waveAnalyser.frequencyBinCount);
-    }
-
-    const glow = document.getElementById('wa-pulse-glow');
-    const cover = document.querySelector('.wa-cover-container');
-    const pageWave = document.getElementById('page-wave');
-    const waveActive = document.getElementById('wave-active');
-
-    function pulseLoop() {
-        // Запускаем анимацию только если открыта Волна и трек не на паузе
-        if (pageWave.classList.contains('on') && waveActive.style.display !== 'none' && !aud.paused) {
-            waveAnalyser.getByteFrequencyData(waveDataArray);
-            
-            // Вычисляем среднюю громкость нижних частот (басов)
-            let bassSum = 0;
-            const bassBins = 6; // Берем первые 6 полос (самые низкие частоты)
-            for (let i = 0; i < bassBins; i++) {
-                bassSum += waveDataArray[i];
-            }
-            const bassAvg = bassSum / bassBins;
-            
-            // Нормализуем значение от 0 до 1 (255 - максимум для getByteFrequencyData)
-            const bassNormal = Math.min(1, (bassAvg / 255) * 1.2); 
-            
-            // Изменяем масштаб и прозрачность в такт басам
-            if (glow) {
-                // Свечение сильно расширяется и становится ярче
-                const glowScale = 1 + (bassNormal * 0.5); 
-                const glowOpacity = 0.4 + (bassNormal * 0.4);
-                glow.style.transform = `translate(-50%, -50%) scale(${glowScale})`;
-                glow.style.opacity = glowOpacity;
-            }
-            if (cover) {
-                // Сама обложка слегка "прыгает"
-                const coverScale = 1 + (bassNormal * 0.06);
-                cover.style.transform = `scale(${coverScale})`;
-            }
-        } else {
-            // Плавное затухание, если музыка на паузе
-            if (glow) {
-                glow.style.transform = 'translate(-50%, -50%) scale(1)';
-                glow.style.opacity = '0.4';
-            }
-            if (cover) {
-                cover.style.transform = 'scale(1)';
-            }
-        }
-        wavePulseRaf = requestAnimationFrame(pulseLoop);
-    }
-    
-    // Очищаем предыдущий цикл, если он был, и запускаем новый
-    if (wavePulseRaf) cancelAnimationFrame(wavePulseRaf);
-    pulseLoop();
-}
-
-loadData().then(() => loadWave(true));
-</script>
-</body>
-</html>
+    // Если аудиоконтекст еще не созд
