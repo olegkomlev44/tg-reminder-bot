@@ -107,16 +107,33 @@ async def api_dislike(request):
 async def api_lyrics(request):
     title = request.rel_url.query.get("title", "")
     artist = request.rel_url.query.get("artist", "")
-    url = f"https://lrclib.net/api/get?track_name={urllib.parse.quote(title)}&artist_name={urllib.parse.quote(artist)}"
+    import re as _re
+    clean_title = _re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
+    
+    # Try lrclib /api/get first (exact match), then /api/search
+    endpoints = [
+        f"https://lrclib.net/api/get?track_name={urllib.parse.quote(clean_title)}&artist_name={urllib.parse.quote(artist)}",
+        f"https://lrclib.net/api/search?q={urllib.parse.quote(artist + ' ' + clean_title)}",
+    ]
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=5) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    lyrics = data.get("plainLyrics") or data.get("syncedLyrics")
-                    return cors(web.json_response({"lyrics": lyrics}))
-    except Exception as e: logger.error(f"Lyrics err: {e}")
-    return cors(web.json_response({"lyrics": None}))
+            for url in endpoints:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # /api/search returns list, /api/get returns object
+                        if isinstance(data, list):
+                            data = data[0] if data else {}
+                        synced = data.get("syncedLyrics") or ""
+                        plain = data.get("plainLyrics") or ""
+                        if synced or plain:
+                            return cors(web.json_response({
+                                "lyrics": plain,
+                                "synced": synced,
+                            }))
+    except Exception as e:
+        logger.error(f"Lyrics err: {e}")
+    return cors(web.json_response({"lyrics": None, "synced": None}))
 
 # -----------------------------------
 
