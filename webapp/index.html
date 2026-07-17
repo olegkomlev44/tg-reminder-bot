@@ -2216,9 +2216,14 @@ async function dislikeTrack() {
 function shareTrack() {
   if (qIdx < 0 || !queue[qIdx]) return;
   const t = queue[qIdx];
-  const query = `${t.artist} - ${t.title}`;
-  try { tg.switchInlineQuery(query); } catch(e) { toast('Недоступно в этом клиенте'); }
+  try { 
+      // Отправляем специальный запрос боту для красивой карточки
+      tg.switchInlineQuery('share_' + t.id); 
+  } catch(e) { 
+      toast('Недоступно в этом клиенте'); 
+  }
 }
+
 
 // ── COLOR EXTRACTION FOR BREATHE ANIMATION ──
 function applyDominantColor(imgUrl) {
