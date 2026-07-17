@@ -60,28 +60,52 @@ async def api_wave(request):
     
     bl = get_blacklist(uid)
     favs = get_music_favs(uid)
+    history = get_user_history(uid)
     
-    tracks = []
-    if len(favs) > 3 and offset == 0:
-        try:
-            artist = random.choice(favs)["artist"]
-            tracks = await music_engine.search_multi(artist, limit=10)
-        except: pass
+    # Объединяем вкусы юзера
+    base_pool = favs + history
+    unique_tracks = []
+    seen = set()
+    
+    # Генерируем умную волну только для первой страницы (offset == 0)
+    if base_pool and offset == 0:
+        # 1. Выбираем 2 случайных трека из истории/избранного как "сиды"
+        seeds = random.sample(base_pool, min(2, len(base_pool)))
+        lastfm_suggestions = []
+        
+        # 2. Получаем похожие названия из Last.fm
+        for seed in seeds:
+            similars = await music_engine.get_similar_lastfm(seed["artist"], seed["title"], limit=5)
+            lastfm_suggestions.extend(similars)
+            
+        # 3. Асинхронно пробиваем эти названия через наш SoundCloud/YT поисковик
+        async def resolve_track(sugg):
+            q = f"{sugg['artist']} {sugg['title']}"
+            res = await music_engine.search_multi(q, limit=1)
+            return res[0] if res else None
 
-    if len(tracks) < limit:
+        # Запускаем все запросы параллельно!
+        tasks = [resolve_track(s) for s in lastfm_suggestions]
+        resolved_tracks = await asyncio.gather(*tasks)
+        
+        # 4. Фильтруем результаты (убираем дубликаты, дизлайки и пустые ответы)
+        for t in resolved_tracks:
+            if t and t['id'] not in seen and str(t['id']) not in bl:
+                seen.add(t['id'])
+                unique_tracks.append(t)
+
+    # 5. ФОЛЛБЭК: Если Last.fm ничего не вернул или это подгрузка при скролле
+    if len(unique_tracks) < limit:
         charts = await music_engine.get_charts(limit=limit, offset=offset)
         if not charts:
             charts = await music_engine.search_multi(random.choice(["rap hits", "phonk", "pop 2024", "lofi beats"]), limit=limit)
-        tracks += charts
-
-    seen = set()
-    unique_tracks = []
-    for t in tracks:
-        # Исключаем дизлайкнутые и дубликаты
-        if t['id'] not in seen and str(t['id']) not in bl:
-            seen.add(t['id'])
-            unique_tracks.append(t)
-            
+        
+        for t in charts:
+            if t['id'] not in seen and str(t['id']) not in bl:
+                seen.add(t['id'])
+                unique_tracks.append(t)
+                
+    # Перемешиваем, чтобы тренды и рекомендации Last.fm миксовались органично
     random.shuffle(unique_tracks)
     return cors(web.json_response(unique_tracks[:limit]))
 
