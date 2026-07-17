@@ -2130,6 +2130,34 @@ async def inline_music_search(inline_query: types.InlineQuery):
     if not query:
         return
 
+     # НОВЫЙ БЛОК: Обработка шеринга трека
+    if query.startswith("share_"):
+        track_id = query.split("_", 1)[1]
+        track = await music_engine.get_track_details(track_id)
+        if not track: return
+        
+        bot_user = await inline_query.bot.me()
+        # Ссылка на запуск WebApp с параметром
+        web_app_url = f"https://t.me/{bot_user.username}/app?startapp=play_track_{track_id}"
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="▶️ Слушать в плеере", url=web_app_url)
+        ]])
+        
+        res = InlineQueryResultArticle(
+            id=f"share_{track_id}",
+            title="Поделиться треком",
+            description=f"{track['artist']} — {track['title']}",
+            thumbnail_url=track.get('artwork_url', "https://i.imgur.com/8mX1wGg.png"),
+            input_message_content=InputTextMessageContent(
+                message_text=f"🔥 Зацени трек!\n\n🎧 *{track['artist']} — {track['title']}*",
+                parse_mode="Markdown"
+            ),
+            reply_markup=kb
+        )
+        await inline_query.answer([res], cache_time=0)
+        return
+        
     # Telegram позволяет максимум 50 результатов за один ответ
     tracks = await music_engine.search_multi(query, limit=50)
     results = []
