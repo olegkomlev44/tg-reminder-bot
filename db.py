@@ -153,3 +153,111 @@ def get_blacklist(user_id):
     rows = c.fetchall()
     conn.close()
     return {r[0] for r in rows}
+
+# ═══════════════════════════════════════════════════
+# КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ
+# ═══════════════════════════════════════════════════
+
+import secrets
+
+def _init_collab_tables(conn):
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS collab_meta (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            owner_name TEXT,
+            owner_avatar TEXT,
+            name TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS collab_tracks (
+            collab_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            title TEXT, artist TEXT, artwork_url TEXT, source TEXT,
+            added_by TEXT NOT NULL,
+            added_by_name TEXT,
+            added_by_avatar TEXT,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(collab_id, track_id),
+            FOREIGN KEY(collab_id) REFERENCES collab_meta(id)
+        )
+    """)
+    conn.commit()
+
+def collab_create(owner_id: str, owner_name: str, owner_avatar: str, name: str) -> str:
+    """Создаёт коллаб-плейлист. Возвращает его короткий ID."""
+    cid = secrets.token_urlsafe(8)   # 8 байт = ~11 символов, URL-safe
+    conn = sqlite3.connect(DB_PATH)
+    _init_collab_tables(conn)
+    conn.execute(
+        "INSERT INTO collab_meta (id, owner_id, owner_name, owner_avatar, name) VALUES (?,?,?,?,?)",
+        (cid, owner_id, owner_name, owner_avatar, name)
+    )
+    conn.commit(); conn.close()
+    return cid
+
+def collab_get_meta(cid: str) -> dict | None:
+    conn = sqlite3.connect(DB_PATH)
+    _init_collab_tables(conn)
+    row = conn.execute(
+        "SELECT id, owner_id, owner_name, owner_avatar, name FROM collab_meta WHERE id=?", (cid,)
+    ).fetchone()
+    conn.close()
+    if not row: return None
+    return {"id": row[0], "owner_id": row[1], "owner_name": row[2], "owner_avatar": row[3], "name": row[4]}
+
+def collab_get_tracks(cid: str) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    _init_collab_tables(conn)
+    rows = conn.execute("""
+        SELECT track_id, title, artist, artwork_url, source,
+               added_by, added_by_name, added_by_avatar
+        FROM collab_tracks WHERE collab_id=? ORDER BY added_at ASC
+    """, (cid,)).fetchall()
+    conn.close()
+    return [{
+        "id": r[0], "title": r[1], "artist": r[2],
+        "artwork_url": r[3], "source": r[4] or "SoundCloud",
+        "added_by": r[5], "added_by_name": r[6], "added_by_avatar": r[7]
+    } for r in rows]
+
+def collab_add_track(cid: str, track: dict, user_id: str, user_name: str, user_avatar: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    _init_collab_tables(conn)
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO collab_tracks
+                (collab_id, track_id, title, artist, artwork_url, source,
+                 added_by, added_by_name, added_by_avatar)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (cid, str(track["id"]), track.get("title"), track.get("artist"),
+              track.get("artwork_url"), track.get("source", "SoundCloud"),
+              user_id, user_name, user_avatar))
+        conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        conn.close()
+        return False
+
+def collab_remove_track(cid: str, track_id: str, user_id: str, owner_id: str) -> bool:
+    """Удалить трек может тот, кто добавил, или владелец плейлиста."""
+    conn = sqlite3.connect(DB_PATH)
+    _init_collab_tables(conn)
+    conn.execute("""
+        DELETE FROM collab_tracks
+        WHERE collab_id=? AND track_id=?
+          AND (added_by=? OR ?=?)
+    """, (cid, track_id, user_id, user_id, owner_id))
+    conn.commit(); conn.close()
+    return True
+
+def collab_delete(cid: str, owner_id: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    _init_collab_tables(conn)
+    conn.execute("DELETE FROM collab_tracks WHERE collab_id=?", (cid,))
+    conn.execute("DELETE FROM collab_meta WHERE id=? AND owner_id=?", (cid, owner_id))
+    conn.commit(); conn.close()
+    return True
