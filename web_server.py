@@ -3,9 +3,11 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 from music_engine import music_engine
 from db import (get_music_favs, get_user_history, get_playlists,
-                save_music_fav, log_track_history, save_playlist_track, 
+                save_music_fav, log_track_history, save_playlist_track,
                 rename_playlist, remove_track_from_playlist, delete_playlist_db,
-                init_db, add_dislike, get_blacklist)
+                init_db, add_dislike, get_blacklist,
+                collab_create, collab_get_meta, collab_get_tracks,
+                collab_add_track, collab_remove_track, collab_delete)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -341,6 +343,12 @@ async def start_web_server():
     app.router.add_post("/api/playlist/remove_track", api_pl_remove_track)
     app.router.add_post("/api/playlist/delete", api_pl_delete)
     app.router.add_get("/api/stream/{track_id}", api_stream_track)
+    # Коллаборативные плейлисты
+    app.router.add_post("/api/collab/create", api_collab_create)
+    app.router.add_get("/api/collab/{cid}", api_collab_get)
+    app.router.add_post("/api/collab/{cid}/add", api_collab_add_track)
+    app.router.add_post("/api/collab/{cid}/remove", api_collab_remove_track)
+    app.router.add_post("/api/collab/{cid}/delete", api_collab_delete)
     app.router.add_options("/{path_info:.*}", lambda r: cors(web.Response()))
 
     runner = web.AppRunner(app)
@@ -348,3 +356,71 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     await web.TCPSite(runner, "0.0.0.0", port).start()
     logger.info(f"🌐 Web server on :{port}")
+
+# ═══════════════════════════════════════════════════════════
+# КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ — API
+# ═══════════════════════════════════════════════════════════
+
+def _tg_user_info(request) -> tuple[str, str, str]:
+    """Возвращает (user_id, display_name, photo_url) из initData."""
+    user = verify(request.headers.get("Authorization", ""))
+    uid = str(user.get("id", "unknown"))
+    first = user.get("first_name", "")
+    last = user.get("last_name", "")
+    name = (first + " " + last).strip() or user.get("username") or "Участник"
+    avatar = user.get("photo_url", "")
+    return uid, name, avatar
+
+async def api_collab_create(request):
+    uid, name, avatar = _tg_user_info(request)
+    try:
+        body = await request.json()
+        pl_name = body.get("name", "Коллаб-плейлист")[:80]
+    except Exception:
+        pl_name = "Коллаб-плейлист"
+    cid = collab_create(uid, name, avatar, pl_name)
+    return cors(web.json_response({"ok": True, "id": cid}))
+
+async def api_collab_get(request):
+    cid = request.match_info["cid"]
+    meta = collab_get_meta(cid)
+    if not meta:
+        return cors(web.json_response({"error": "not found"}, status=404))
+    tracks = collab_get_tracks(cid)
+    return cors(web.json_response({"meta": meta, "tracks": tracks}))
+
+async def api_collab_add_track(request):
+    uid, name, avatar = _tg_user_info(request)
+    cid = request.match_info["cid"]
+    if not collab_get_meta(cid):
+        return cors(web.json_response({"error": "not found"}, status=404))
+    try:
+        body = await request.json()
+        track = body["track_data"]
+    except Exception:
+        return cors(web.json_response({"error": "bad request"}, status=400))
+    ok = collab_add_track(cid, track, uid, name, avatar)
+    return cors(web.json_response({"ok": ok}))
+
+async def api_collab_remove_track(request):
+    uid, _, _ = _tg_user_info(request)
+    cid = request.match_info["cid"]
+    meta = collab_get_meta(cid)
+    if not meta:
+        return cors(web.json_response({"error": "not found"}, status=404))
+    try:
+        body = await request.json()
+        track_id = body["track_id"]
+    except Exception:
+        return cors(web.json_response({"error": "bad request"}, status=400))
+    collab_remove_track(cid, track_id, uid, meta["owner_id"])
+    return cors(web.json_response({"ok": True}))
+
+async def api_collab_delete(request):
+    uid, _, _ = _tg_user_info(request)
+    cid = request.match_info["cid"]
+    meta = collab_get_meta(cid)
+    if not meta or meta["owner_id"] != uid:
+        return cors(web.json_response({"error": "forbidden"}, status=403))
+    collab_delete(cid, uid)
+    return cors(web.json_response({"ok": True}))
