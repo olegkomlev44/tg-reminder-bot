@@ -3271,7 +3271,7 @@ async function openShareSheet(plName) {
 
 function showCollabLink(plName) {
     if (!activeCollabId) return;
-    const botUsername = 'YOUR_BOT_USERNAME';  // Замени на свой юзернейм бота
+    const botUsername = '@Betboomers_bot';  // Замени на свой юзернейм бота
     const link = `https://t.me/${botUsername}?startapp=collab_${activeCollabId}`;
     document.getElementById('collab-link-text').textContent = link;
 }
@@ -3436,12 +3436,29 @@ openPlsDetail = function(name) {
 (function handleStartParam() {
     try {
         const startParam = tg.initDataUnsafe?.start_param || '';
+        
         if (startParam.startsWith('collab_')) {
             const cid = startParam.replace('collab_', '');
             setTimeout(() => openCollabPlaylist(cid), 800);
         }
+        // НОВЫЙ БЛОК: Открытие шеринг-трека
+        else if (startParam.startsWith('play_track_')) {
+            const trackId = startParam.replace('play_track_', '');
+            setTimeout(async () => {
+                toast('Загружаю трек...');
+                // Делаем фейк-объект для старта или запрашиваем API бота (если есть эндпоинт инфы)
+                // Если API на получение 1 трека нет, можно просто дернуть поиск по ID
+                const r = await fetch(`/api/search?q=${trackId}`, { headers: { Authorization: authStr } });
+                const tracks = await r.json();
+                const t = tracks.find(x => String(x.id) === trackId) || tracks[0];
+                if (t) {
+                    queue = [t]; qIdx = 0; playTrack(t, 1);
+                }
+            }, 800);
+        }
     } catch(e) {}
 })();
+
 
 // ── GAPLESS PRE-LOADER ────────────────────────────────────────────────────
 async function gaplessPreload(nextTrack) {
