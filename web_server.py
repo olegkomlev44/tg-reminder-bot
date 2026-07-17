@@ -1,4 +1,4 @@
-import os, json, hmac, hashlib, aiohttp, random, urllib.parse
+import os, json, hmac, hashlib, aiohttp, asyncio, random, urllib.parse
 from urllib.parse import parse_qsl
 from aiohttp import web
 from music_engine import music_engine
@@ -57,55 +57,164 @@ async def api_wave(request):
     offset = int(request.rel_url.query.get("offset", 0))
     user = verify(request.headers.get("Authorization", ""))
     uid = user["id"]
-    
+
     bl = get_blacklist(uid)
     favs = get_music_favs(uid)
     history = get_user_history(uid)
-    
-    # Объединяем вкусы юзера
-    base_pool = favs + history
+
     unique_tracks = []
     seen = set()
-    
-    # Генерируем умную волну только для первой страницы (offset == 0)
+
+    # ── 1. УМНАЯ ВОЛНА (только первая страница) ──────────────────────────────
+    base_pool = favs + history
     if base_pool and offset == 0:
-        # 1. Выбираем 2 случайных трека из истории/избранного как "сиды"
-        seeds = random.sample(base_pool, min(2, len(base_pool)))
+
+        # Берём до 3 сидов: приоритет — избранному
+        seed_pool = favs if favs else history
+        seeds = random.sample(seed_pool, min(3, len(seed_pool)))
         lastfm_suggestions = []
-        
-        # 2. Получаем похожие названия из Last.fm
-        for seed in seeds:
-            similars = await music_engine.get_similar_lastfm(seed["artist"], seed["title"], limit=5)
-            lastfm_suggestions.extend(similars)
-            
-        # 3. Асинхронно пробиваем эти названия через наш SoundCloud/YT поисковик
+
+        # Параллельно запрашиваем Last.fm: similar tracks + similar artists
+        async def lastfm_similar_tracks(seed):
+            return await music_engine.get_similar_lastfm(seed["artist"], seed["title"], limit=6)
+
+        async def lastfm_similar_artists(artist: str):
+            """Берём топ-треки артистов, похожих на seed-артиста."""
+            LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "")
+            if not LASTFM_API_KEY:
+                return []
+            url = "http://ws.audioscrobbler.com/2.0/"
+            params = {
+                "method": "artist.getsimilar",
+                "artist": artist,
+                "api_key": LASTFM_API_KEY,
+                "format": "json",
+                "limit": 4,
+            }
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            similar_artists = [
+                                a["name"] for a in data.get("similarartists", {}).get("artist", [])
+                            ]
+                            # Для каждого похожего артиста берём его топ-трек
+                            top_tracks = []
+                            async def get_top_track(art):
+                                p2 = {
+                                    "method": "artist.gettoptracks",
+                                    "artist": art,
+                                    "api_key": LASTFM_API_KEY,
+                                    "format": "json",
+                                    "limit": 2,
+                                }
+                                async with session.get(url, params=p2, timeout=aiohttp.ClientTimeout(total=5)) as r2:
+                                    if r2.status == 200:
+                                        d2 = await r2.json()
+                                        tracks = d2.get("toptracks", {}).get("track", [])
+                                        return [{"title": t["name"], "artist": art} for t in tracks]
+                                return []
+                            results = await asyncio.gather(*[get_top_track(a) for a in similar_artists])
+                            for r in results:
+                                top_tracks.extend(r)
+                            return top_tracks
+            except Exception as e:
+                logger.error(f"Last.fm similar artists error: {e}")
+            return []
+
+        # Запускаем все Last.fm запросы параллельно
+        sim_track_tasks = [lastfm_similar_tracks(s) for s in seeds]
+        sim_artist_tasks = [lastfm_similar_artists(s["artist"]) for s in seeds]
+        all_results = await asyncio.gather(*(sim_track_tasks + sim_artist_tasks), return_exceptions=True)
+
+        for res in all_results:
+            if isinstance(res, list):
+                lastfm_suggestions.extend(res)
+
+        # Дедуп Last.fm подсказок
+        seen_suggestions = set()
+        unique_suggestions = []
+        for s in lastfm_suggestions:
+            key = f"{s['artist'].lower()}::{s['title'].lower()}"
+            if key not in seen_suggestions:
+                seen_suggestions.add(key)
+                unique_suggestions.append(s)
+
+        # ── 2. КОЛЛАБОРАТИВНАЯ ФИЛЬТРАЦИЯ из локальной БД ───────────────────
+        import sqlite3
+        from db import DB_PATH
+        user_track_ids = {t["id"] for t in base_pool}
+        cf_tracks = []
+        if len(user_track_ids) >= 1:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            placeholders = ",".join(["?"] * len(user_track_ids))
+            try:
+                c.execute(f"""
+                    SELECT track_id, title, artist, artwork_url, source, COUNT(*) as score
+                    FROM favorites
+                    WHERE user_id IN (
+                        SELECT DISTINCT user_id FROM favorites
+                        WHERE track_id IN ({placeholders}) AND user_id != ?
+                    )
+                    AND track_id NOT IN ({placeholders})
+                    GROUP BY track_id
+                    ORDER BY score DESC
+                    LIMIT 10
+                """, list(user_track_ids) + [str(uid)] + list(user_track_ids))
+                for r in c.fetchall():
+                    if str(r[0]) not in bl:
+                        cf_tracks.append({
+                            "id": str(r[0]), "title": r[1], "artist": r[2],
+                            "artwork_url": r[3], "source": r[4] or "SoundCloud"
+                        })
+            except Exception as e:
+                logger.error(f"CF query error: {e}")
+            conn.close()
+
+        # ── 3. Резолвим Last.fm подсказки через SC/YT параллельно ───────────
         async def resolve_track(sugg):
-            q = f"{sugg['artist']} {sugg['title']}"
-            res = await music_engine.search_multi(q, limit=1)
-            return res[0] if res else None
+            try:
+                q = f"{sugg['artist']} {sugg['title']}"
+                res = await music_engine.search_multi(q, limit=1)
+                return res[0] if res else None
+            except Exception:
+                return None
 
-        # Запускаем все запросы параллельно!
-        tasks = [resolve_track(s) for s in lastfm_suggestions]
-        resolved_tracks = await asyncio.gather(*tasks)
-        
-        # 4. Фильтруем результаты (убираем дубликаты, дизлайки и пустые ответы)
-        for t in resolved_tracks:
-            if t and t['id'] not in seen and str(t['id']) not in bl:
-                seen.add(t['id'])
+        # Ограничиваем до 15 подсказок, чтобы не перегружать SC
+        resolve_tasks = [resolve_track(s) for s in unique_suggestions[:15]]
+        resolved = await asyncio.gather(*resolve_tasks, return_exceptions=True)
+
+        # Сначала добавляем CF-треки (они уже в нужном формате)
+        for t in cf_tracks:
+            if t["id"] not in seen and t["id"] not in bl:
+                seen.add(t["id"])
                 unique_tracks.append(t)
 
-    # 5. ФОЛЛБЭК: Если Last.fm ничего не вернул или это подгрузка при скролле
+        # Потом Last.fm resolved
+        for t in resolved:
+            if isinstance(t, dict) and t.get("id"):
+                tid = str(t["id"])
+                if tid not in seen and tid not in bl:
+                    seen.add(tid)
+                    unique_tracks.append(t)
+
+    # ── 4. ФОЛЛБЭК: чарты / рандомные запросы ────────────────────────────────
     if len(unique_tracks) < limit:
-        charts = await music_engine.get_charts(limit=limit, offset=offset)
+        need = limit - len(unique_tracks)
+        charts = await music_engine.get_charts(limit=need + 5, offset=offset)
         if not charts:
-            charts = await music_engine.search_multi(random.choice(["rap hits", "phonk", "pop 2024", "lofi beats"]), limit=limit)
-        
+            fallback_q = random.choice(["rap hits", "phonk", "pop hits", "lofi beats", "indie rock"])
+            charts = await music_engine.search_multi(fallback_q, limit=need + 5)
         for t in charts:
-            if t['id'] not in seen and str(t['id']) not in bl:
-                seen.add(t['id'])
+            tid = str(t.get("id", ""))
+            if tid and tid not in seen and tid not in bl:
+                seen.add(tid)
                 unique_tracks.append(t)
-                
-    # Перемешиваем, чтобы тренды и рекомендации Last.fm миксовались органично
+                if len(unique_tracks) >= limit:
+                    break
+
     random.shuffle(unique_tracks)
     return cors(web.json_response(unique_tracks[:limit]))
 
