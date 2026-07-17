@@ -273,6 +273,44 @@ class MusicEngine:
         except Exception as e:
             logger.error(f"YT Track details error: {e}")
         return None
+    # ─────────────────────────────────────────────
+    #  LAST.FM УМНЫЕ РЕКОМЕНДАЦИИ
+    # ─────────────────────────────────────────────
+
+    async def get_similar_lastfm(self, artist: str, track: str, limit: int = 10) -> list:
+        """
+        Отправляет запрос в Last.fm API и возвращает список похожих треков 
+        в формате [{"artist": "...", "title": "..."}, ...]
+        """
+        # Вставь сюда свой ключ от Last.fm
+        LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "ТВОЙ_КЛЮЧ_СЮДА") 
+        
+        url = "http://ws.audioscrobbler.com/2.0/"
+        params = {
+            "method": "track.getsimilar",
+            "artist": artist,
+            "track": track,
+            "api_key": LASTFM_API_KEY,
+            "format": "json",
+            "limit": limit
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, params=params, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        similars = data.get("similartracks", {}).get("track", [])
+                        
+                        # Парсим ответ в удобный список
+                        return [
+                            {"title": t["name"], "artist": t["artist"]["name"]} 
+                            for t in similars
+                        ]
+            except Exception as e:
+                logger.error(f"Ошибка Last.fm API: {e}")
+        
+        return []
 
     # ─────────────────────────────────────────────
     #  СКАЧИВАНИЕ ФАЙЛА
