@@ -1385,43 +1385,37 @@ async def callback_music_fav(callback: types.CallbackQuery):
 # --- ФУНКЦИОНАЛ 1: МОЯ ВОЛНА ---
 async def callback_start_wave(callback: types.CallbackQuery):
     await callback.answer()
-    favs = get_music_favs(callback.from_user.id)
     
     status_msg = await callback.message.answer("🌊 Запускаю Мою Волну...")
     anim_task = asyncio.create_task(animate_wave(status_msg))
     
     try:
-        if favs:
-            # Берем 3 случайных трека из избранного для контекста
-            sample = random.sample(favs, min(3, len(favs)))
-            context = ", ".join([f"{t['artist']} - {t['title']}" for t in sample])
-            prompt = f"Юзер любит эти треки: {context}. Выдай 5 очень похожих треков других исполнителей. Верни СТРОГО JSON массив строк."
-        else:
-            prompt = "Выдай 5 популярных крутых треков (хип-хоп, поп, фонк). Верни СТРОГО JSON массив строк."
-            
-        response = await gemini_client.aio.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        recs_list = json.loads(clean_text)
+        # Используем наш локальный рекомендательный движок вместо ИИ
+        recs_list = await generate_wave_tracks(callback.from_user.id, limit=5)
         
         buttons = []
-        for q in recs_list[:5]:
-            search_res = await music_engine.search_multi(q, limit=1)
-            if search_res:
-                t = search_res[0]
-                buttons.append([InlineKeyboardButton(text=f"🌊 {t['artist']} — {t['title']}", callback_data=f"dl_sc:{t['id']}")])
+        for t in recs_list:
+            buttons.append([InlineKeyboardButton(
+                text=f"🌊 {t['artist']} — {t['title']}", 
+                callback_data=f"dl_sc:{t['id']}"
+            )])
         
         buttons.append([InlineKeyboardButton(text="🔄 Следующая Волна", callback_data="start_wave")])
         
         anim_task.cancel()
         if buttons:
-            await status_msg.edit_text("🌊 *Моя Волна*\nБесконечный поток под твой вкус:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+            await status_msg.edit_text(
+                "🌊 *Моя Волна*\nБесконечный поток под твой вкус:", 
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), 
+                parse_mode="Markdown"
+            )
         else:
-            await status_msg.edit_text("❌ Волна разбилась о скалы API. Попробуй еще раз.")
+            await status_msg.edit_text("❌ Волна разбилась о скалы. Попробуй еще раз.")
             
     except Exception as e:
         anim_task.cancel()
         logger.error(f"Wave error: {e}")
-        await status_msg.edit_text("❌ Нейросеть не смогла сгенерировать волну.")
+        await status_msg.edit_text("❌ Ошибка генерации волны.")
 
 # --- ФУНКЦИОНАЛ 7: РАДАР РЕЛИЗОВ ---
 async def callback_radar(callback: types.CallbackQuery):
