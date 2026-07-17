@@ -14,7 +14,9 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import textwrap
 from aiogram.types import BufferedInputFile, InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultCachedAudio
-from music_engine import music_engine, add_id3_tags  
+from music_engine import music_engine, add_id3_tags 
+from recsys import generate_wave_tracks
+
 try:
     from google import genai
     from google.genai import types as genai_types
