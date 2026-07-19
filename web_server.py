@@ -312,21 +312,75 @@ async def api_stream_track(request):
     if tid.startswith("yt_"): return cors(web.json_response({"error": "YT not supported"}, status=422))
     track = await music_engine.get_track_details(tid)
     if not track or not track.get("stream_url"): return cors(web.Response(status=404, text="Stream not found"))
+
+    # ReplayGain / EBU R128 через ffmpeg — только для первичных запросов (без Range)
+    normalize = request.rel_url.query.get("norm", "1") != "0"
     rng = request.headers.get("Range", "")
+
+    if normalize and not rng:
+        try:
+            result = await _stream_normalized(request, track["stream_url"])
+            if result is not None:
+                return result
+        except Exception as e:
+            logger.warning(f"ffmpeg loudnorm failed ({e}), passthrough")
+
     hdrs = {"User-Agent": "Mozilla/5.0"}
     if rng: hdrs["Range"] = rng
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(track["stream_url"], headers=hdrs) as up:
                 ct = up.headers.get("Content-Type", "audio/mpeg")
-                rh = {"Content-Type": ct, "Accept-Ranges": "bytes", "Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*"}
+                rh = {"Content-Type": ct, "Accept-Ranges": "bytes", "Cache-Control": "max-age=3600",
+                      "Access-Control-Allow-Origin": "*", "X-Audio-Norm": "passthrough"}
                 if cl := up.headers.get("Content-Length"): rh["Content-Length"] = cl
                 if cr := up.headers.get("Content-Range"): rh["Content-Range"] = cr
                 resp = web.StreamResponse(status=up.status, headers=rh)
                 await resp.prepare(request)
                 async for chunk in up.content.iter_chunked(CHUNK): await resp.write(chunk)
                 return resp
-    except Exception as e: return cors(web.Response(status=502, text=str(e)))
+    except Exception as e:
+        return cors(web.Response(status=502, text=str(e)))
+
+
+async def _stream_normalized(request, source_url: str):
+    """Проксирует аудио через ffmpeg loudnorm EBU R128 (-14 LUFS)."""
+    import shutil
+    if not shutil.which("ffmpeg"):
+        return None  # ffmpeg не установлен — тихий fallback
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", source_url,
+        "-af", "loudnorm=I=-14:TP=-1:LRA=11:print_format=none",
+        "-vn",
+        "-c:a", "libmp3lame", "-q:a", "2",
+        "-f", "mp3", "pipe:1",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    resp = web.StreamResponse(status=200, headers={
+        "Content-Type": "audio/mpeg",
+        "Cache-Control": "max-age=3600",
+        "Access-Control-Allow-Origin": "*",
+        "X-Audio-Norm": "loudnorm-r128",
+        "Transfer-Encoding": "chunked",
+    })
+    await resp.prepare(request)
+    try:
+        while True:
+            chunk = await proc.stdout.read(CHUNK)
+            if not chunk:
+                break
+            await resp.write(chunk)
+    finally:
+        try: proc.kill()
+        except Exception: pass
+        await proc.wait()
+    return resp
 
 async def start_web_server():
     app = web.Application()
