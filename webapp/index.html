@@ -1989,6 +1989,14 @@ pagesEl.addEventListener('touchend', e => {
   }
 }, {passive: true});
 
+  if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .then(reg => console.log('Service Worker успешно зарегистрирован!'))
+      .catch(err => console.error('Ошибка регистрации Service Worker:', err));
+  });
+}
+
   // --- ИНИЦИАЛИЗАЦИЯ ЭКВАЛАЙЗЕРА ---
 const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
 const EQ_LABELS = ['60', '170', '310', '600', '1K', '3K', '6K', '12K', '14K', '16K'];
