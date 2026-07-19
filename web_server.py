@@ -391,6 +391,8 @@ async def _stream_normalized(request, source_url: str):
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_index)
+    app.router.add_get("/sw.js", handle_sw)
+    app.router.add_get("/api/tracks", api_get_tracks)
     app.router.add_get("/api/tracks", api_get_tracks)
     app.router.add_get("/api/search", api_search)
     app.router.add_get("/api/wave", api_wave)
