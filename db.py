@@ -4,12 +4,76 @@ import logging
 
 logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "music.db")
+
+# ── PERSISTENT STORAGE ────────────────────────────────────────────────────────
+# BotHost монтирует /data как постоянный том (не сбрасывается при редеплое).
+# Если /data недоступна (локальная разработка) — падаем обратно на BASE_DIR.
+def _resolve_db_path() -> str:
+    candidates = [
+        os.getenv("DB_DIR"),          # явный override через переменную окружения
+        "/data",                       # BotHost persistent volume
+        "/app/data",                   # альтернативный BotHost путь
+        BASE_DIR,                      # fallback — рядом со скриптами
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            os.makedirs(path, exist_ok=True)
+            # Проверяем возможность записи
+            test = os.path.join(path, ".write_test")
+            with open(test, "w") as f:
+                f.write("ok")
+            os.remove(test)
+            logger.info(f"💾 DB будет храниться в: {path}")
+            return os.path.join(path, "music.db")
+        except Exception:
+            continue
+    # Абсолютный fallback
+    return os.path.join(BASE_DIR, "music.db")
+
+DB_PATH = _resolve_db_path()
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS favorites (user_id TEXT, track_id TEXT, title TEXT, artist TEXT)''')
+    # Подписки на артистов
+    c.execute('''CREATE TABLE IF NOT EXISTS artist_subscriptions (
+        user_id TEXT NOT NULL,
+        artist_name TEXT NOT NULL,
+        subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, artist_name)
+    )''')
+    # Дружба (двусторонняя — запись создаётся при взаимной подписке)
+    c.execute('''CREATE TABLE IF NOT EXISTS friend_requests (
+        from_user_id TEXT NOT NULL,
+        from_user_name TEXT,
+        from_user_avatar TEXT,
+        to_user_id TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',  -- pending | accepted | declined
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(from_user_id, to_user_id)
+    )''')
+    # Уведомления
+    c.execute('''CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        type TEXT NOT NULL,   -- new_release | friend_request | friend_accepted
+        title TEXT,
+        body TEXT,
+        payload TEXT,   -- JSON: { artist, track_id, track_title, from_user_id, ... }
+        is_read INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    # Пользователи (кеш профилей)
+    c.execute('''CREATE TABLE IF NOT EXISTS user_profiles (
+        user_id TEXT PRIMARY KEY,
+        display_name TEXT,
+        username TEXT,
+        avatar_url TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS history (user_id TEXT, track_id TEXT, title TEXT, artist TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS cache (track_id TEXT PRIMARY KEY, file_id TEXT)''')
     
@@ -65,6 +129,14 @@ def save_music_fav(user_id, track_info):
     conn.close()
     return True
 
+def remove_music_fav(user_id, track_id):
+    """Удалить трек из избранного."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM favorites WHERE user_id=? AND track_id=?", (str(user_id), str(track_id)))
+    conn.commit()
+    conn.close()
+    return True
+
 def get_music_favs(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -80,6 +152,13 @@ def log_track_history(user_id, track_info):
     c.execute("INSERT INTO history (user_id, track_id, title, artist, artwork_url, source) VALUES (?, ?, ?, ?, ?, ?)",
               (str(user_id), str(track_info['id']), track_info.get('title', ''), track_info.get('artist', ''), track_info.get('artwork_url', ''), track_info.get('source', 'SoundCloud')))
     c.execute("""DELETE FROM history WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM history WHERE user_id=? ORDER BY timestamp DESC LIMIT 30)""", (str(user_id), str(user_id)))
+    conn.commit()
+    conn.close()
+
+def clear_history(user_id):
+    """Полная очистка истории пользователя."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM history WHERE user_id=?", (str(user_id),))
     conn.commit()
     conn.close()
 
@@ -154,9 +233,234 @@ def get_blacklist(user_id):
     conn.close()
     return {r[0] for r in rows}
 
-# ═══════════════════════════════════════════════════
-# КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ
-# ═══════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# ПРОФИЛИ ПОЛЬЗОВАТЕЛЕЙ
+# ═══════════════════════════════════════════════════════════════
+
+def upsert_user_profile(user_id: str, display_name: str, username: str, avatar_url: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        INSERT INTO user_profiles (user_id, display_name, username, avatar_url, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            username = excluded.username,
+            avatar_url = excluded.avatar_url,
+            updated_at = CURRENT_TIMESTAMP
+    """, (str(user_id), display_name, username, avatar_url))
+    conn.commit(); conn.close()
+
+def get_user_profile(user_id: str) -> dict | None:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT user_id, display_name, username, avatar_url FROM user_profiles WHERE user_id=?",
+        (str(user_id),)
+    ).fetchone()
+    conn.close()
+    if not row: return None
+    return {"user_id": row[0], "display_name": row[1], "username": row[2], "avatar_url": row[3]}
+
+def search_users(query: str, exclude_user_id: str) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    q = f"%{query.lower()}%"
+    rows = conn.execute("""
+        SELECT user_id, display_name, username, avatar_url FROM user_profiles
+        WHERE user_id != ? AND (LOWER(display_name) LIKE ? OR LOWER(username) LIKE ?)
+        LIMIT 20
+    """, (str(exclude_user_id), q, q)).fetchall()
+    conn.close()
+    return [{"user_id": r[0], "display_name": r[1], "username": r[2], "avatar_url": r[3]} for r in rows]
+
+# ═══════════════════════════════════════════════════════════════
+# ПОДПИСКИ НА АРТИСТОВ
+# ═══════════════════════════════════════════════════════════════
+
+def subscribe_artist(user_id: str, artist_name: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("INSERT OR IGNORE INTO artist_subscriptions (user_id, artist_name) VALUES (?, ?)",
+                     (str(user_id), artist_name))
+        conn.commit(); conn.close()
+        return True
+    except Exception as e:
+        conn.close(); return False
+
+def unsubscribe_artist(user_id: str, artist_name: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM artist_subscriptions WHERE user_id=? AND artist_name=?",
+                 (str(user_id), artist_name))
+    conn.commit(); conn.close()
+    return True
+
+def get_subscribed_artists(user_id: str) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT artist_name FROM artist_subscriptions WHERE user_id=? ORDER BY subscribed_at DESC",
+        (str(user_id),)
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def is_subscribed_artist(user_id: str, artist_name: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT 1 FROM artist_subscriptions WHERE user_id=? AND artist_name=?",
+        (str(user_id), artist_name)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+def get_artist_subscribers(artist_name: str) -> list:
+    """Все user_id кто подписан на артиста (для рассылки уведомлений)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT user_id FROM artist_subscriptions WHERE artist_name=?", (artist_name,)
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+# ═══════════════════════════════════════════════════════════════
+# ДРУЖБА
+# ═══════════════════════════════════════════════════════════════
+
+def send_friend_request(from_id: str, from_name: str, from_avatar: str, to_id: str) -> str:
+    """Отправить запрос в друзья. Возвращает 'sent'|'already'|'accepted' (если уже есть встречный запрос)."""
+    conn = sqlite3.connect(DB_PATH)
+    # Проверяем встречный запрос
+    row = conn.execute(
+        "SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
+        (str(to_id), str(from_id))
+    ).fetchone()
+    if row and row[0] == 'pending':
+        # Встречный запрос — сразу принимаем оба
+        conn.execute("UPDATE friend_requests SET status='accepted' WHERE from_user_id=? AND to_user_id=?",
+                     (str(to_id), str(from_id)))
+        conn.execute("""INSERT OR REPLACE INTO friend_requests (from_user_id, from_user_name, from_user_avatar, to_user_id, status)
+                        VALUES (?, ?, ?, ?, 'accepted')""",
+                     (str(from_id), from_name, from_avatar, str(to_id)))
+        conn.commit(); conn.close()
+        return 'accepted'
+    # Проверяем существующий
+    existing = conn.execute(
+        "SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
+        (str(from_id), str(to_id))
+    ).fetchone()
+    if existing:
+        conn.close()
+        return 'already'
+    conn.execute("""INSERT INTO friend_requests (from_user_id, from_user_name, from_user_avatar, to_user_id)
+                    VALUES (?, ?, ?, ?)""",
+                 (str(from_id), from_name, from_avatar, str(to_id)))
+    conn.commit(); conn.close()
+    return 'sent'
+
+def accept_friend_request(from_id: str, to_id: str, to_name: str, to_avatar: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE friend_requests SET status='accepted' WHERE from_user_id=? AND to_user_id=?",
+                 (str(from_id), str(to_id)))
+    # Создаём встречную запись тоже accepted
+    conn.execute("""INSERT OR REPLACE INTO friend_requests (from_user_id, from_user_name, from_user_avatar, to_user_id, status)
+                    VALUES (?, ?, ?, ?, 'accepted')""",
+                 (str(to_id), to_name, to_avatar, str(from_id)))
+    conn.commit(); conn.close()
+    return True
+
+def get_friends(user_id: str) -> list:
+    """Список принятых друзей (пользователей с двусторонним accepted)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT r.to_user_id, p.display_name, p.username, p.avatar_url
+        FROM friend_requests r
+        LEFT JOIN user_profiles p ON p.user_id = r.to_user_id
+        WHERE r.from_user_id=? AND r.status='accepted'
+    """, (str(user_id),)).fetchall()
+    conn.close()
+    return [{"user_id": r[0], "display_name": r[1] or "Пользователь", "username": r[2], "avatar_url": r[3]} for r in rows]
+
+def get_friend_requests_incoming(user_id: str) -> list:
+    """Входящие запросы в друзья (pending)."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT r.from_user_id, r.from_user_name, r.from_user_avatar, r.created_at
+        FROM friend_requests r
+        WHERE r.to_user_id=? AND r.status='pending'
+        ORDER BY r.created_at DESC
+    """, (str(user_id),)).fetchall()
+    conn.close()
+    return [{"user_id": r[0], "display_name": r[1] or "Пользователь", "avatar_url": r[2], "created_at": r[3]} for r in rows]
+
+def get_friend_status(user_id: str, other_id: str) -> str:
+    """none | pending_sent | pending_received | friends"""
+    conn = sqlite3.connect(DB_PATH)
+    # Проверяем мою запись к другому
+    r1 = conn.execute("SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
+                      (str(user_id), str(other_id))).fetchone()
+    # Проверяем его запись ко мне
+    r2 = conn.execute("SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
+                      (str(other_id), str(user_id))).fetchone()
+    conn.close()
+    if r1 and r1[0] == 'accepted':
+        return 'friends'
+    if r1 and r1[0] == 'pending':
+        return 'pending_sent'
+    if r2 and r2[0] == 'pending':
+        return 'pending_received'
+    return 'none'
+
+def get_friend_favs(friend_id: str) -> list:
+    return get_music_favs(friend_id)
+
+def get_friend_history(friend_id: str) -> list:
+    return get_user_history(friend_id)
+
+# ═══════════════════════════════════════════════════════════════
+# УВЕДОМЛЕНИЯ
+# ═══════════════════════════════════════════════════════════════
+
+def add_notification(user_id: str, ntype: str, title: str, body: str, payload: dict | None = None):
+    import json as _json
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""INSERT INTO notifications (user_id, type, title, body, payload)
+                    VALUES (?, ?, ?, ?, ?)""",
+                 (str(user_id), ntype, title, body, _json.dumps(payload or {})))
+    # Оставляем только последние 50 уведомлений на пользователя
+    conn.execute("""DELETE FROM notifications WHERE user_id=? AND id NOT IN (
+        SELECT id FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50
+    )""", (str(user_id), str(user_id)))
+    conn.commit(); conn.close()
+
+def get_notifications(user_id: str, limit: int = 30) -> list:
+    import json as _json
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT id, type, title, body, payload, is_read, created_at
+        FROM notifications WHERE user_id=?
+        ORDER BY created_at DESC LIMIT ?
+    """, (str(user_id), limit)).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        try: payload = _json.loads(r[4] or '{}')
+        except: payload = {}
+        result.append({
+            "id": r[0], "type": r[1], "title": r[2], "body": r[3],
+            "payload": payload, "is_read": bool(r[5]), "created_at": r[6]
+        })
+    return result
+
+def mark_notifications_read(user_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (str(user_id),))
+    conn.commit(); conn.close()
+
+def get_unread_notifications_count(user_id: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0", (str(user_id),)).fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+
 
 import secrets
 
