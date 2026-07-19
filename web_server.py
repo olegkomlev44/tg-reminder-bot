@@ -39,6 +39,12 @@ async def handle_index(request):
     if not os.path.exists(p): p = os.path.join(os.path.dirname(__file__), "index.html")
     return web.Response(text=open(p, encoding="utf-8").read(), content_type="text/html")
 
+async def handle_sw(request):
+    p = os.path.join(os.path.dirname(__file__), "webapp", "sw.js")
+    if not os.path.exists(p): 
+        p = os.path.join(os.path.dirname(__file__), "sw.js")
+    return web.FileResponse(p)
+
 async def api_get_tracks(request):
     user = verify(request.headers.get("Authorization", ""))
     uid = user["id"]
