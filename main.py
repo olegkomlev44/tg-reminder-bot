@@ -1508,7 +1508,7 @@ async def cmd_my_music(message: types.Message):
 async def cmd_music_dashboard(message: types.Message):
     await auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
 
-    WEB_APP_URL = os.getenv("WEB_APP_URL", "https://bot-1783869505-4307-olegbff.bothost.tech/")
+    WEB_APP_URL = os.getenv("WEB_APP_URL")
 
     # WebAppInfo работает ТОЛЬКО в ReplyKeyboardMarkup (обычная клавиатура)
     # В InlineKeyboardMarkup нужно использовать url или web_app аргумент
