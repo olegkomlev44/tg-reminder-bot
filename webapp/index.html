@@ -868,7 +868,168 @@ ul { list-style: none; }
   border-radius: 20px; padding: 5px 12px;
   font-size: 12px; color: var(--text-sec);
 }
+/* ── ARTIST CARD ENHANCED ── */
+.ac-scroll-body {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  padding-bottom: 100px;
+  -webkit-overflow-scrolling: touch;
+}
+.ac-scroll-body::-webkit-scrollbar { display: none; }
 
+.ac-stats-row {
+  display: flex; gap: 12px; padding: 0 20px 20px;
+}
+.ac-stat-box {
+  flex: 1; background: var(--surface); border-radius: 14px;
+  padding: 14px 12px; text-align: center;
+  border: 1px solid var(--border);
+  animation: acFadeUp 0.4s ease both;
+}
+.ac-stat-num { font-size: 20px; font-weight: 800; color: var(--accent); }
+.ac-stat-label { font-size: 11px; color: var(--text-sec); margin-top: 2px; }
+
+.ac-section {
+  padding: 0 20px 20px;
+  animation: acFadeUp 0.45s ease both;
+}
+.ac-section-hdr {
+  font-size: 17px; font-weight: 700;
+  margin-bottom: 14px; color: var(--text);
+  display: flex; align-items: center; gap: 8px;
+}
+.ac-section-hdr-emoji { font-size: 18px; }
+
+/* Биография */
+.ac-bio {
+  font-size: 14px; line-height: 1.6; color: var(--text-sec);
+  background: var(--surface); border-radius: 14px;
+  padding: 14px 16px; border: 1px solid var(--border);
+  max-height: 80px; overflow: hidden;
+  transition: max-height 0.4s ease;
+  cursor: pointer;
+}
+.ac-bio.expanded { max-height: 600px; }
+.ac-bio-more {
+  font-size: 12px; color: var(--accent); margin-top: 6px; cursor: pointer;
+  padding: 4px 0;
+}
+
+/* Горизонтальный скролл альбомов/релизов */
+.ac-albums-scroll {
+  display: flex; gap: 14px; overflow-x: auto; padding-bottom: 6px;
+}
+.ac-albums-scroll::-webkit-scrollbar { display: none; }
+.ac-album-card {
+  flex-shrink: 0; width: 120px; cursor: pointer;
+  animation: acFadeUp 0.4s ease both;
+}
+.ac-album-card:active { opacity: 0.75; transform: scale(0.96); }
+.ac-album-cover {
+  width: 120px; height: 120px; border-radius: 12px;
+  background: var(--surface); overflow: hidden;
+  border: 1px solid var(--border);
+}
+.ac-album-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ac-album-cover-emoji {
+  width: 100%; height: 100%; display: flex;
+  align-items: center; justify-content: center; font-size: 36px;
+}
+.ac-album-name {
+  font-size: 13px; font-weight: 600; margin-top: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text);
+}
+.ac-album-year { font-size: 11px; color: var(--text-sec); margin-top: 2px; }
+
+/* Видеоклипы */
+.ac-videos-scroll {
+  display: flex; gap: 14px; overflow-x: auto; padding-bottom: 6px;
+}
+.ac-videos-scroll::-webkit-scrollbar { display: none; }
+.ac-video-card {
+  flex-shrink: 0; width: 200px; cursor: pointer;
+  animation: acFadeUp 0.4s ease both;
+}
+.ac-video-card:active { opacity: 0.75; }
+.ac-video-thumb {
+  width: 200px; height: 112px; border-radius: 12px;
+  background: var(--surface); overflow: hidden; position: relative;
+  border: 1px solid var(--border);
+}
+.ac-video-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.ac-video-play-ico {
+  position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.35);
+}
+.ac-video-play-ico svg { width: 36px; height: 36px; fill: #fff; opacity: 0.9; }
+.ac-video-title {
+  font-size: 13px; font-weight: 600; margin-top: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text);
+}
+.ac-video-views { font-size: 11px; color: var(--text-sec); margin-top: 2px; }
+
+/* Популярные треки обновлённые */
+.ac-tracks-section {
+  padding: 0 0 10px;
+  animation: acFadeUp 0.5s ease both;
+}
+.ac-track {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 20px; cursor: pointer;
+  transition: background 0.15s; border-radius: 12px;
+  margin: 0 8px;
+}
+.ac-track:active { background: rgba(255,255,255,0.06); }
+.ac-track.now .ac-track-title { color: var(--accent); }
+.ac-track-num {
+  width: 22px; text-align: center;
+  font-size: 13px; color: var(--text-sec); flex-shrink: 0;
+}
+.ac-track-num.playing { color: var(--accent); }
+.ac-cover {
+  width: 46px; height: 46px; border-radius: 8px;
+  background: var(--surface); overflow: hidden;
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 18px;
+}
+.ac-cover img { width: 100%; height: 100%; object-fit: cover; }
+.ac-track-meta { flex: 1; min-width: 0; }
+.ac-track-title {
+  font-size: 15px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text);
+}
+.ac-track-sub {
+  font-size: 12px; color: var(--text-sec);
+  margin-top: 2px; font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ac-track-more {
+  background: none; border: none; padding: 6px; cursor: pointer;
+  color: var(--text-sec); flex-shrink: 0;
+  opacity: 0.6; transition: opacity 0.15s;
+}
+.ac-track-more:active { opacity: 1; }
+.ac-track-more svg { width: 18px; height: 18px; fill: currentColor; }
+
+.ac-show-more {
+  display: block; width: calc(100% - 40px); margin: 8px 20px 0;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); font-size: 14px; font-weight: 600;
+  border-radius: 14px; padding: 13px; cursor: pointer;
+  transition: 0.15s; text-align: center;
+}
+.ac-show-more:active { opacity: 0.7; }
+
+@keyframes acFadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Hero parallax blur on scroll */
+.ac-hero { transition: filter 0.1s ease; }
 /* ── NOTIFICATIONS ──────────────────────────────────────────── */
 .notif-badge {
   position: absolute; top: -4px; right: -4px;
@@ -2060,31 +2221,72 @@ audio {
     <button class="ac-back" onclick="haptic();closeArtistCard()">
       <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
     </button>
-  </div>
-
-  <div class="ac-header">
-    <div class="ac-name" id="ac-name">Артист</div>
-    <div class="ac-meta" id="ac-meta"></div>
-    <div class="ac-actions">
-      <button class="ac-play-btn" onclick="haptic();playArtistTracks()">
-        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-        Слушать
-      </button>
-      <button class="ac-shuffle-btn" onclick="haptic();shuffleArtistTracks()">
-        <svg viewBox="0 0 24 24"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>
-        Перемешать
-      </button>
-      <button class="ac-subscribe-btn" id="ac-subscribe-btn" onclick="haptic();toggleArtistSubscribe()">
-        <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
-        Подписаться
-      </button>
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:0 20px 16px;">
+      <div class="ac-name" id="ac-name" style="font-size:28px;font-weight:900;line-height:1.1;color:#fff;text-shadow:0 2px 12px rgba(0,0,0,0.6);">Артист</div>
+      <div class="ac-meta" id="ac-meta" style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;"></div>
     </div>
   </div>
 
-  <div class="ac-genre-tags" id="ac-genre-tags"></div>
-  <div class="ac-section-title">Популярные треки</div>
-  <div class="ac-tracks" id="ac-tracks">
-    <div class="ac-loading"></div>
+  <div class="ac-scroll-body" id="ac-scroll-body">
+    <!-- Действия -->
+    <div class="ac-header" style="padding:16px 20px 0;">
+      <div class="ac-actions">
+        <button class="ac-play-btn" onclick="haptic();playArtistTracks()">
+          <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          Слушать
+        </button>
+        <button class="ac-shuffle-btn" onclick="haptic();shuffleArtistTracks()">
+          <svg viewBox="0 0 24 24"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg>
+          Перемешать
+        </button>
+        <button class="ac-subscribe-btn" id="ac-subscribe-btn" onclick="haptic();toggleArtistSubscribe()">
+          <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+          Подписаться
+        </button>
+      </div>
+    </div>
+
+    <!-- Жанр-теги -->
+    <div class="ac-genre-tags" id="ac-genre-tags" style="padding:14px 20px 0;"></div>
+
+    <!-- Статистика -->
+    <div class="ac-stats-row" id="ac-stats-row" style="display:none;padding-top:14px;">
+      <div class="ac-stat-box"><div class="ac-stat-num" id="ac-stat-tracks">—</div><div class="ac-stat-label">треков</div></div>
+      <div class="ac-stat-box"><div class="ac-stat-num" id="ac-stat-albums">—</div><div class="ac-stat-label">альбомов</div></div>
+      <div class="ac-stat-box"><div class="ac-stat-num" id="ac-stat-sources">—</div><div class="ac-stat-label">источников</div></div>
+    </div>
+
+    <!-- О артисте -->
+    <div class="ac-section" id="ac-bio-section" style="display:none;">
+      <div class="ac-section-hdr"><span class="ac-section-hdr-emoji">📖</span> Об артисте</div>
+      <div class="ac-bio" id="ac-bio-text" onclick="this.classList.toggle('expanded');this.nextElementSibling.textContent=this.classList.contains('expanded')?'Свернуть ▲':'Подробнее ▼'"></div>
+      <div class="ac-bio-more" onclick="let b=this.previousElementSibling;b.classList.toggle('expanded');this.textContent=b.classList.contains('expanded')?'Свернуть ▲':'Подробнее ▼'">Подробнее ▼</div>
+    </div>
+
+    <!-- Видеоклипы -->
+    <div class="ac-section" id="ac-videos-section" style="display:none;">
+      <div class="ac-section-hdr"><span class="ac-section-hdr-emoji">🎬</span> Видеоклипы</div>
+      <div class="ac-videos-scroll" id="ac-videos-scroll"></div>
+    </div>
+
+    <!-- Популярные треки -->
+    <div class="ac-tracks-section">
+      <div class="ac-section-hdr" style="padding:14px 20px 10px;margin-bottom:0;"><span class="ac-section-hdr-emoji">🔥</span> Популярные треки</div>
+      <div id="ac-tracks"><div class="ac-loading"></div></div>
+      <button class="ac-show-more" id="ac-show-more" style="display:none;" onclick="haptic();acShowMoreTracks()">Показать ещё треки</button>
+    </div>
+
+    <!-- Альбомы и синглы -->
+    <div class="ac-section" id="ac-albums-section" style="display:none;">
+      <div class="ac-section-hdr"><span class="ac-section-hdr-emoji">💿</span> Альбомы и синглы</div>
+      <div class="ac-albums-scroll" id="ac-albums-scroll"></div>
+    </div>
+
+    <!-- Недавние релизы -->
+    <div class="ac-section" id="ac-releases-section" style="display:none;">
+      <div class="ac-section-hdr"><span class="ac-section-hdr-emoji">✨</span> Недавние релизы</div>
+      <div id="ac-releases-list"></div>
+    </div>
   </div>
 </div>
 
@@ -4021,44 +4223,69 @@ function closeArtistCard() {
   }, 360);
 }
 
+let _acAllTracks = [];      // все найденные треки (до 60)
+let _acShownCount = 0;      // сколько сейчас отображается
+const AC_PAGE = 20;         // порция
+
 async function loadArtistTracks(artist, fallbackArtwork) {
   artistCardTracks = [];
+  _acAllTracks = [];
+  _acShownCount = 0;
+  document.getElementById('ac-show-more').style.display = 'none';
+  document.getElementById('ac-stats-row').style.display = 'none';
+  document.getElementById('ac-bio-section').style.display = 'none';
+  document.getElementById('ac-videos-section').style.display = 'none';
+  document.getElementById('ac-albums-section').style.display = 'none';
+  document.getElementById('ac-releases-section').style.display = 'none';
+
   try {
-    // Search with higher limit to get more tracks
-    const r = await fetch(`/api/search?q=${encodeURIComponent(artist)}`, { headers: { Authorization: authStr } });
+    const r = await fetch(`/api/search?q=${encodeURIComponent(artist)}&limit=90`, { headers: { Authorization: authStr } });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const tracks = await r.json();
-
     if (!tracks || !tracks.length) throw new Error('empty');
 
-    // Soft filter: prefer tracks where artist field matches, but keep rest too
     const artistLower = artist.toLowerCase().trim();
     const matched = tracks.filter(t =>
       t.artist && t.artist.toLowerCase().includes(artistLower)
     );
-    // If good match count, use filtered; otherwise show all search results
-    artistCardTracks = (matched.length >= 3 ? matched : tracks).slice(0, 15);
+    _acAllTracks = (matched.length >= 3 ? matched : tracks).slice(0, 60);
+    artistCardTracks = _acAllTracks;
 
-    const meta = document.getElementById('ac-meta');
-    const cnt = artistCardTracks.length;
-    meta.textContent = `${cnt} ${cnt === 1 ? 'трек' : cnt < 5 ? 'трека' : 'треков'}`;
+    const cnt = _acAllTracks.length;
+    document.getElementById('ac-meta').textContent =
+      `${cnt} ${cnt === 1 ? 'трек' : cnt < 5 ? 'трека' : 'треков'}`;
 
-    // Render genre tags from track titles/metadata (simple heuristic)
-    renderArtistGenreTags(artistCardTracks);
+    // Статистика
+    const sources = [...new Set(_acAllTracks.map(t => t.source).filter(Boolean))];
+    const albumSet = new Set(_acAllTracks.map(t => t.album).filter(Boolean));
+    document.getElementById('ac-stat-tracks').textContent = cnt;
+    document.getElementById('ac-stat-albums').textContent = albumSet.size || '—';
+    document.getElementById('ac-stat-sources').textContent = sources.length || 1;
+    document.getElementById('ac-stats-row').style.display = 'flex';
+
+    renderArtistGenreTags(_acAllTracks);
     renderArtistTracks();
+    renderArtistAlbums(_acAllTracks);
+    renderArtistVideos(_acAllTracks);
+    renderArtistReleases(_acAllTracks);
+    fetchArtistBio(artist);
+
   } catch(e) {
-    // Fallback: try searching just first word of artist name
     try {
       const firstWord = artist.split(' ')[0];
       if (firstWord && firstWord !== artist) {
-        const r2 = await fetch(`/api/search?q=${encodeURIComponent(firstWord)}`, { headers: { Authorization: authStr } });
+        const r2 = await fetch(`/api/search?q=${encodeURIComponent(firstWord)}&limit=90`, { headers: { Authorization: authStr } });
         if (r2.ok) {
           const tracks2 = await r2.json();
-          artistCardTracks = (tracks2 || []).slice(0, 15);
-          if (artistCardTracks.length) {
-            document.getElementById('ac-meta').textContent = `${artistCardTracks.length} треков`;
-            renderArtistGenreTags(artistCardTracks);
+          _acAllTracks = (tracks2 || []).slice(0, 60);
+          artistCardTracks = _acAllTracks;
+          if (_acAllTracks.length) {
+            document.getElementById('ac-meta').textContent = `${_acAllTracks.length} треков`;
+            renderArtistGenreTags(_acAllTracks);
             renderArtistTracks();
+            renderArtistAlbums(_acAllTracks);
+            renderArtistVideos(_acAllTracks);
+            renderArtistReleases(_acAllTracks);
             return;
           }
         }
@@ -4067,6 +4294,13 @@ async function loadArtistTracks(artist, fallbackArtwork) {
     document.getElementById('ac-tracks').innerHTML =
       '<div class="ac-empty">😔<br><br>Треки не найдены</div>';
   }
+}
+
+function acShowMoreTracks() {
+  _acShownCount = Math.min(_acShownCount + AC_PAGE, _acAllTracks.length);
+  renderArtistTracksSlice(_acShownCount);
+  if (_acShownCount >= _acAllTracks.length)
+    document.getElementById('ac-show-more').style.display = 'none';
 }
 
 function renderArtistGenreTags(tracks) {
@@ -4090,14 +4324,20 @@ function renderArtistGenreTags(tracks) {
 }
 
 function renderArtistTracks() {
-  const container = document.getElementById('ac-tracks');
-  if (!artistCardTracks.length) {
-    container.innerHTML = '<div class="ac-empty">Треки не найдены</div>';
+  if (!_acAllTracks.length) {
+    document.getElementById('ac-tracks').innerHTML = '<div class="ac-empty">Треки не найдены</div>';
     return;
   }
-  container.innerHTML = '';
+  _acShownCount = Math.min(AC_PAGE, _acAllTracks.length);
+  renderArtistTracksSlice(_acShownCount);
+}
 
-  artistCardTracks.forEach((t, i) => {
+function renderArtistTracksSlice(showCount) {
+  const container = document.getElementById('ac-tracks');
+  container.innerHTML = '';
+  const slice = _acAllTracks.slice(0, showCount);
+
+  slice.forEach((t, i) => {
     const isNow = qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === String(t.id);
     const coverHtml = t.artwork_url
       ? `<img src="${esc(t.artwork_url)}" loading="lazy">`
@@ -4105,37 +4345,169 @@ function renderArtistTracks() {
 
     const row = document.createElement('div');
     row.className = 'ac-track' + (isNow ? ' now' : '');
+    row.style.animationDelay = Math.min(i * 0.03, 0.4) + 's';
+    row.style.animation = 'acFadeUp 0.35s ease both';
     row.innerHTML = `
       <div class="ac-track-num ${isNow ? 'playing' : ''}">${isNow ? '▶' : i + 1}</div>
       <div class="ac-cover">${coverHtml}</div>
       <div class="ac-track-meta">
         <div class="ac-track-title">${esc(t.title)}</div>
-        <div class="ac-track-dur">${esc(t.duration || '')}</div>
+        <div class="ac-track-sub">${esc(t.duration || '')}${t.album ? ' · ' + esc(t.album) : ''}</div>
       </div>
+      <button class="ac-track-more" onclick="event.stopPropagation();haptic();openMoreMenu(${esc(JSON.stringify(JSON.stringify(t)))})" title="Ещё">
+        <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
+      </button>
     `;
     row.addEventListener('click', () => {
       haptic();
-      queue = [...artistCardTracks];
+      queue = [..._acAllTracks];
       qIdx = i;
       playTrack(t, 1);
-      // Re-render to update "now playing" markers
       setTimeout(renderArtistTracks, 350);
     });
     container.appendChild(row);
   });
+
+  const showMoreBtn = document.getElementById('ac-show-more');
+  if (_acAllTracks.length > showCount) {
+    showMoreBtn.textContent = `Ещё ${Math.min(AC_PAGE, _acAllTracks.length - showCount)} треков`;
+    showMoreBtn.style.display = 'block';
+  } else {
+    showMoreBtn.style.display = 'none';
+  }
 }
 
+function renderArtistAlbums(tracks) {
+  const albumMap = new Map();
+  tracks.forEach(t => {
+    const key = t.album || '';
+    if (!key) return;
+    if (!albumMap.has(key)) albumMap.set(key, { name: key, cover: t.artwork_url, year: t.year || '' });
+  });
+  const albums = [...albumMap.values()].slice(0, 10);
+  if (!albums.length) return;
+
+  const scroll = document.getElementById('ac-albums-scroll');
+  scroll.innerHTML = '';
+  albums.forEach((a, i) => {
+    const card = document.createElement('div');
+    card.className = 'ac-album-card';
+    card.style.animationDelay = i * 0.05 + 's';
+    const coverHtml = a.cover
+      ? `<img src="${esc(a.cover)}" loading="lazy">`
+      : `<div class="ac-album-cover-emoji">💿</div>`;
+    card.innerHTML = `
+      <div class="ac-album-cover">${coverHtml}</div>
+      <div class="ac-album-name">${esc(a.name)}</div>
+      <div class="ac-album-year">${esc(a.year || 'Альбом')}</div>
+    `;
+    card.onclick = () => {
+      haptic();
+      const albumTracks = tracks.filter(t => t.album === a.name);
+      if (albumTracks.length) {
+        queue = albumTracks; qIdx = 0; playTrack(queue[0], 1);
+      }
+    };
+    scroll.appendChild(card);
+  });
+  document.getElementById('ac-albums-section').style.display = '';
+}
+
+function renderArtistVideos(tracks) {
+  // Ищем треки с YouTube (видеоклипы)
+  const ytTracks = tracks.filter(t => t.source === 'YouTube' || (t.id && String(t.id).startsWith('yt'))).slice(0, 6);
+  if (!ytTracks.length) return;
+
+  const scroll = document.getElementById('ac-videos-scroll');
+  scroll.innerHTML = '';
+  ytTracks.forEach((t, i) => {
+    const card = document.createElement('div');
+    card.className = 'ac-video-card';
+    card.style.animationDelay = i * 0.06 + 's';
+    const thumbHtml = t.artwork_url
+      ? `<img src="${esc(t.artwork_url)}" loading="lazy">`
+      : '';
+    card.innerHTML = `
+      <div class="ac-video-thumb">
+        ${thumbHtml}
+        <div class="ac-video-play-ico">
+          <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </div>
+      </div>
+      <div class="ac-video-title">${esc(t.title)}</div>
+      <div class="ac-video-views">${esc(t.duration || '')} · YouTube</div>
+    `;
+    card.onclick = () => {
+      haptic();
+      queue = [...ytTracks]; qIdx = i; playTrack(t, 1);
+    };
+    scroll.appendChild(card);
+  });
+  document.getElementById('ac-videos-section').style.display = '';
+}
+
+function renderArtistReleases(tracks) {
+  // Последние 5 уникальных треков как "недавние релизы"
+  const recent = tracks.slice(0, 5);
+  if (!recent.length) return;
+
+  const list = document.getElementById('ac-releases-list');
+  list.innerHTML = '';
+  recent.forEach((t, i) => {
+    const isNow = qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === String(t.id);
+    const coverHtml = t.artwork_url
+      ? `<img src="${esc(t.artwork_url)}" loading="lazy" style="width:100%;height:100%;object-fit:cover;">`
+      : '🎵';
+    const row = document.createElement('div');
+    row.className = 'ac-track' + (isNow ? ' now' : '');
+    row.style.animationDelay = i * 0.05 + 's';
+    row.style.animation = 'acFadeUp 0.4s ease both';
+    row.innerHTML = `
+      <div class="ac-track-num" style="color:var(--accent);font-size:11px;width:28px;">NEW</div>
+      <div class="ac-cover">${coverHtml}</div>
+      <div class="ac-track-meta">
+        <div class="ac-track-title">${esc(t.title)}</div>
+        <div class="ac-track-sub">${esc(t.source || '')} ${t.duration ? '· ' + esc(t.duration) : ''}</div>
+      </div>
+    `;
+    row.onclick = () => {
+      haptic();
+      queue = [...recent]; qIdx = i; playTrack(t, 1);
+    };
+    list.appendChild(row);
+  });
+  document.getElementById('ac-releases-section').style.display = '';
+}
+
+async function fetchArtistBio(artist) {
+  // Используем Last.fm или Wikipedia API для получения биографии
+  try {
+    const url = `https://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist=${encodeURIComponent(artist)}&api_key=YOUR_LASTFM_KEY&format=json&lang=ru`;
+    // Если нет ключа Last.fm — пробуем Wikipedia
+    const wikiUrl = `https://ru.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(artist)}`;
+    const r = await fetch(wikiUrl);
+    if (r.ok) {
+      const d = await r.json();
+      if (d.extract && d.extract.length > 40) {
+        document.getElementById('ac-bio-text').textContent = d.extract;
+        document.getElementById('ac-bio-section').style.display = '';
+        return;
+      }
+    }
+  } catch(e) {}
+}
+  
 function playArtistTracks() {
-  if (!artistCardTracks.length) return;
-  queue = [...artistCardTracks];
+  if (!_acAllTracks.length) return;
+  queue = [..._acAllTracks];
   qIdx = 0;
   playTrack(queue[0], 1);
   setTimeout(renderArtistTracks, 350);
 }
 
 function shuffleArtistTracks() {
-  if (!artistCardTracks.length) return;
-  queue = [...artistCardTracks].sort(() => Math.random() - 0.5);
+  if (!_acAllTracks.length) return;
+  queue = [..._acAllTracks].sort(() => Math.random() - 0.5);
   qIdx = 0;
   playTrack(queue[0], 1);
   setTimeout(renderArtistTracks, 350);
