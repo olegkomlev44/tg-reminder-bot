@@ -77,11 +77,12 @@ async def api_get_tracks(request):
 async def api_search(request):
     q = request.rel_url.query.get("q", "").strip()
     if not q: return cors(web.json_response([]))
-    tracks = await music_engine.search_multi(q, limit=20)
+    limit = int(request.rel_url.query.get("limit", 120))
+    tracks = await music_engine.search_multi(q, limit=limit)
     return cors(web.json_response(tracks))
 
 async def api_wave(request):
-    limit = int(request.rel_url.query.get("limit", 20))
+    limit = int(request.rel_url.query.get("limit", 120))
     offset = int(request.rel_url.query.get("offset", 0))
     user = verify(request.headers.get("Authorization", ""))
     uid = user["id"]
