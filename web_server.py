@@ -2,8 +2,9 @@ import os, json, hmac, hashlib, aiohttp, asyncio, random, urllib.parse
 from urllib.parse import parse_qsl
 from aiohttp import web
 from music_engine import music_engine
-from db import (get_music_favs, get_user_history, get_playlists,
-                save_music_fav, remove_music_fav, log_track_history, clear_history,
+from db import (
+                init_db, get_cached_file_id, save_cached_file_id,
+                save_music_fav, get_music_favs, log_track_history, get_user_history, get_total_listen_seconds
                 save_playlist_track,
                 rename_playlist, remove_track_from_playlist, delete_playlist_db,
                 init_db, add_dislike, get_blacklist,
@@ -72,6 +73,7 @@ async def api_get_tracks(request):
         "favs": get_music_favs(uid),
         "history": get_user_history(uid),
         "playlists": get_playlists(uid),
+        "listen_seconds": get_total_listen_seconds(uid),
     }))
 
 async def api_search(request):
@@ -321,11 +323,19 @@ async def api_history_add(request):
     user = verify(request.headers.get("Authorization", ""))
     try:
         body = await request.json()
-        if body.get("track_data"): log_track_history(user["id"], body["track_data"])
-        return cors(web.json_response({"ok": True}))
+        if body.get("track_data"):
+    track_data = body["track_data"]
+    if not track_data.get('duration_sec') and track_data.get('duration'):
+        try:
+            parts = str(track_data['duration']).split(':')
+            track_data['duration_sec'] = int(parts[0]) * 60 + int(parts[1]) if len(parts) == 2 else 0
+        except:
+            track_data['duration_sec'] = 0
+    log_track_history(user["id"], track_data)
+  return cors(web.json_response({"ok": True}))
     except Exception: pass
     return cors(web.json_response({"error": "bad"}, status=400))
-
+  
 async def api_pl_add(request):
     user = verify(request.headers.get("Authorization", ""))
     try:
