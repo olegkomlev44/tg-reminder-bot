@@ -94,6 +94,11 @@ def init_db():
     except: pass
     try: c.execute("ALTER TABLE playlists ADD COLUMN artwork_url TEXT")
     except: pass
+    try: c.execute("ALTER TABLE history ADD COLUMN duration_sec INTEGER DEFAULT 0")
+    except: pass
+
+    conn.commit()
+    conn.close()
 
     conn.commit()
     conn.close()
@@ -148,13 +153,14 @@ def get_music_favs(user_id):
 def log_track_history(user_id, track_info):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    duration_sec = int(track_info.get('duration_sec', 0) or 0)
     c.execute("DELETE FROM history WHERE user_id=? AND track_id=?", (str(user_id), str(track_info['id'])))
-    c.execute("INSERT INTO history (user_id, track_id, title, artist, artwork_url, source) VALUES (?, ?, ?, ?, ?, ?)",
-              (str(user_id), str(track_info['id']), track_info.get('title', ''), track_info.get('artist', ''), track_info.get('artwork_url', ''), track_info.get('source', 'SoundCloud')))
-    c.execute("""DELETE FROM history WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM history WHERE user_id=? ORDER BY timestamp DESC LIMIT 30)""", (str(user_id), str(user_id)))
+    c.execute("INSERT INTO history (user_id, track_id, title, artist, artwork_url, source, duration_sec) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (str(user_id), str(track_info['id']), track_info.get('title', ''), track_info.get('artist', ''), track_info.get('artwork_url', ''), track_info.get('source', 'SoundCloud'), duration_sec))
+    c.execute("""DELETE FROM history WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM history WHERE user_id=? ORDER BY timestamp DESC LIMIT 200)""", (str(user_id), str(user_id)))
     conn.commit()
     conn.close()
-
+    
 def clear_history(user_id):
     """Полная очистка истории пользователя."""
     conn = sqlite3.connect(DB_PATH)
@@ -165,11 +171,19 @@ def clear_history(user_id):
 def get_user_history(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT track_id, title, artist, artwork_url, source FROM history WHERE user_id=? ORDER BY timestamp DESC", (str(user_id),))
+    c.execute("SELECT track_id, title, artist, artwork_url, source, COALESCE(duration_sec,0) FROM history WHERE user_id=? ORDER BY timestamp DESC", (str(user_id),))
     rows = c.fetchall()
     conn.close()
-    return [{"id": r[0], "title": r[1], "artist": r[2], "artwork_url": r[3], "source": r[4]} for r in rows]
+    return [{"id": r[0], "title": r[1], "artist": r[2], "artwork_url": r[3], "source": r[4], "duration_sec": r[5]} for r in rows]
 
+def get_total_listen_seconds(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COALESCE(SUM(duration_sec),0) FROM history WHERE user_id=?", (str(user_id),))
+    res = c.fetchone()
+    conn.close()
+    return int(res[0]) if res else 0
+    
 # --- ПЛЕЙЛИСТЫ ---
 def get_playlists(user_id) -> dict:
     conn = sqlite3.connect(DB_PATH)
