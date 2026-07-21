@@ -4,8 +4,8 @@ from aiohttp import web
 from music_engine import music_engine
 from db import (
                 init_db, get_cached_file_id, save_cached_file_id,
-                save_music_fav, get_music_favs, log_track_history, get_user_history, get_total_listen_seconds
-                save_playlist_track,
+                save_music_fav, get_music_favs, log_track_history, get_user_history, 
+                get_total_listen_seconds, save_playlist_track,
                 rename_playlist, remove_track_from_playlist, delete_playlist_db,
                 init_db, add_dislike, get_blacklist,
                 collab_create, collab_get_meta, collab_get_tracks,
