@@ -115,6 +115,118 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 
 .prof-divider { height: 1px; background: var(--border); margin: 0 16px; }
 
+/* ── NOW PLAYING STATUS ── */
+.prof-now-playing {
+  display: none; align-items: center; gap: 8px;
+  margin-top: 6px; padding: 5px 10px;
+  background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.3);
+  border-radius: 20px; width: fit-content; max-width: 100%;
+  animation: profFadeIn 0.4s ease;
+}
+.prof-now-playing.vis { display: flex; }
+.prof-np-eq {
+  display: flex; align-items: flex-end; gap: 2px; height: 14px; flex-shrink: 0;
+}
+.prof-np-eq span {
+  display: block; width: 3px; border-radius: 2px;
+  background: #22c55e;
+  animation: eqBounce 0.8s ease-in-out infinite alternate;
+}
+.prof-np-eq span:nth-child(1) { height: 6px;  animation-delay: 0s; }
+.prof-np-eq span:nth-child(2) { height: 12px; animation-delay: 0.15s; }
+.prof-np-eq span:nth-child(3) { height: 8px;  animation-delay: 0.3s; }
+.prof-np-eq span:nth-child(4) { height: 14px; animation-delay: 0.1s; }
+@keyframes eqBounce {
+  from { transform: scaleY(0.4); }
+  to   { transform: scaleY(1); }
+}
+.prof-np-text {
+  font-size: 11px; color: #22c55e; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+/* ── TOP ARTISTS ── */
+.prof-artists-scroll {
+  display: flex; gap: 18px; padding: 4px 16px 16px;
+  overflow-x: auto; scrollbar-width: none;
+}
+.prof-artists-scroll::-webkit-scrollbar { display: none; }
+.prof-artist-item {
+  flex-shrink: 0; width: 72px; text-align: center;
+  cursor: pointer; transition: transform 0.15s;
+}
+.prof-artist-item:active { transform: scale(0.92); }
+.prof-artist-avatar {
+  width: 72px; height: 72px; border-radius: 50%;
+  background: var(--surface); overflow: hidden;
+  border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  transition: border-color 0.2s;
+}
+.prof-artist-item:active .prof-artist-avatar { border-color: var(--accent); }
+.prof-artist-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.prof-artist-name {
+  font-size: 11px; font-weight: 600; margin-top: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--text);
+}
+.prof-artist-count { font-size: 10px; color: var(--text-sec); margin-top: 1px; }
+
+/* ── PLAYLISTS CAROUSEL ── */
+.prof-pls-scroll {
+  display: flex; gap: 14px; padding: 4px 16px 16px;
+  overflow-x: auto; scrollbar-width: none;
+}
+.prof-pls-scroll::-webkit-scrollbar { display: none; }
+.prof-pls-card {
+  flex-shrink: 0; width: 130px; cursor: pointer;
+  transition: transform 0.15s;
+}
+.prof-pls-card:active { transform: scale(0.95); }
+.prof-pls-cover {
+  width: 130px; height: 130px; border-radius: 14px;
+  background: var(--surface); overflow: hidden;
+  display: grid; grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  border: 1px solid var(--border);
+}
+.prof-pls-cover img {
+  width: 100%; height: 100%; object-fit: cover;
+}
+.prof-pls-cover.single { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.prof-pls-cover.single img { border-radius: 14px; }
+.prof-pls-cover-empty {
+  width: 100%; height: 100%; grid-column: span 2; grid-row: span 2;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 40px; background: var(--surface);
+}
+.prof-pls-name {
+  font-size: 13px; font-weight: 700; margin-top: 9px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.prof-pls-count { font-size: 11px; color: var(--text-sec); margin-top: 2px; }
+
+/* ── STATS ENHANCED ── */
+.prof-listen-time {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 16px 16px; padding: 14px 18px;
+  background: var(--surface); border-radius: 16px;
+  border: 1px solid var(--border);
+  animation: profFadeIn 0.5s ease;
+}
+.prof-listen-time-ico { font-size: 28px; flex-shrink: 0; }
+.prof-listen-time-text { flex: 1; }
+.prof-listen-time-big { font-size: 20px; font-weight: 800; color: var(--accent); }
+.prof-listen-time-sub { font-size: 12px; color: var(--text-sec); margin-top: 2px; }
+
+@keyframes profFadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
 /* ── BOTTOM TABS ── */
 .tabs { position: absolute; bottom: 0; width: 100%; height: var(--nav-height); background: var(--surface-alpha); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--border); display: flex; justify-content: space-around; align-items: center; z-index: 20; }
@@ -2038,9 +2150,16 @@ audio {
         <div class="prof-hero-info">
           <div class="prof-name" id="prof-name">Пользователь</div>
           <div class="prof-tg-handle" id="prof-handle">@username</div>
-          <div class="prof-badges">
+          <!-- Now Playing status -->
+          <div class="prof-now-playing" id="prof-now-playing">
+            <div class="prof-np-eq">
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <div class="prof-np-text" id="prof-np-text">Сейчас играет</div>
+          </div>
+          <div class="prof-badges" style="margin-top:8px;">
             <div class="prof-badge">🎵 Меломан</div>
-            <div class="prof-badge" id="prof-badge-streak">🔥 Сегодня</div>
+            <div class="prof-badge" id="prof-badge-streak">🔥 Новичок</div>
           </div>
         </div>
       </div>
@@ -2062,6 +2181,23 @@ audio {
       </div>
     </div>
 
+    <!-- Listen time block -->
+    <div class="prof-listen-time" id="prof-listen-time" style="display:none;">
+      <div class="prof-listen-time-ico">🎧</div>
+      <div class="prof-listen-time-text">
+        <div class="prof-listen-time-big" id="prof-listen-time-big">0 минут</div>
+        <div class="prof-listen-time-sub">музыки за всё время</div>
+      </div>
+    </div>
+
+    <!-- Top Artists -->
+    <div class="prof-section" id="prof-artists-title" style="display:none;">Любимые артисты</div>
+    <div class="prof-artists-scroll" id="prof-artists-scroll"></div>
+
+    <!-- Playlists carousel -->
+    <div class="prof-section" id="prof-pls-title" style="display:none;">Мои плейлисты</div>
+    <div class="prof-pls-scroll" id="prof-pls-scroll"></div>
+
     <!-- Recently played horizontal scroll -->
     <div class="prof-section" id="prof-recent-title" style="display:none">Недавно слушал</div>
     <div class="prof-recent-scroll" id="prof-recent-scroll"></div>
@@ -2072,7 +2208,6 @@ audio {
     <div class="prof-section">Мне нравится</div>
     <ul id="favs-list"></ul>
   </div>
-</div>
 
 <div class="tabs" id="tabs">
   <div class="tab on" onclick="haptic();nav('wave')">
@@ -2538,15 +2673,16 @@ async function loadData() {
 function updateProfileUI() {
   document.getElementById('stat-favs').textContent = allData.favs.length;
   document.getElementById('stat-hist').textContent = allData.history.length;
-  const plCount = Object.keys(allData.playlists || {}).length;
+  const playlists = allData.playlists || {};
+  const plCount = Object.keys(playlists).length;
   document.getElementById('stat-pls').textContent = plCount;
 
   // Streak badge
   const badge = document.getElementById('prof-badge-streak');
   const h = allData.history.length;
-  if (h >= 50) badge.textContent = '🔥 Меломан';
-  else if (h >= 20) badge.textContent = '🎧 Активный';
-  else if (h >= 5) badge.textContent = '🎵 Слушатель';
+  if (h >= 100) badge.textContent = '🔥 Меломан';
+  else if (h >= 50) badge.textContent = '🎧 Активный';
+  else if (h >= 20) badge.textContent = '🎵 Слушатель';
   else badge.textContent = '🌱 Новичок';
 
   // Populate TG user info
@@ -2556,7 +2692,6 @@ function updateProfileUI() {
       document.getElementById('prof-name').textContent = [u.first_name, u.last_name].filter(Boolean).join(' ') || 'Пользователь';
       document.getElementById('prof-handle').textContent = u.username ? '@' + u.username : '';
       if (u.photo_url) document.getElementById('prof-avatar').src = u.photo_url;
-      // Use accent color based on user id for hero bg
       const colors = [
         'linear-gradient(135deg,#1a1a2e,#16213e,#0f3460)',
         'linear-gradient(135deg,#1a0a2e,#2e1060,#1a0a44)',
@@ -2569,7 +2704,128 @@ function updateProfileUI() {
     }
   } catch(e) {}
 
-  // Recent tracks horizontal scroll
+  // ── NOW PLAYING STATUS ──
+  const npEl = document.getElementById('prof-now-playing');
+  const npText = document.getElementById('prof-np-text');
+  if (qIdx >= 0 && queue[qIdx] && !document.getElementById('aud').paused) {
+    const t = queue[qIdx];
+    npText.textContent = `${t.title} — ${t.artist}`;
+    npEl.classList.add('vis');
+  } else {
+    npEl.classList.remove('vis');
+  }
+
+  // ── LISTEN TIME ──
+  const totalSec = allData.listen_seconds || 0;
+  if (totalSec > 0) {
+    const totalMin = Math.floor(totalSec / 60);
+    let timeStr;
+    if (totalMin >= 60) {
+      const hrs = Math.floor(totalMin / 60);
+      const mins = totalMin % 60;
+      timeStr = mins > 0 ? `${hrs} ч ${mins} мин` : `${hrs} часов`;
+    } else {
+      timeStr = `${totalMin} минут`;
+    }
+    document.getElementById('prof-listen-time-big').textContent = timeStr;
+    document.getElementById('prof-listen-time').style.display = 'flex';
+  }
+
+  // ── TOP ARTISTS ──
+  const artistCounts = {};
+  const artistAvatars = {};
+  allData.history.forEach(t => {
+    if (!t.artist) return;
+    const key = t.artist.trim();
+    artistCounts[key] = (artistCounts[key] || 0) + 1;
+    if (!artistAvatars[key] && t.artwork_url) artistAvatars[key] = t.artwork_url;
+  });
+  const topArtists = Object.entries(artistCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12);
+
+  const artistsScroll = document.getElementById('prof-artists-scroll');
+  const artistsTitle = document.getElementById('prof-artists-title');
+  artistsScroll.innerHTML = '';
+  if (topArtists.length > 0) {
+    artistsTitle.style.display = 'block';
+    topArtists.forEach(([name, count], i) => {
+      const item = document.createElement('div');
+      item.className = 'prof-artist-item';
+      item.style.animationDelay = i * 0.04 + 's';
+      item.style.animation = 'profFadeIn 0.4s ease both';
+      const avatarSrc = artistAvatars[name];
+      const avatarHtml = avatarSrc
+        ? `<img src="${esc(avatarSrc)}" loading="lazy" onerror="this.parentElement.innerHTML='🎤'">`
+        : '🎤';
+      item.innerHTML = `
+        <div class="prof-artist-avatar">${avatarHtml}</div>
+        <div class="prof-artist-name">${esc(name)}</div>
+        <div class="prof-artist-count">${count} ${count === 1 ? 'трек' : count < 5 ? 'трека' : 'треков'}</div>
+      `;
+      item.onclick = () => {
+        haptic();
+        // Открываем карточку артиста — эмулируем через поиск
+        const fakeTrack = { artist: name, artwork_url: avatarSrc || '', id: 'artist_' + name };
+        queue = [fakeTrack]; qIdx = 0;
+        artistCardName = name;
+        _acCurrentArtist = name;
+        _acSubscribed = false;
+        const heroImg = document.getElementById('ac-hero-img');
+        heroImg.src = avatarSrc || '';
+        heroImg.style.display = avatarSrc ? 'block' : 'none';
+        document.getElementById('ac-name').textContent = name;
+        document.getElementById('ac-meta').textContent = '';
+        document.getElementById('ac-tracks').innerHTML = '<div class="ac-loading"></div>';
+        document.getElementById('ac-genre-tags').innerHTML = '';
+        document.getElementById('artist-card').classList.add('vis');
+        loadArtistTracks(name, avatarSrc || '');
+        loadArtistSubscribeStatus(name);
+      };
+      artistsScroll.appendChild(item);
+    });
+  } else {
+    artistsTitle.style.display = 'none';
+  }
+
+  // ── PLAYLISTS CAROUSEL ──
+  const plsScroll = document.getElementById('prof-pls-scroll');
+  const plsTitle = document.getElementById('prof-pls-title');
+  plsScroll.innerHTML = '';
+  const plNames = Object.keys(playlists);
+  if (plNames.length > 0) {
+    plsTitle.style.display = 'block';
+    plNames.slice(0, 10).forEach((name, i) => {
+      const tracks = playlists[name] || [];
+      const card = document.createElement('div');
+      card.className = 'prof-pls-card';
+      card.style.animationDelay = i * 0.05 + 's';
+      card.style.animation = 'profFadeIn 0.4s ease both';
+      // Build mosaic cover from first 4 tracks with artwork
+      const covers = tracks.filter(t => t.artwork_url).slice(0, 4);
+      let coverHtml;
+      if (covers.length === 0) {
+        coverHtml = `<div class="prof-pls-cover single"><div class="prof-pls-cover-empty">🎵</div></div>`;
+      } else if (covers.length === 1) {
+        coverHtml = `<div class="prof-pls-cover single"><img src="${esc(covers[0].artwork_url)}" loading="lazy"></div>`;
+      } else {
+        const imgs = covers.slice(0, 4).map(t => `<img src="${esc(t.artwork_url)}" loading="lazy">`).join('');
+        coverHtml = `<div class="prof-pls-cover">${imgs}</div>`;
+      }
+      const cnt = tracks.length;
+      card.innerHTML = `
+        ${coverHtml}
+        <div class="prof-pls-name">${esc(name)}</div>
+        <div class="prof-pls-count">${cnt} ${cnt === 1 ? 'трек' : cnt < 5 ? 'трека' : 'треков'}</div>
+      `;
+      card.onclick = () => { haptic(); openPlsDetail(name); };
+      plsScroll.appendChild(card);
+    });
+  } else {
+    plsTitle.style.display = 'none';
+  }
+
+  // ── RECENT TRACKS ──
   const recent = allData.history.slice(0, 12);
   const scroll = document.getElementById('prof-recent-scroll');
   const title = document.getElementById('prof-recent-title');
@@ -2589,7 +2845,6 @@ function updateProfileUI() {
       `;
       card.addEventListener('click', () => {
         haptic();
-        // Play from history queue
         queue = [...allData.history];
         qIdx = queue.findIndex(x => String(x.id) === String(t.id));
         if (qIdx < 0) { queue.unshift(t); qIdx = 0; }
