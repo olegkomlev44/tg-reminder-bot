@@ -324,15 +324,15 @@ async def api_history_add(request):
     try:
         body = await request.json()
         if body.get("track_data"):
-    track_data = body["track_data"]
-    if not track_data.get('duration_sec') and track_data.get('duration'):
-        try:
-            parts = str(track_data['duration']).split(':')
-            track_data['duration_sec'] = int(parts[0]) * 60 + int(parts[1]) if len(parts) == 2 else 0
-        except:
-            track_data['duration_sec'] = 0
-    log_track_history(user["id"], track_data)
-  return cors(web.json_response({"ok": True}))
+            track_data = body["track_data"]
+            if not track_data.get('duration_sec') and track_data.get('duration'):
+                try:
+                    parts = str(track_data['duration']).split(':')
+                    track_data['duration_sec'] = int(parts[0]) * 60 + int(parts[1]) if len(parts) == 2 else 0
+                except:
+                    track_data['duration_sec'] = 0
+            log_track_history(user["id"], track_data)
+        return cors(web.json_response({"ok": True}))
     except Exception: pass
     return cors(web.json_response({"error": "bad"}, status=400))
   
