@@ -99,9 +99,6 @@ def init_db():
 
     conn.commit()
     conn.close()
-
-    conn.commit()
-    conn.close()
     logger.info("🟢 SQLite БД обновлена (добавлен blacklist)")
 
 # --- БАЗОВЫЕ ФУНКЦИИ ---
