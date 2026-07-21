@@ -3554,8 +3554,17 @@ logHistoryToServer(t);
 async function logHistoryToServer(track) {
   allData.history = allData.history.filter(t => String(t.id) !== String(track.id));
   allData.history.unshift(track); localStorage.setItem('music_data', JSON.stringify(allData)); renderHistory();
+  // Обновить Now Playing в профиле
+  try {
+    const npEl = document.getElementById('prof-now-playing');
+    const npText = document.getElementById('prof-np-text');
+    if (npEl && npText) {
+      npText.textContent = `${track.title} — ${track.artist}`;
+      npEl.classList.add('vis');
+    }
+  } catch(e) {}
   try { await fetch('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr }, body: JSON.stringify({ track_data: track }) }); } catch (e) {}
-}
+  }
 
 function setPlayState(playing) {
   const svgPlay = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; const svgPause = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
