@@ -149,6 +149,65 @@ async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout: int
         logger.error(f"IG download error: {e}")
     return None
 
+async def _get_user_via_ig_meta(username: str) -> dict | None:
+    """Прямой парсинг мета-тегов с самого Instagram, прикидываясь поисковиком (Googlebot)."""
+    url = f"https://www.instagram.com/{username}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers=headers, timeout=10) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+
+                meta_desc = re.search(r'<meta property="og:description" content="([^"]*)"', html)
+                meta_title = re.search(r'<meta property="og:title" content="([^"]*)"', html)
+                meta_image = re.search(r'<meta property="og:image" content="([^"]*)"', html)
+
+                if not meta_desc or not meta_title:
+                    return None
+
+                desc = meta_desc.group(1)
+                f_match = re.search(r'([\d,KkMm\.]+)\s+[Ff]ollowers', desc)
+                fing_match = re.search(r'([\d,KkMm\.]+)\s+[Ff]ollowing', desc)
+                p_match = re.search(r'([\d,KkMm\.]+)\s+[Pp]osts', desc)
+
+                def _parse_num(s_val):
+                    if not s_val: return 0
+                    s_val = s_val.upper().replace(",", "").replace(" ", "")
+                    if "M" in s_val: return int(float(s_val.replace("M", "")) * 1_000_000)
+                    if "K" in s_val: return int(float(s_val.replace("K", "")) * 1_000)
+                    try: return int(s_val)
+                    except: return 0
+
+                id_match = re.search(r'"profilePage_([0-9]+)"', html)
+                if not id_match:
+                    id_match = re.search(r'"id":"([0-9]+)"', html)
+                user_id = id_match.group(1) if id_match else ""
+
+                title = meta_title.group(1)
+                name_match = re.search(r'^(.+?)\s*[@(]', title)
+                full_name = name_match.group(1).strip() if name_match else username
+
+                return {
+                    "id": user_id,
+                    "username": username,
+                    "full_name": full_name,
+                    "biography": "", 
+                    "followers": _parse_num(f_match.group(1) if f_match else ""),
+                    "following": _parse_num(fing_match.group(1) if fing_match else ""),
+                    "posts_count": _parse_num(p_match.group(1) if p_match else ""),
+                    "avatar_url": meta_image.group(1).replace("\\u0026", "&") if meta_image else "",
+                    "is_private": False,
+                    "is_verified": False,
+                    "posts": [],
+                }
+    except Exception as e:
+        logger.error(f"ig_meta error @{username}: {e}")
+    return None
 
 # ── МЕТОД 1: SCRAPER VIA PICNOB ───────────────────────────────────────────────
 
@@ -434,6 +493,7 @@ async def get_user_info(username: str) -> dict | None:
     await asyncio.sleep(random.uniform(0.3, 0.8))
 
     methods = [
+        ("ig_meta", _get_user_via_ig_meta),  # <-- ДОБАВИЛИ СЮДА ПЕРВЫМ
         ("picnob", _get_user_via_picnob),
         ("imginn", _get_user_via_imginn),
         ("storiesig", _get_user_via_storiesig),
