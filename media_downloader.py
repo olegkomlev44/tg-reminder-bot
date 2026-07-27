@@ -260,14 +260,17 @@ async def _download_image_bytes(url: str) -> bytes | None:
 # Семафор — не грузим yt-dlp параллельно
 _DL_SEMAPHORE = asyncio.Semaphore(3)
 
-
-async def handle_media_link(message: types.Message):
+async def handle_media_link(message: types.Message, custom_url: str | None = None, custom_platform: str | None = None):
     """
     Основной хендлер: пользователь кинул ссылку →
     определяем платформу → скачиваем → отправляем.
     """
-    text = message.text or message.caption or ""
-    platform, url = detect_platform(text)
+    text = custom_url or message.text or message.caption or ""
+    
+    if custom_platform and custom_url:
+        platform, url = custom_platform, custom_url
+    else:
+        platform, url = detect_platform(text)
 
     if not platform or not url:
         return  # не наша ссылка — пропускаем
@@ -302,7 +305,6 @@ async def handle_media_link(message: types.Message):
     height   = info.get("height", 0)
     is_photo = info.get("is_photo", False)
 
-    # Подпись
     caption_parts = []
     if uploader:
         caption_parts.append(f"{emoji} *{uploader}*")
@@ -321,7 +323,6 @@ async def handle_media_link(message: types.Message):
 
     try:
         if is_photo:
-            # Это изображение (gif/jpg/png)
             with open(filepath, "rb") as f:
                 data = f.read()
             await message.answer_photo(
@@ -330,7 +331,6 @@ async def handle_media_link(message: types.Message):
                 parse_mode="Markdown",
             )
         else:
-            # Видео
             video_file = FSInputFile(filepath, filename="video.mp4")
             await message.answer_video(
                 video_file,
@@ -342,7 +342,6 @@ async def handle_media_link(message: types.Message):
                 supports_streaming=True,
             )
 
-        # Удаляем статусное сообщение после успешной отправки
         try:
             await status.delete()
         except Exception:
@@ -352,7 +351,6 @@ async def handle_media_link(message: types.Message):
         err_str = str(e)
         logger.error(f"Telegram send error: {e}")
 
-        # Если файл слишком большой — Telegram тоже может отклонить
         if "file is too big" in err_str.lower() or "request entity too large" in err_str.lower():
             try:
                 await status.edit_text(
@@ -375,49 +373,9 @@ async def handle_media_link(message: types.Message):
         _cleanup(filepath, info)
 
 
-def _make_error_message(info: dict, label: str, url: str) -> str:
-    """Сформировать понятное сообщение об ошибке."""
-    if info.get("_too_large"):
-        size_mb = info.get("_size_mb", "?")
-        return (
-            f"❌ Файл слишком большой: *{size_mb} МБ*\n"
-            f"Лимит Telegram: {MAX_VIDEO_MB} МБ\n\n"
-            f"🔗 [Открыть напрямую]({url})"
-        )
-    if info.get("_timeout"):
-        return (
-            f"⏱ Скачивание с {label} заняло слишком долго.\n"
-            f"Попробуй ещё раз позже."
-        )
-    if info.get("_private"):
-        return (
-            f"🔒 Это приватное или закрытое видео.\n"
-            f"Скачать можно только открытый контент."
-        )
-    if info.get("_unavailable"):
-        return (
-            f"❌ Видео недоступно или удалено.\n"
-            f"Проверь ссылку: {url}"
-        )
-    if info.get("_no_video"):
-        return (
-            f"🖼 В этом посте нет видео.\n"
-            f"Если это изображение — попробуй скопировать ссылку напрямую."
-        )
-    err = info.get("_error", "")
-    return (
-        f"❌ Не удалось скачать с {label}.\n"
-        + (f"`{err}`\n\n" if err else "")
-        + f"🔗 [Открыть напрямую]({url})"
-    )
-
-
-# ── КОМАНДА /dl ───────────────────────────────────────────────────────────────
-
 async def cmd_dl(message: types.Message):
     """
     /dl <url> — явная команда скачивания.
-    Позволяет скачать медиа из любого поддерживаемого сайта.
     """
     arg = (message.text or "").split(maxsplit=1)
     if len(arg) < 2 or not arg[1].strip():
@@ -439,14 +397,11 @@ async def cmd_dl(message: types.Message):
     platform, matched_url = detect_platform(url)
 
     if not platform:
-        # Пробуем скачать как «неизвестную» ссылку через yt-dlp
-        platform = "youtube"  # yt-dlp сам разберётся
+        platform = "youtube"
         matched_url = url
 
-    # Перенаправляем в основной хендлер с синтетическим сообщением
-    message.text = matched_url
-    await handle_media_link(message)
-
+    # Вызываем функцию напрямую без модификации объекта message
+    await handle_media_link(message, custom_url=matched_url, custom_platform=platform)
 
 # ── РЕГИСТРАЦИЯ ───────────────────────────────────────────────────────────────
 
