@@ -213,35 +213,6 @@ async def _get_user_via_ig_meta(username: str) -> dict | None:
         logger.error(f"ig_meta error @{username}: {e}")
     return None
 
-async def _get_posts_via_imginn(username: str) -> list:
-    """Парсинг последних постов через imginn.com"""
-    url = f"https://imginn.com/{username}/"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=BROWSER_HEADERS, timeout=15) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-        
-        posts = []
-        # Вытаскиваем ссылки на картинки постов из HTML
-        items = re.findall(r'href="/p/([^/]+)/"[^>]*>.*?<img[^>]+src="([^"]+)"', html_text, re.DOTALL)
-        for shortcode, img_url in items[:10]:
-            clean_url = img_url.replace("&amp;", "&")
-            posts.append({
-                "id": shortcode,
-                "shortcode": shortcode,
-                "timestamp": 0,
-                "caption": "",
-                "like_count": 0,
-                "comment_count": 0,
-                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
-            })
-        return posts
-    except Exception as e:
-        logger.error(f"imginn posts error: {e}")
-    return []
-
 # ── МЕТОД 1: SCRAPER VIA PICNOB ───────────────────────────────────────────────
 
 async def _get_user_via_picnob(username: str) -> dict | None:
@@ -787,27 +758,26 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
 
 
-async def _get_posts_via_picnob(username: str) -> list:
-    """Парсинг постов через picnob.com."""
-    url = f"https://www.picnob.com/profile/{username}/"
+async def _get_posts_via_imginn(username: str) -> list:
+    """Парсинг последних постов через imginn.com под видом поисковика"""
+    url = f"https://imginn.com/{username}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as resp:
+            async with s.get(url, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
+                    logger.warning(f"imginn posts {username} → {resp.status}")
                     return []
-                html = await resp.text()
+                html_text = await resp.text()
 
         posts = []
-        # Ищем блоки с постами
-        # picnob использует структуру с data-src и data-shortcode
-        items = re.findall(
-            r'data-shortcode="([^"]+)"[^>]*>.*?<img[^>]+(?:data-src|src)="([^"]+)"',
-            html, re.DOTALL
-        )
+        # Вытаскиваем ссылки на картинки постов из HTML
+        items = re.findall(r'href="/p/([^/]+)/"[^>]*>.*?<img[^>]+src="([^"]+)"', html_text, re.DOTALL)
         for shortcode, img_url in items[:10]:
+            clean_url = img_url.replace("&amp;", "&")
             posts.append({
                 "id": shortcode,
                 "shortcode": shortcode,
@@ -815,15 +785,45 @@ async def _get_posts_via_picnob(username: str) -> list:
                 "caption": "",
                 "like_count": 0,
                 "comment_count": 0,
-                "media": [{"type": "photo", "url": img_url, "thumb": img_url}],
+                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
             })
-        if posts:
-            logger.info(f"picnob posts: найдено {len(posts)} постов для @{username}")
+        return posts
+    except Exception as e:
+        logger.error(f"imginn posts error: {e}")
+    return []
+
+async def _get_posts_via_picnob(username: str) -> list:
+    """Парсинг постов через picnob.com под видом поисковика"""
+    url = f"https://www.picnob.com/profile/{username}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers=headers, timeout=20) as resp:
+                if resp.status != 200:
+                    logger.warning(f"picnob posts {username} → {resp.status}")
+                    return []
+                html_text = await resp.text()
+
+        posts = []
+        items = re.findall(r'data-shortcode="([^"]+)"[^>]*>.*?<img[^>]+(?:data-src|src)="([^"]+)"', html_text, re.DOTALL)
+        for shortcode, img_url in items[:10]:
+            clean_url = img_url.replace("&amp;", "&")
+            posts.append({
+                "id": shortcode,
+                "shortcode": shortcode,
+                "timestamp": 0,
+                "caption": "",
+                "like_count": 0,
+                "comment_count": 0,
+                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
+            })
         return posts
     except Exception as e:
         logger.error(f"picnob posts error: {e}")
     return []
-
 
 async def _get_next_cursor(user_id: str) -> str:
     """Получить cursor для следующей страницы через GraphQL."""
