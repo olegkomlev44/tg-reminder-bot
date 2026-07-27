@@ -366,17 +366,22 @@ async def callback_ig_posts(callback: types.CallbackQuery):
     posts = result.get("posts", [])
     if not posts:
         await callback.message.answer(
-            f"😶 У @{ig_username} нет постов или они не загрузились.",
+            f"😶 У @{ig_username} больше нет загружаемых постов.",
             reply_markup=_profile_keyboard(ig_username, callback.from_user.id)
         )
         return
 
-    # Каждый пост — одно или несколько медиа (альбом)
-    # Отправляем первые 10 постов; у каждого берём первое фото для превью
-    sent_posts = 0
-    for post in posts[:10]:
+    # Собираем все первые фото/видео из постов в один Телеграм-альбом
+    album_items = []
+    
+    for i, post in enumerate(posts[:10]):
         media_list = post.get("media", [])
         if not media_list:
+            continue
+
+        m = media_list[0] # берём обложку/первое медиа поста
+        data = await _download(m["url"] or m["thumb"])
+        if not data:
             continue
 
         caption = post.get("caption", "").strip()
@@ -385,74 +390,49 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         sc = post.get("shortcode", "")
         link = f"https://www.instagram.com/p/{sc}/" if sc else ""
 
-        caption_text = (
-            f"❤️ {_fmt_count(likes)}  💬 {_fmt_count(comments)}"
-            + (f"\n\n{caption[:200]}" if caption else "")
-            + (f"\n🔗 {link}" if link else "")
+        # В альбоме подписи видны при открытии фото
+        cap = f"❤️ {_fmt_count(likes)}  💬 {_fmt_count(comments)}"
+        if caption:
+            cap += f"\n\n{caption[:200]}"
+        if link:
+            cap += f"\n🔗 {link}"
+
+        if m["type"] == "video":
+            album_items.append(InputMediaVideo(
+                media=BufferedInputFile(data, filename=f"post_{i}.mp4"),
+                caption=cap[:1020]
+            ))
+        else:
+            album_items.append(InputMediaPhoto(
+                media=BufferedInputFile(data, filename=f"post_{i}.jpg"),
+                caption=cap[:1020]
+            ))
+        await asyncio.sleep(0.3)
+
+    if not album_items:
+        await callback.message.answer(
+            "❌ Не удалось скачать файлы для этих постов.",
+            reply_markup=_profile_keyboard(ig_username, callback.from_user.id)
         )
+        return
 
-        # Если у поста один элемент — отправляем напрямую
-        if len(media_list) == 1:
-            m = media_list[0]
-            data = await _download(m["url"] or m["thumb"])
-            if not data:
-                continue
-            try:
-                if m["type"] == "video":
-                    await callback.message.answer_video(
-                        BufferedInputFile(data, filename="post.mp4"),
-                        caption=caption_text[:1020],
-                    )
-                else:
-                    await callback.message.answer_photo(
-                        BufferedInputFile(data, filename="post.jpg"),
-                        caption=caption_text[:1020],
-                    )
-                sent_posts += 1
-            except Exception as e:
-                logger.error(f"IG send post error: {e}")
-            await asyncio.sleep(0.4)
-            continue
-
-        # Альбом: несколько медиа
-        album_items = []
-        for i, m in enumerate(media_list[:10]):  # max 10 в альбоме (лимит TG)
-            data = await _download(m["url"] or m["thumb"])
-            if not data:
-                continue
-            cap = caption_text[:1020] if i == 0 else None
-            if m["type"] == "video":
-                album_items.append(InputMediaVideo(
-                    media=BufferedInputFile(data, filename=f"media_{i}.mp4"),
-                    caption=cap,
-                ))
-            else:
-                album_items.append(InputMediaPhoto(
-                    media=BufferedInputFile(data, filename=f"media_{i}.jpg"),
-                    caption=cap,
-                ))
-            await asyncio.sleep(0.1)  # не грузим сеть сразу
-
-        if not album_items:
-            continue
-        try:
-            await callback.message.answer_media_group(album_items)
-            sent_posts += 1
-        except Exception as e:
-            logger.error(f"IG send album error: {e}")
-        await asyncio.sleep(0.6)
+    # Отправляем весь пак как один альбом (Телеграм лимитирует до 10 элементов)
+    try:
+        await callback.message.answer_media_group(album_items)
+    except Exception as e:
+        logger.error(f"IG send unified album error: {e}")
+        await callback.message.answer("❌ Ошибка отправки альбома (возможно, видео слишком большое).")
 
     # Кнопка «Далее»
     next_cursor = result.get("next_cursor", "")
     has_more = result.get("has_more", False)
 
     if next_cursor:
-        # Сохраняем полный cursor в кэш
         cursor_key = _store_cursor(f"{ig_username}_{next_cursor[:40]}", next_cursor)
     else:
         cursor_key = ""
 
-    footer = f"✅ Показано {sent_posts} постов @{ig_username}"
+    footer = f"✅ Показано {len(album_items)} постов @{ig_username}"
     await callback.message.answer(
         footer,
         reply_markup=_posts_keyboard(ig_username, callback.from_user.id, cursor_key, has_more)
