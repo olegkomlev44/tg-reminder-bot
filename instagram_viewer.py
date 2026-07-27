@@ -162,11 +162,13 @@ async def _get_user_via_ig_meta(username: str) -> dict | None:
             async with s.get(url, headers=headers, timeout=10) as resp:
                 if resp.status != 200:
                     return None
-                html = await resp.text()
+                
+                # ПЕРЕИМЕНОВАЛИ ПЕРЕМЕННУЮ В html_text, ЧТОБЫ НЕ СЛОМАТЬ МОДУЛЬ html
+                html_text = await resp.text()
 
-                meta_desc = re.search(r'<meta property="og:description" content="([^"]*)"', html)
-                meta_title = re.search(r'<meta property="og:title" content="([^"]*)"', html)
-                meta_image = re.search(r'<meta property="og:image" content="([^"]*)"', html)
+                meta_desc = re.search(r'<meta property="og:description" content="([^"]*)"', html_text)
+                meta_title = re.search(r'<meta property="og:title" content="([^"]*)"', html_text)
+                meta_image = re.search(r'<meta property="og:image" content="([^"]*)"', html_text)
 
                 if not meta_desc or not meta_title:
                     return None
@@ -184,14 +186,16 @@ async def _get_user_via_ig_meta(username: str) -> dict | None:
                     try: return int(s_val)
                     except: return 0
 
-                id_match = re.search(r'"profilePage_([0-9]+)"', html)
+                id_match = re.search(r'"profilePage_([0-9]+)"', html_text)
                 if not id_match:
-                    id_match = re.search(r'"id":"([0-9]+)"', html)
+                    id_match = re.search(r'"id":"([0-9]+)"', html_text)
                 user_id = id_match.group(1) if id_match else ""
 
-                title = html.unescape(meta_title.group(1)) # <--- ВОТ ТУТ РАСКОДИРУЕМ
+                # ТЕПЕРЬ МОДУЛЬ html СРАБОТАЕТ КОРРЕКТНО
+                title = html.unescape(meta_title.group(1))
                 name_match = re.search(r'^(.+?)\s*[@(]', title)
                 full_name = name_match.group(1).strip() if name_match else username
+
                 return {
                     "id": user_id,
                     "username": username,
