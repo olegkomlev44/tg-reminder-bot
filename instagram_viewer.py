@@ -77,7 +77,7 @@ BROWSER_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",  # <-- Убрали br для стабильности
     "DNT": "1",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
@@ -87,6 +87,7 @@ BROWSER_HEADERS = {
     "Sec-Fetch-User": "?1",
     "Cache-Control": "max-age=0",
 }
+
 
 # Заголовки для API-запросов Instagram (внутренний API)
 IG_API_HEADERS = {
