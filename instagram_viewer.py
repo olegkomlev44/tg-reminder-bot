@@ -18,6 +18,7 @@ import sqlite3
 import json
 import time
 import random
+import html
 from typing import Optional
 
 import aiohttp
@@ -188,10 +189,9 @@ async def _get_user_via_ig_meta(username: str) -> dict | None:
                     id_match = re.search(r'"id":"([0-9]+)"', html)
                 user_id = id_match.group(1) if id_match else ""
 
-                title = meta_title.group(1)
+                title = html.unescape(meta_title.group(1)) # <--- ВОТ ТУТ РАСКОДИРУЕМ
                 name_match = re.search(r'^(.+?)\s*[@(]', title)
                 full_name = name_match.group(1).strip() if name_match else username
-
                 return {
                     "id": user_id,
                     "username": username,
