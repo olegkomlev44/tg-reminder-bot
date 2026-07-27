@@ -732,11 +732,14 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     # КАСКАДНЫЙ ПОИСК ПОСТОВ
     posts = []
     
-    # 1. Пробуем новый метод Imginn
+    # 1. СНАЧАЛА ПРОБУЕМ НАШ НОВЫЙ ПРЯМОЙ ПАРСЕР ИНСТАГРАМА
+    if not posts:
+        posts = await _get_posts_via_ig_html(username)
+
+    # 2. Если вдруг пусто, пробуем посредников (хоть они и в бане, оставляем на всякий случай)
     if not posts:
         posts = await _get_posts_via_imginn(username)
         
-    # 2. Если пусто, пробуем Picnob
     if not posts:
         posts = await _get_posts_via_picnob(username)
         
@@ -756,6 +759,54 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
             return result
 
     return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
+
+async def _get_posts_via_ig_html(username: str) -> list:
+    """Извлекаем посты напрямую из HTML страницы Instagram (Googlebot)"""
+    url = f"https://www.instagram.com/{username}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers=headers, timeout=10) as resp:
+                if resp.status != 200:
+                    return []
+                html_text = await resp.text()
+
+        posts = []
+        # Регулярным выражением выцепляем связку: шорткод поста + прямая ссылка на его картинку
+        # Ищем в пределах 500 символов, чтобы точно связать нужный код с нужным фото
+        raw_posts = re.findall(r'"shortcode":"([A-Za-z0-9_-]+)".{1,500}?"display_url":"(https?:\/\/[^"]+)"', html_text)
+        
+        seen = set()
+        for shortcode, img_url in raw_posts:
+            if shortcode in seen:
+                continue
+            seen.add(shortcode)
+            
+            # Очищаем ссылку от экранирования JSON
+            clean_url = img_url.replace("\\u0026", "&").replace("\\/", "/")
+            
+            posts.append({
+                "id": shortcode,
+                "shortcode": shortcode,
+                "timestamp": 0,
+                "caption": "",
+                "like_count": 0,
+                "comment_count": 0,
+                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
+            })
+            
+            if len(posts) >= 10:
+                break
+                
+        if posts:
+            logger.info(f"✅ Прямой парсинг HTML вытащил {len(posts)} постов для @{username}")
+        return posts
+    except Exception as e:
+        logger.error(f"ig_html posts error @{username}: {e}")
+    return []
 
 async def _get_posts_via_imginn(username: str) -> list:
     """Парсинг последних постов через imginn.com (как обычный браузер)"""
