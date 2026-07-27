@@ -182,9 +182,10 @@ async def process_ig_username(message: types.Message, state: FSMContext):
 
     await _show_profile(message, username, message.from_user.id)
 
-
 async def _show_profile(source, ig_username: str, tg_user_id: int):
     """Показать профиль Instagram и меню действий."""
+    import html  # Встроенный модуль для защиты от спецсимволов
+    
     ig_username = ig_username.lower().strip("@")
 
     # source может быть Message или callback.message
@@ -202,20 +203,24 @@ async def _show_profile(source, ig_username: str, tg_user_id: int):
 
     if not info:
         await source.answer(
-            f"❌ Пользователь *@{ig_username}* не найден или недоступен.\n"
-            "_Возможно, профиль приватный или имя написано неверно._",
-            parse_mode="Markdown"
+            f"❌ Пользователь <b>@{html.escape(ig_username)}</b> не найден или недоступен.\n"
+            "<i>Возможно, профиль приватный или имя написано неверно.</i>",
+            parse_mode="HTML"
         )
         return
 
+    # Защищаем текст от поломки разметки
+    safe_full_name = html.escape(info.get('full_name') or ig_username)
+    safe_username = html.escape(ig_username)
+    safe_bio = html.escape(info.get("biography", "").strip())
+
     verified = "✅" if info.get("is_verified") else ""
     private = "🔒 приватный" if info.get("is_private") else "🌐 открытый"
-    bio = info.get("biography", "").strip()
-    bio_line = f"\n📝 _{bio}_" if bio else ""
+    bio_line = f"\n📝 <i>{safe_bio}</i>" if safe_bio else ""
 
     text = (
-        f"📸 *{info.get('full_name') or ig_username}* {verified}\n"
-        f"👤 @{ig_username} · {private}\n\n"
+        f"📸 <b>{safe_full_name}</b> {verified}\n"
+        f"👤 @{safe_username} · {private}\n\n"
         f"👥 {_fmt_count(info.get('followers', 0))} подписчиков · "
         f"👣 {_fmt_count(info.get('following', 0))} подписок · "
         f"🖼 {_fmt_count(info.get('posts_count', 0))} постов"
@@ -232,13 +237,12 @@ async def _show_profile(source, ig_username: str, tg_user_id: int):
             await source.answer_photo(
                 BufferedInputFile(avatar_bytes, filename="avatar.jpg"),
                 caption=text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=kb
             )
             return
 
-    await source.answer(text, parse_mode="Markdown", reply_markup=kb)
-
+    await source.answer(text, parse_mode="HTML", reply_markup=kb)
 
 # ── КОЛБЭК: ПРОФИЛЬ ───────────────────────────────────────────────────────────
 
