@@ -26,33 +26,32 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # ── КЭШ ПОСТОВ (in-memory) ────────────────────────────────────────────────────
-# Хранит полный список постов по username, чтобы пагинация offset-ом работала
-# стабильно (без повторного парсинга при нажатии «Далее»).
-# Структура: { username: {"posts": [...], "ts": float} }
-_POSTS_CACHE: dict[str, dict] = {}
-_POSTS_CACHE_TTL = 300  # секунды (5 минут)
+# Хранит полный список постов по username чтобы offset-пагинация работала
+# стабильно между нажатиями «Далее» (без повторного парсинга).
+_POSTS_CACHE: dict = {}   # { username: {"posts": [...], "ts": float} }
+_POSTS_CACHE_TTL = 600    # 10 минут
 
 
-def _cache_set_posts(username: str, posts: list):
-    _POSTS_CACHE[username] = {"posts": posts, "ts": time.time()}
+def _cache_set_posts(username: str, posts: list) -> None:
+    _POSTS_CACHE[username] = {"posts": posts, "ts": __import__("time").time()}
 
 
 def _cache_get_posts(username: str) -> list | None:
     entry = _POSTS_CACHE.get(username)
     if not entry:
         return None
-    if time.time() - entry["ts"] > _POSTS_CACHE_TTL:
+    if __import__("time").time() - entry["ts"] > _POSTS_CACHE_TTL:
         del _POSTS_CACHE[username]
         return None
     return entry["posts"]
 
 
 def _is_video_url(url: str) -> bool:
-    """Определить по URL, что это видео (mp4 / /videos/)."""
+    """Определить по URL что это видео (mp4 / /videos/)."""
     if not url:
         return False
     u = url.lower().split("?")[0]
-    return u.endswith(".mp4") or "/videos/" in u or "video" in u
+    return u.endswith(".mp4") or "/videos/" in u
 
 
 # ── БД ────────────────────────────────────────────────────────────────────────
@@ -800,25 +799,23 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     if info.get("is_private"):
         return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
 
-    # Определяем тип курсора (числовой для скраперов, строка для GraphQL)
-    is_graphql_cursor = after_cursor and not after_cursor.isdigit()
+    # Числовой cursor = offset в кэше скраперов
+    # Строковый cursor = GraphQL end_cursor
+    is_graphql_cursor = bool(after_cursor) and not after_cursor.isdigit()
     offset = int(after_cursor) if after_cursor.isdigit() else 0
 
-    # Если курсор от GraphQL, сразу идём туда
+    # Если GraphQL-курсор — сразу туда
     if is_graphql_cursor and info.get("id"):
-        result = await _get_posts_graphql(info["id"], username, after_cursor, info)
-        return result
+        return await _get_posts_graphql(info["id"], username, after_cursor, info)
 
-    # КАСКАДНЫЙ ПОИСК ПОСТОВ — с кэшем.
-    # При первом запросе (offset==0) проверяем кэш или парсим заново.
-    # При последующих (offset>0) ВСЕГДА берём из кэша — не парсим снова.
-    posts = _cache_get_posts(username) if offset > 0 else None
-
-    if posts is None:
-        # Парсим и кэшируем
-        posts = []
-        if not posts:
-            posts = await _get_posts_via_ig_html(username)
+    # ── Кэш ─────────────────────────────────────────────────────────────────
+    # При offset > 0 ОБЯЗАТЕЛЬНО берём из кэша (не парсим заново).
+    # При offset == 0 проверяем кэш, если свежий — тоже берём.
+    cached = _cache_get_posts(username)
+    if cached is None:
+        # Парсим заново
+        posts: list = []
+        posts = await _get_posts_via_ig_html(username)
         if not posts:
             posts = await _get_posts_via_picuki(username)
         if not posts:
@@ -827,7 +824,7 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
             posts = await _get_posts_via_picnob(username)
 
         if posts:
-            # Дедупликация по shortcode
+            # Дедупликация
             seen_ids: set = set()
             unique: list = []
             for p in posts:
@@ -837,27 +834,31 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
                     unique.append(p)
             posts = unique
             _cache_set_posts(username, posts)
+            logger.info(f"📦 Закэшировано {len(posts)} постов для @{username}")
+        else:
+            # Скраперы пусты — пробуем GraphQL как запасной вариант
+            if info.get("id"):
+                logger.info(f"Скраперы пусты, пробую GraphQL для @{username}")
+                gql_cursor = await _get_next_cursor(info["id"])
+                result = await _get_posts_graphql(info["id"], username, gql_cursor or "", info)
+                if result.get("posts"):
+                    return result
+            return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
+    else:
+        posts = cached
+        logger.info(f"📦 Из кэша {len(posts)} постов для @{username}, offset={offset}")
 
-    if posts:
-        chunk = posts[offset : offset + 10]
-        has_more = (offset + 10) < len(posts)
-        next_cursor = str(offset + 10) if has_more else ""
+    chunk = posts[offset: offset + 10]
+    has_more = (offset + 10) < len(posts)
+    next_cursor = str(offset + 10) if has_more else ""
 
-        return {
-            "posts": chunk,
-            "next_cursor": next_cursor,
-            "has_more": has_more,
-            "total_cached": len(posts),
-            "user": info,
-        }
-
-    # Последний шанс: официальный GraphQL
-    if info.get("id"):
-        cursor = await _get_next_cursor(info["id"])
-        result = await _get_posts_graphql(info["id"], username, cursor or "", info)
-        return result
-
-    return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
+    return {
+        "posts": chunk,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "total_cached": len(posts),
+        "user": info,
+    }
 
 
 async def _get_posts_via_ig_html(username: str) -> list:
@@ -921,7 +922,7 @@ async def _get_posts_via_picuki(username: str) -> list:
                 continue
             seen.add(sc)
             clean_url = img_url.replace("&amp;", "&")
-            mtype = "video" if _is_video_url(clean_url) else "photo"
+            mtype3 = "video" if _is_video_url(clean_url) else "photo"
             posts.append({
                 "id": sc,
                 "shortcode": sc,
@@ -929,7 +930,7 @@ async def _get_posts_via_picuki(username: str) -> list:
                 "caption": "",
                 "like_count": 0,
                 "comment_count": 0,
-                "media": [{"type": mtype, "url": clean_url, "thumb": clean_url}],
+                "media": [{"type": mtype3, "url": clean_url, "thumb": clean_url}],
             })
         return posts
     except Exception as e:
@@ -949,7 +950,7 @@ async def _get_posts_via_imginn(username: str) -> list:
         items = re.findall(r'href="/p/([^/]+)/"[^>]*>.*?<img[^>]+src="([^"]+)"', html_text, re.DOTALL)
         for shortcode, img_url in items:
             clean_url = img_url.replace("&amp;", "&")
-            mtype = "video" if _is_video_url(clean_url) else "photo"
+            mtype4 = "video" if _is_video_url(clean_url) else "photo"
             posts.append({
                 "id": shortcode,
                 "shortcode": shortcode,
@@ -957,7 +958,7 @@ async def _get_posts_via_imginn(username: str) -> list:
                 "caption": "",
                 "like_count": 0,
                 "comment_count": 0,
-                "media": [{"type": mtype, "url": clean_url, "thumb": clean_url}],
+                "media": [{"type": mtype4, "url": clean_url, "thumb": clean_url}],
             })
         return posts
     except Exception as e:
@@ -977,7 +978,7 @@ async def _get_posts_via_picnob(username: str) -> list:
         items = re.findall(r'data-shortcode="([^"]+)"[^>]*>.*?<img[^>]+(?:data-src|src)="([^"]+)"', html_text, re.DOTALL)
         for shortcode, img_url in items:
             clean_url = img_url.replace("&amp;", "&")
-            mtype = "video" if _is_video_url(clean_url) else "photo"
+            mtype5 = "video" if _is_video_url(clean_url) else "photo"
             posts.append({
                 "id": shortcode,
                 "shortcode": shortcode,
@@ -985,7 +986,7 @@ async def _get_posts_via_picnob(username: str) -> list:
                 "caption": "",
                 "like_count": 0,
                 "comment_count": 0,
-                "media": [{"type": mtype, "url": clean_url, "thumb": clean_url}],
+                "media": [{"type": mtype5, "url": clean_url, "thumb": clean_url}],
             })
         return posts
     except Exception as e:
