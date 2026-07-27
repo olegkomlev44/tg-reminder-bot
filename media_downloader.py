@@ -24,9 +24,9 @@ from aiogram.types import BufferedInputFile, FSInputFile
 logger = logging.getLogger(__name__)
 
 # ── ЛИМИТЫ ────────────────────────────────────────────────────────────────────
-MAX_VIDEO_MB = 49          # Telegram ограничение — 50 МБ, оставляем запас
+MAX_VIDEO_MB = 1995          # Telegram ограничение — 50 МБ, оставляем запас
 MAX_VIDEO_BYTES = MAX_VIDEO_MB * 1024 * 1024
-DOWNLOAD_TIMEOUT = 120     # секунд на скачивание
+DOWNLOAD_TIMEOUT = 320     # секунд на скачивание
 
 # ── ПАТТЕРНЫ ССЫЛОК ───────────────────────────────────────────────────────────
 URL_PATTERNS = {
