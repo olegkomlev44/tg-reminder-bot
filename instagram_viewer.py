@@ -380,41 +380,41 @@ async def _get_user_via_official(username: str) -> dict | None:
 
 async def _get_user_via_oembed(username: str) -> dict | None:
     """
-    Instagram oEmbed endpoint — возвращает минимальные данные,
-    но работает без авторизации для публичных профилей.
+    Instagram oEmbed endpoint — работает для публичных профилей.
     """
-    # oEmbed для последнего поста пользователя
-    url = "https://graph.facebook.com/v18.0/instagram_oembed"
-    params = {
-        "url": f"https://www.instagram.com/{username}/",
-        "format": "json",
+    url = f"https://www.instagram.com/{username}/?__a=1&__d=dis"
+    headers = {
+        **BROWSER_HEADERS,
+        "Accept": "application/json, text/html, */*",
+        "X-Requested-With": "XMLHttpRequest"
     }
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, params=params,
-                headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
+            async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    if data.get("author_name"):
-                        return {
-                            "id": "",
-                            "username": username,
-                            "full_name": data.get("author_name", username),
-                            "biography": "",
-                            "followers": 0,
-                            "following": 0,
-                            "posts_count": 0,
-                            "avatar_url": data.get("thumbnail_url", ""),
-                            "is_private": False,
-                            "is_verified": False,
-                            "posts": [],
-                        }
+                    try:
+                        data = await resp.json()
+                        user = data.get("graphql", {}).get("user") or data.get("data", {}).get("user")
+                        if user:
+                            return {
+                                "id": str(user.get("id", "")),
+                                "username": username,
+                                "full_name": user.get("full_name", username),
+                                "biography": user.get("biography", ""),
+                                "followers": user.get("edge_followed_by", {}).get("count", 0),
+                                "following": user.get("edge_follow", {}).get("count", 0),
+                                "posts_count": user.get("edge_owner_to_timeline_media", {}).get("count", 0),
+                                "avatar_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
+                                "is_private": user.get("is_private", False),
+                                "is_verified": user.get("is_verified", False),
+                                "posts": [],
+                            }
+                    except Exception:
+                        pass
     except Exception as e:
         logger.debug(f"oembed error @{username}: {e}")
     return None
+
 
 
 # ── ГЛАВНАЯ ФУНКЦИЯ: КАСКАДНЫЙ ПОИСК ─────────────────────────────────────────
@@ -894,6 +894,14 @@ def ig_all_subscriptions() -> list:
     ).fetchall()
     conn.close()
     return [{"user_id": r[0], "ig_username": r[1], "sub_type": r[2], "last_seen": r[3]} for r in rows]
+    
+def _clean_username(text: str) -> str:
+    text = text.strip().lstrip("@")
+    # Извлекаем логин из ссылки, отсекая query-параметры (?igsh=...) и слэши
+    m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)", text)
+    if m:
+        return m.group(1).rstrip("/").lower()
+    return re.sub(r"[^A-Za-z0-9_.]", "", text).lower()
 
 
 def ig_mark_sent(user_id: str, media_id: str):
