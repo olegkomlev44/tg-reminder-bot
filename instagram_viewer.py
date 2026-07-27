@@ -757,17 +757,13 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
 
     return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
 
-
 async def _get_posts_via_imginn(username: str) -> list:
-    """Парсинг последних постов через imginn.com под видом поисковика"""
+    """Парсинг последних постов через imginn.com (как обычный браузер)"""
     url = f"https://imginn.com/{username}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=headers, timeout=15) as resp:
+            # Используем BROWSER_HEADERS чтобы Cloudflare пустил нас
+            async with s.get(url, headers=BROWSER_HEADERS, timeout=15) as resp:
                 if resp.status != 200:
                     logger.warning(f"imginn posts {username} → {resp.status}")
                     return []
@@ -793,15 +789,12 @@ async def _get_posts_via_imginn(username: str) -> list:
     return []
 
 async def _get_posts_via_picnob(username: str) -> list:
-    """Парсинг постов через picnob.com под видом поисковика"""
+    """Парсинг постов через picnob.com (как обычный браузер)"""
     url = f"https://www.picnob.com/profile/{username}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=headers, timeout=20) as resp:
+            # Используем BROWSER_HEADERS чтобы Cloudflare пустил нас
+            async with s.get(url, headers=BROWSER_HEADERS, timeout=20) as resp:
                 if resp.status != 200:
                     logger.warning(f"picnob posts {username} → {resp.status}")
                     return []
