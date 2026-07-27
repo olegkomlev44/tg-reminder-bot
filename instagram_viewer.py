@@ -770,52 +770,50 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     if info.get("is_private"):
         return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
 
-    existing_posts = info.get("posts", [])
-    if not after_cursor and existing_posts:
-        return {
-            "posts": existing_posts[:10],
-            "next_cursor": "",
-            "has_more": len(existing_posts) > 10,
-            "user": info,
-        }
+    # Определяем тип курсора (числовой для скраперов, строка для GraphQL)
+    is_graphql_cursor = after_cursor and not after_cursor.isdigit()
+    offset = int(after_cursor) if after_cursor.isdigit() else 0
+
+    # Если курсор от GraphQL, сразу идём туда
+    if is_graphql_cursor and info.get("id"):
+        result = await _get_posts_graphql(info["id"], username, after_cursor, info)
+        return result
 
     # КАСКАДНЫЙ ПОИСК ПОСТОВ
     posts = []
     
-    # 1. Прямой парсинг HTML инстаграма (Googlebot)
     if not posts:
         posts = await _get_posts_via_ig_html(username)
-
-    # 2. picuki — актуальный скрейпер, работает на момент 2026
     if not posts:
         posts = await _get_posts_via_picuki(username)
-
-    # 3. Старые посредники (часто 403, но оставляем как запасной вариант)
     if not posts:
         posts = await _get_posts_via_imginn(username)
-        
     if not posts:
         posts = await _get_posts_via_picnob(username)
-        
+
     if posts:
+        # Отрезаем нужные 10 штук с помощью смещения (offset)
+        chunk = posts[offset : offset + 10]
+        has_more = (offset + 10) < len(posts)
+        next_cursor = str(offset + 10) if has_more else ""
+        
         return {
-            "posts": posts[:10],
-            "next_cursor": "",
-            "has_more": False,
+            "posts": chunk,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
             "user": info,
         }
 
-    # 3. Последний шанс: официальный GraphQL
+    # Последний шанс: официальный GraphQL
     if info.get("id"):
-        if not after_cursor:
-            cursor = await _get_next_cursor(info["id"])
-            result = await _get_posts_graphql(info["id"], username, cursor or "", info)
-            return result
+        cursor = await _get_next_cursor(info["id"])
+        result = await _get_posts_graphql(info["id"], username, cursor or "", info)
+        return result
 
     return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
 
+
 async def _get_posts_via_ig_html(username: str) -> list:
-    """Извлекаем посты напрямую из HTML страницы Instagram (Googlebot)"""
     url = f"https://www.instagram.com/{username}/"
     headers = {
         "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
@@ -829,8 +827,6 @@ async def _get_posts_via_ig_html(username: str) -> list:
                 html_text = await resp.text()
 
         posts = []
-        # Регулярным выражением выцепляем связку: шорткод поста + прямая ссылка на его картинку
-        # Ищем в пределах 500 символов, чтобы точно связать нужный код с нужным фото
         raw_posts = re.findall(r'"shortcode":"([A-Za-z0-9_-]+)".{1,500}?"display_url":"(https?:\/\/[^"]+)"', html_text)
         
         seen = set()
@@ -838,10 +834,7 @@ async def _get_posts_via_ig_html(username: str) -> list:
             if shortcode in seen:
                 continue
             seen.add(shortcode)
-            
-            # Очищаем ссылку от экранирования JSON
             clean_url = img_url.replace("\\u0026", "&").replace("\\/", "/")
-            
             posts.append({
                 "id": shortcode,
                 "shortcode": shortcode,
@@ -851,10 +844,6 @@ async def _get_posts_via_ig_html(username: str) -> list:
                 "comment_count": 0,
                 "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
             })
-            
-            if len(posts) >= 10:
-                break
-                
         if posts:
             logger.info(f"✅ Прямой парсинг HTML вытащил {len(posts)} постов для @{username}")
         return posts
@@ -862,61 +851,21 @@ async def _get_posts_via_ig_html(username: str) -> list:
         logger.error(f"ig_html posts error @{username}: {e}")
     return []
 
-async def _get_posts_via_imginn(username: str) -> list:
-    """Парсинг последних постов через imginn.com (как обычный браузер)"""
-    url = f"https://imginn.com/{username}/"
-    try:
-        async with aiohttp.ClientSession() as s:
-            # Используем BROWSER_HEADERS чтобы Cloudflare пустил нас
-            async with s.get(url, headers=BROWSER_HEADERS, timeout=15) as resp:
-                if resp.status != 200:
-                    logger.warning(f"imginn posts {username} → {resp.status}")
-                    return []
-                html_text = await resp.text()
-
-        posts = []
-        # Вытаскиваем ссылки на картинки постов из HTML
-        items = re.findall(r'href="/p/([^/]+)/"[^>]*>.*?<img[^>]+src="([^"]+)"', html_text, re.DOTALL)
-        for shortcode, img_url in items[:10]:
-            clean_url = img_url.replace("&amp;", "&")
-            posts.append({
-                "id": shortcode,
-                "shortcode": shortcode,
-                "timestamp": 0,
-                "caption": "",
-                "like_count": 0,
-                "comment_count": 0,
-                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
-            })
-        return posts
-    except Exception as e:
-        logger.error(f"imginn posts error: {e}")
-    return []
-
 async def _get_posts_via_picuki(username: str) -> list:
-    """Парсинг постов через picuki.com — работает через стандартный браузерный UA."""
     url = f"https://www.picuki.com/profile/{username}"
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(url, headers=BROWSER_HEADERS, timeout=aiohttp.ClientTimeout(total=20),
                              allow_redirects=True) as resp:
                 if resp.status != 200:
-                    logger.warning(f"picuki posts {username} → {resp.status}")
                     return []
                 html_text = await resp.text()
 
         posts = []
-        # picuki: <div class="photo"> ... <a href="/media/SHORTCODE"> ... <img src="...">
-        items = re.findall(
-            r'href="/media/([^"]+)"[^>]*>.*?<img[^>]+src="(https?://[^"]+)"',
-            html_text, re.DOTALL
-        )
+        items = re.findall(r'href="/media/([^"]+)"[^>]*>.*?<img[^>]+src="(https?://[^"]+)"', html_text, re.DOTALL)
         if not items:
-            # Альтернативный паттерн: data-src
-            items = re.findall(
-                r'href="/media/([^"]+)"[^>]*>.*?<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-                html_text, re.DOTALL
-            )
+            items = re.findall(r'href="/media/([^"]+)"[^>]*>.*?<img[^>]+(?:data-src|src)="(https?://[^"]+)"', html_text, re.DOTALL)
+            
         seen = set()
         for shortcode, img_url in items:
             sc = shortcode.split("/")[0].split("?")[0]
@@ -933,32 +882,50 @@ async def _get_posts_via_picuki(username: str) -> list:
                 "comment_count": 0,
                 "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
             })
-            if len(posts) >= 10:
-                break
-
-        if posts:
-            logger.info(f"✅ picuki вытащил {len(posts)} постов для @{username}")
         return posts
     except Exception as e:
         logger.error(f"picuki posts error @{username}: {e}")
     return []
 
+async def _get_posts_via_imginn(username: str) -> list:
+    url = f"https://imginn.com/{username}/"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers=BROWSER_HEADERS, timeout=15) as resp:
+                if resp.status != 200:
+                    return []
+                html_text = await resp.text()
+
+        posts = []
+        items = re.findall(r'href="/p/([^/]+)/"[^>]*>.*?<img[^>]+src="([^"]+)"', html_text, re.DOTALL)
+        for shortcode, img_url in items:
+            clean_url = img_url.replace("&amp;", "&")
+            posts.append({
+                "id": shortcode,
+                "shortcode": shortcode,
+                "timestamp": 0,
+                "caption": "",
+                "like_count": 0,
+                "comment_count": 0,
+                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
+            })
+        return posts
+    except Exception as e:
+        logger.error(f"imginn posts error: {e}")
+    return []
 
 async def _get_posts_via_picnob(username: str) -> list:
-    """Парсинг постов через picnob.com (как обычный браузер)"""
     url = f"https://www.picnob.com/profile/{username}/"
     try:
         async with aiohttp.ClientSession() as s:
-            # Используем BROWSER_HEADERS чтобы Cloudflare пустил нас
             async with s.get(url, headers=BROWSER_HEADERS, timeout=20) as resp:
                 if resp.status != 200:
-                    logger.warning(f"picnob posts {username} → {resp.status}")
                     return []
                 html_text = await resp.text()
 
         posts = []
         items = re.findall(r'data-shortcode="([^"]+)"[^>]*>.*?<img[^>]+(?:data-src|src)="([^"]+)"', html_text, re.DOTALL)
-        for shortcode, img_url in items[:10]:
+        for shortcode, img_url in items:
             clean_url = img_url.replace("&amp;", "&")
             posts.append({
                 "id": shortcode,
