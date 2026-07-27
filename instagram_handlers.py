@@ -379,11 +379,11 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if not media_list:
             continue
 
-        m = media_list[0]  # обложка / первое медиа
+        m = media_list[0]
         is_video = m.get("type") == "video"
 
-        # Для видео пробуем mp4-url, для фото — просто url
-        vid_url  = m.get("url", "") if is_video else ""
+        # Для видео пробуем mp4, для фото — url/thumb
+        vid_url   = m.get("url", "") if is_video else ""
         thumb_url = m.get("thumb") or m.get("url", "")
         fetch_url = vid_url or thumb_url
 
@@ -405,12 +405,11 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if link:
             cap += f"\n🔗 {link}"
 
-        # Видео отправляем как InputMediaVideo только если URL реально mp4.
-        # Иначе (скраперы дают jpg-превью) — InputMediaPhoto с иконкой 🎬.
-        url_is_real_video = is_video and vid_url and (
+        # Настоящее mp4-видео → InputMediaVideo, иначе (jpg-превью) → Photo с 🎬
+        real_video = is_video and vid_url and (
             vid_url.lower().endswith(".mp4") or "/videos/" in vid_url
         )
-        if url_is_real_video:
+        if real_video:
             album_items.append(InputMediaVideo(
                 media=BufferedInputFile(data, filename=f"post_{i}.mp4"),
                 caption=cap[:1020]
@@ -430,28 +429,24 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         )
         return
 
-    # Отправляем альбом (Telegram ≤ 10 элементов за раз)
+    # Отправляем альбом (Telegram ≤ 10 за раз)
     try:
         await callback.message.answer_media_group(album_items)
     except Exception as e:
-        logger.error(f"IG send unified album error: {e}")
-        await callback.message.answer("❌ Ошибка отправки альбома (возможно, видео слишком большое).")
+        logger.error(f"IG send album error: {e}")
+        await callback.message.answer("❌ Ошибка отправки альбома.")
 
     # Кнопка «Далее»
     next_cursor = result.get("next_cursor", "")
     has_more    = result.get("has_more", False)
     total       = result.get("total_cached", 0)
 
-    if next_cursor:
-        cursor_key = _store_cursor(f"{ig_username}_{next_cursor[:40]}", next_cursor)
-    else:
-        cursor_key = ""
+    cursor_key = _store_cursor(f"{ig_username}_{next_cursor[:40]}", next_cursor) if next_cursor else ""
 
-    # Вычисляем диапазон показанных постов
-    shown_up_to  = int(next_cursor) if next_cursor.isdigit() else 0
-    shown_from   = max(0, shown_up_to - 10)
-    total_str    = f" из ~{total}" if total else ""
-    footer = f"✅ Посты {shown_from + 1}–{shown_from + len(album_items)}{total_str} @{ig_username}"
+    shown_up = int(next_cursor) if next_cursor.isdigit() else 0
+    shown_from = max(0, shown_up - 10)
+    total_str  = f" из ~{total}" if total else ""
+    footer = f"✅ Посты {shown_from+1}–{shown_from+len(album_items)}{total_str} @{ig_username}"
     await callback.message.answer(
         footer,
         reply_markup=_posts_keyboard(ig_username, callback.from_user.id, cursor_key, has_more)
