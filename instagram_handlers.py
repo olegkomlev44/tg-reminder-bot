@@ -371,7 +371,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         )
         return
 
-    # Собираем все первые фото/видео из постов в один Телеграм-альбом
+    # Собираем первые фото/видео из постов в один Телеграм-альбом
     album_items = []
 
     for i, post in enumerate(posts[:10]):
@@ -379,27 +379,24 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if not media_list:
             continue
 
-        m = media_list[0]  # берём обложку/первое медиа поста
+        m = media_list[0]  # обложка / первое медиа
         is_video = m.get("type") == "video"
 
-        # Для видео пробуем сначала video_url, потом thumb.
-        # Если получим картинку — отправляем как фото с иконкой 🎬.
-        vid_url = m.get("url", "") if is_video else ""
-        thumb_url = m.get("thumb", "") or m.get("url", "")
-        actual_url = vid_url or thumb_url
+        # Для видео пробуем mp4-url, для фото — просто url
+        vid_url  = m.get("url", "") if is_video else ""
+        thumb_url = m.get("thumb") or m.get("url", "")
+        fetch_url = vid_url or thumb_url
 
-        data = await _download(actual_url)
-        if not data:
-            # Попробуем запасной URL
-            if thumb_url and thumb_url != actual_url:
-                data = await _download(thumb_url)
+        data = await _download(fetch_url)
+        if not data and thumb_url and thumb_url != fetch_url:
+            data = await _download(thumb_url)
         if not data:
             continue
 
-        caption = post.get("caption", "").strip()
-        likes = post.get("like_count", 0)
+        caption  = post.get("caption", "").strip()
+        likes    = post.get("like_count", 0)
         comments = post.get("comment_count", 0)
-        sc = post.get("shortcode", "")
+        sc   = post.get("shortcode", "")
         link = f"https://www.instagram.com/p/{sc}/" if sc else ""
 
         cap = f"❤️ {_fmt_count(likes)}  💬 {_fmt_count(comments)}"
@@ -408,19 +405,17 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if link:
             cap += f"\n🔗 {link}"
 
-        # Видео через скраперы обычно недоступно напрямую —
-        # отдаём превью с пометкой 🎬, чтобы не падал альбом.
-        url_is_video = vid_url and (
+        # Видео отправляем как InputMediaVideo только если URL реально mp4.
+        # Иначе (скраперы дают jpg-превью) — InputMediaPhoto с иконкой 🎬.
+        url_is_real_video = is_video and vid_url and (
             vid_url.lower().endswith(".mp4") or "/videos/" in vid_url
         )
-
-        if is_video and url_is_video:
+        if url_is_real_video:
             album_items.append(InputMediaVideo(
                 media=BufferedInputFile(data, filename=f"post_{i}.mp4"),
                 caption=cap[:1020]
             ))
         else:
-            # Фото (или видео-превью если реального видео нет)
             prefix = "🎬 " if is_video else ""
             album_items.append(InputMediaPhoto(
                 media=BufferedInputFile(data, filename=f"post_{i}.jpg"),
@@ -435,7 +430,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         )
         return
 
-    # Отправляем весь пак как один альбом (Телеграм лимитирует до 10 элементов)
+    # Отправляем альбом (Telegram ≤ 10 элементов за раз)
     try:
         await callback.message.answer_media_group(album_items)
     except Exception as e:
@@ -444,18 +439,18 @@ async def callback_ig_posts(callback: types.CallbackQuery):
 
     # Кнопка «Далее»
     next_cursor = result.get("next_cursor", "")
-    has_more = result.get("has_more", False)
-    total = result.get("total_cached", 0)
+    has_more    = result.get("has_more", False)
+    total       = result.get("total_cached", 0)
 
     if next_cursor:
         cursor_key = _store_cursor(f"{ig_username}_{next_cursor[:40]}", next_cursor)
     else:
         cursor_key = ""
 
-    # Вычисляем текущий offset из cursor_key (текущий — это следующий минус 10)
-    shown_up_to = int(next_cursor) if next_cursor.isdigit() else 0
-    shown_from = max(0, shown_up_to - 10)
-    total_str = f" из ~{total}" if total else ""
+    # Вычисляем диапазон показанных постов
+    shown_up_to  = int(next_cursor) if next_cursor.isdigit() else 0
+    shown_from   = max(0, shown_up_to - 10)
+    total_str    = f" из ~{total}" if total else ""
     footer = f"✅ Посты {shown_from + 1}–{shown_from + len(album_items)}{total_str} @{ig_username}"
     await callback.message.answer(
         footer,
