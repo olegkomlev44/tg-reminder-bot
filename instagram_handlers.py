@@ -26,7 +26,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from instagram_viewer import (
     init_ig_db,
-    get_user_info, get_stories, get_posts,
+    get_user_info, get_stories, get_posts, get_avatar_bytes,
     ig_subscribe, ig_unsubscribe, ig_get_subscriptions,
     ig_is_subscribed, ig_update_last_seen,
     ig_all_subscriptions, ig_mark_sent, ig_already_sent,
@@ -60,10 +60,13 @@ def _clean_username(text: str) -> str:
 
 
 async def _download(url: str) -> bytes | None:
+    """
+    Скачать медиафайл с CDN Instagram.
+    CDN (cdninstagram.com / scontent-*.cdninstagram.com) требует
+    корректный Referer, иначе отдаёт 403 или пустое тело.
+    """
     if not url:
         return None
-    # CDN инстаграма (cdninstagram.com / scontent-*.cdninstagram.com)
-    # блокирует запросы без Referer — отдаёт пустое тело или 403
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -77,42 +80,20 @@ async def _download(url: str) -> bytes | None:
         "Sec-Fetch-Mode": "no-cors",
         "Sec-Fetch-Site": "cross-site",
     }
-    # Прямой запрос
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
                 url, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=45),
+                timeout=aiohttp.ClientTimeout(total=60),
                 ssl=False,
                 allow_redirects=True,
             ) as resp:
                 if resp.status == 200:
                     data = await resp.read()
-                    if len(data) > 500:
-                        return data
-                else:
-                    logger.warning(f"IG download {url[:60]!r} → {resp.status}")
+                    return data if len(data) > 500 else None
+                logger.warning(f"IG download {url[:60]!r} → {resp.status}")
     except Exception as e:
         logger.error(f"IG download {url[:60]}: {e}")
-
-    # Fallback: прокси wsrv.nl (обходит CDN-блокировки Instagram)
-    import urllib.parse
-    proxy_url = f"https://wsrv.nl/?url={urllib.parse.quote(url, safe='')}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                proxy_url, headers={"User-Agent": headers["User-Agent"]},
-                timeout=aiohttp.ClientTimeout(total=30),
-                allow_redirects=True,
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    if len(data) > 500:
-                        logger.info(f"wsrv.nl proxy помог для {url[:50]}")
-                        return data
-    except Exception as e:
-        logger.debug(f"wsrv.nl proxy error: {e}")
-
     return None
 
 
@@ -273,18 +254,25 @@ async def _show_profile(source, ig_username: str, tg_user_id: int):
 
     kb = _profile_keyboard(ig_username, tg_user_id)
 
-    # Отправляем аватарку
-    avatar_url = info.get("avatar_url", "")
-    if avatar_url:
-        avatar_bytes = await _download(avatar_url)
-        if avatar_bytes:
-            await source.answer_photo(
-                BufferedInputFile(avatar_bytes, filename="avatar.jpg"),
-                caption=text,
-                parse_mode="HTML",
-                reply_markup=kb
-            )
-            return
+    # Аватарка: сначала через instagrapi (надёжно), fallback — прямой URL
+    avatar_bytes: bytes | None = None
+    try:
+        avatar_bytes = await get_avatar_bytes(ig_username)
+    except Exception:
+        pass
+    if not avatar_bytes:
+        avatar_url = info.get("avatar_url", "")
+        if avatar_url:
+            avatar_bytes = await _download(avatar_url)
+
+    if avatar_bytes:
+        await source.answer_photo(
+            BufferedInputFile(avatar_bytes, filename="avatar.jpg"),
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+        return
 
     await source.answer(text, parse_mode="HTML", reply_markup=kb)
 
@@ -619,7 +607,9 @@ async def _check_user(bot: Bot, ig_username: str, subs: list[dict]):
             if current_avatar and current_avatar != last_seen:
                 # Новая аватарка!
                 ig_update_last_seen(user_id, ig_username, "avatar", current_avatar)
-                data = await _download(current_avatar)
+                data = await get_avatar_bytes(ig_username)
+                if not data:
+                    data = await _download(current_avatar)
                 if data:
                     try:
                         await bot.send_photo(
