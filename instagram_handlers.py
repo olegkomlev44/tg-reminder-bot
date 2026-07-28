@@ -77,6 +77,7 @@ async def _download(url: str) -> bytes | None:
         "Sec-Fetch-Mode": "no-cors",
         "Sec-Fetch-Site": "cross-site",
     }
+    # Прямой запрос
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
@@ -87,10 +88,31 @@ async def _download(url: str) -> bytes | None:
             ) as resp:
                 if resp.status == 200:
                     data = await resp.read()
-                    return data if len(data) > 500 else None
-                logger.warning(f"IG download {url[:60]!r} → {resp.status}")
+                    if len(data) > 500:
+                        return data
+                else:
+                    logger.warning(f"IG download {url[:60]!r} → {resp.status}")
     except Exception as e:
         logger.error(f"IG download {url[:60]}: {e}")
+
+    # Fallback: прокси wsrv.nl (обходит CDN-блокировки Instagram)
+    import urllib.parse
+    proxy_url = f"https://wsrv.nl/?url={urllib.parse.quote(url, safe='')}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                proxy_url, headers={"User-Agent": headers["User-Agent"]},
+                timeout=aiohttp.ClientTimeout(total=30),
+                allow_redirects=True,
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    if len(data) > 500:
+                        logger.info(f"wsrv.nl proxy помог для {url[:50]}")
+                        return data
+    except Exception as e:
+        logger.debug(f"wsrv.nl proxy error: {e}")
+
     return None
 
 
