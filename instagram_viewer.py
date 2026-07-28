@@ -1,58 +1,490 @@
 """
-instagram_viewer.py — анонимный просмотр Instagram через Telegram-бота.
+instagram_viewer.py — доступ к Instagram через instagrapi.
 
-Возможности:
-- истории (stories) пользователя
-- посты: первые 10 альбомом, кнопка «Далее»
-- подписка на посты / истории / аватарку
-- авто-уведомления при новых постах / историях
-- медиа не сохраняются на сервере — stream → Telegram → delete
+Архитектура:
+- Пул аккаунтов-доноров (ротация при 429 / LoginRequired / PleaseWaitFewMinutes)
+- Сессии сохраняются в JSON-файлы (повторный login только при необходимости)
+- Публичный интерфейс совпадает со старым файлом:
+    get_user_info(username) → dict | None
+    get_stories(username)   → list
+    get_posts(username, after_cursor) → dict
+  + всё из подписок (SQLite) — без изменений
+
+Установка:
+    pip install instagrapi
+
+Конфигурация — переменные окружения (или .env):
+    IG_ACCOUNTS=login1:password1,login2:password2,login3:password3
+    IG_SESSION_DIR=/data/ig_sessions   # куда сохранять сессии (опционально)
+    DB_DIR=/data                       # для instagram.db (как раньше)
 """
 
+from __future__ import annotations
+
 import asyncio
-import io
+import json
 import logging
 import os
+import random
 import re
 import sqlite3
-import json
 import time
-import random
-import html
+from pathlib import Path
 from typing import Optional
-
-import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# ── КЭШ ПОСТОВ ───────────────────────────────────────────────────────────────
-import time as _time
+# ── ЗАВИСИМОСТЬ ───────────────────────────────────────────────────────────────
+try:
+    from instagrapi import Client
+    from instagrapi.exceptions import (
+        LoginRequired,
+        PleaseWaitFewMinutes,
+        UserNotFound,
+        PrivateAccount,
+        ClientError,
+        RateLimitError,
+    )
+    _INSTAGRAPI_OK = True
+except ImportError:
+    _INSTAGRAPI_OK = False
+    logger.error("instagrapi не установлена! pip install instagrapi")
+
+
+# ── КОНФИГ ────────────────────────────────────────────────────────────────────
+
+def _parse_accounts() -> list[tuple[str, str]]:
+    """Читаем IG_ACCOUNTS=login1:pass1,login2:pass2"""
+    raw = os.getenv("IG_ACCOUNTS", "")
+    accounts: list[tuple[str, str]] = []
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        login, _, pwd = pair.partition(":")
+        if login and pwd:
+            accounts.append((login.strip(), pwd.strip()))
+    return accounts
+
+
+def _session_dir() -> Path:
+    d = os.getenv("IG_SESSION_DIR") or os.getenv("DB_DIR") or "/data"
+    p = Path(d) / "ig_sessions"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+# ── POOL КЛИЕНТОВ ─────────────────────────────────────────────────────────────
+
+class _AccountPool:
+    """
+    Пул instagrapi.Client.
+    При ошибках (429, LoginRequired) переключается на следующий аккаунт.
+    """
+
+    def __init__(self):
+        self._accounts = _parse_accounts()
+        self._clients: list[Client] = []
+        self._current = 0
+        self._lock = asyncio.Lock()
+        self._initialized = False
+
+    # ── инициализация (вызывается один раз при первом запросе) ──────────────
+
+    def _make_client(self, login: str, pwd: str) -> Client:
+        cl = Client()
+        cl.delay_range = [2, 5]  # пауза между запросами внутри клиента
+        session_file = _session_dir() / f"{login}.json"
+
+        if session_file.exists():
+            try:
+                cl.load_settings(str(session_file))
+                cl.login(login, pwd)          # обновляет токены без SMS
+                logger.info(f"[pool] ✅ сессия загружена: {login}")
+                return cl
+            except Exception as e:
+                logger.warning(f"[pool] сессия {login} устарела ({e}), перелогин...")
+
+        # Полный логин
+        cl.login(login, pwd)
+        cl.dump_settings(str(session_file))
+        logger.info(f"[pool] 🔐 свежий логин: {login}")
+        return cl
+
+    def _init_all(self):
+        if not _INSTAGRAPI_OK:
+            return
+        if not self._accounts:
+            logger.error("[pool] IG_ACCOUNTS не задан — Instagram работать не будет")
+            return
+        for login, pwd in self._accounts:
+            try:
+                cl = self._make_client(login, pwd)
+                self._clients.append(cl)
+            except Exception as e:
+                logger.error(f"[pool] не удалось залогинить {login}: {e}")
+        self._initialized = True
+        logger.info(f"[pool] готов, аккаунтов: {len(self._clients)}/{len(self._accounts)}")
+
+    # ── получение клиента ────────────────────────────────────────────────────
+
+    async def _ensure_init(self):
+        if self._initialized:
+            return
+        async with self._lock:
+            if not self._initialized:
+                await asyncio.get_event_loop().run_in_executor(None, self._init_all)
+
+    def _next_client(self) -> Optional[Client]:
+        if not self._clients:
+            return None
+        self._current = (self._current + 1) % len(self._clients)
+        return self._clients[self._current]
+
+    def _current_client(self) -> Optional[Client]:
+        if not self._clients:
+            return None
+        return self._clients[self._current % len(self._clients)]
+
+    # ── выполнение запроса с ротацией ────────────────────────────────────────
+
+    async def run(self, fn, *args, retries: int = 3, **kwargs):
+        """
+        Запустить fn(client, *args, **kwargs) в executor.
+        При 429 / LoginRequired переключить аккаунт и повторить.
+        """
+        await self._ensure_init()
+        if not self._clients:
+            return None
+
+        last_err = None
+        for attempt in range(retries):
+            cl = self._current_client()
+            if cl is None:
+                return None
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: fn(cl, *args, **kwargs)
+                )
+                return result
+            except (PleaseWaitFewMinutes, RateLimitError) as e:
+                logger.warning(f"[pool] 429 на акк #{self._current}, ротация... ({e})")
+                cl = self._next_client()
+                await asyncio.sleep(random.uniform(3, 8))
+                last_err = e
+            except LoginRequired as e:
+                logger.warning(f"[pool] LoginRequired на #{self._current}, переlogin...")
+                login, pwd = self._accounts[self._current % len(self._accounts)]
+                try:
+                    new_cl = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: self._make_client(login, pwd)
+                    )
+                    self._clients[self._current % len(self._clients)] = new_cl
+                except Exception:
+                    self._next_client()
+                last_err = e
+            except (UserNotFound, PrivateAccount) as e:
+                # Не ошибка пула — пробрасываем сразу
+                raise
+            except ClientError as e:
+                logger.warning(f"[pool] ClientError attempt {attempt}: {e}")
+                self._next_client()
+                await asyncio.sleep(2)
+                last_err = e
+            except Exception as e:
+                logger.error(f"[pool] неожиданная ошибка: {e}")
+                last_err = e
+                break
+
+        logger.error(f"[pool] все попытки исчерпаны, последняя ошибка: {last_err}")
+        return None
+
+
+_POOL = _AccountPool()
+
+
+# ── КЭШ ПОСТОВ ────────────────────────────────────────────────────────────────
+
 _POSTS_CACHE: dict = {}
 _POSTS_CACHE_TTL = 600  # 10 минут
 
+
 def _cache_set(username: str, posts: list) -> None:
-    _POSTS_CACHE[username] = {"posts": posts, "ts": _time.time()}
+    _POSTS_CACHE[username] = {"posts": posts, "ts": time.time()}
+
 
 def _cache_get(username: str) -> list | None:
     e = _POSTS_CACHE.get(username)
     if not e:
         return None
-    if _time.time() - e["ts"] > _POSTS_CACHE_TTL:
+    if time.time() - e["ts"] > _POSTS_CACHE_TTL:
         del _POSTS_CACHE[username]
         return None
     return e["posts"]
 
-def _is_vid(url: str) -> bool:
-    """True если URL указывает на видео."""
-    if not url:
-        return False
-    u = url.lower().split("?")[0]
-    return u.endswith(".mp4") or "/videos/" in u
 
-# ── БД ────────────────────────────────────────────────────────────────────────
+# ── КОНВЕРТЕРЫ instagrapi → наш формат ───────────────────────────────────────
+
+def _user_to_dict(user) -> dict:
+    """UserShort / UserInfo → наш dict."""
+    try:
+        followers  = getattr(user, "follower_count", 0) or 0
+        following  = getattr(user, "following_count", 0) or 0
+        posts_cnt  = getattr(user, "media_count", 0) or 0
+        biography  = getattr(user, "biography", "") or ""
+        is_private = getattr(user, "is_private", False)
+        is_verified= getattr(user, "is_verified", False)
+        full_name  = getattr(user, "full_name", "") or ""
+        username   = getattr(user, "username", "") or ""
+        pk         = str(getattr(user, "pk", "") or "")
+
+        # Аватарка — берём HD, fallback обычная
+        avatar_url = ""
+        hd = getattr(user, "profile_pic_url_hd", None)
+        sd = getattr(user, "profile_pic_url", None)
+        if hd:
+            avatar_url = str(hd)
+        elif sd:
+            avatar_url = str(sd)
+
+        return {
+            "id":          pk,
+            "username":    username,
+            "full_name":   full_name,
+            "biography":   biography,
+            "followers":   followers,
+            "following":   following,
+            "posts_count": posts_cnt,
+            "avatar_url":  avatar_url,
+            "is_private":  is_private,
+            "is_verified": is_verified,
+            "posts":       [],
+        }
+    except Exception as e:
+        logger.error(f"_user_to_dict error: {e}")
+        return {}
+
+
+def _media_to_post(media) -> dict:
+    """instagrapi Media → наш dict поста."""
+    try:
+        sc  = getattr(media, "code", "") or str(getattr(media, "pk", ""))
+        pid = str(getattr(media, "pk", sc))
+        ts  = int(getattr(media, "taken_at", 0).timestamp() if getattr(media, "taken_at", None) else 0)
+        cap = getattr(media, "caption_text", "") or ""
+        likes    = getattr(media, "like_count", 0) or 0
+        comments = getattr(media, "comment_count", 0) or 0
+
+        media_type = getattr(media, "media_type", 1)  # 1=photo, 2=video, 8=album
+
+        def _best_url(resource) -> str:
+            """Наилучший URL из ресурса."""
+            # Для видео
+            vv = getattr(resource, "video_url", None)
+            if vv:
+                return str(vv)
+            # Для фото — берём наибольшее разрешение из thumbnail_url
+            tu = getattr(resource, "thumbnail_url", None)
+            if tu:
+                return str(tu)
+            return ""
+
+        urls: list[dict] = []
+
+        if media_type == 8:  # альбом
+            resources = getattr(media, "resources", []) or []
+            for r in resources:
+                r_type = getattr(r, "media_type", 1)
+                if r_type == 2:
+                    urls.append({"type": "video",
+                                 "url":   str(getattr(r, "video_url", "") or ""),
+                                 "thumb": str(getattr(r, "thumbnail_url", "") or "")})
+                else:
+                    u = str(getattr(r, "thumbnail_url", "") or "")
+                    urls.append({"type": "photo", "url": u, "thumb": u})
+        elif media_type == 2:  # видео
+            vurl  = str(getattr(media, "video_url", "") or "")
+            thumb = str(getattr(media, "thumbnail_url", "") or "")
+            urls.append({"type": "video", "url": vurl, "thumb": thumb})
+        else:  # фото
+            u = str(getattr(media, "thumbnail_url", "") or "")
+            urls.append({"type": "photo", "url": u, "thumb": u})
+
+        return {
+            "id":            pid,
+            "shortcode":     sc,
+            "timestamp":     ts,
+            "caption":       cap[:500],
+            "like_count":    likes,
+            "comment_count": comments,
+            "media":         urls,
+        }
+    except Exception as e:
+        logger.error(f"_media_to_post error: {e}")
+        return {}
+
+
+def _story_to_dict(item) -> dict:
+    """StoryItem → наш dict истории."""
+    try:
+        pk  = str(getattr(item, "pk", "") or "")
+        mtype = getattr(item, "media_type", 1)
+        is_video = (mtype == 2)
+
+        if is_video:
+            url   = str(getattr(item, "video_url", "") or "")
+            thumb = str(getattr(item, "thumbnail_url", "") or "")
+            dur   = float(getattr(item, "video_duration", 15) or 15)
+        else:
+            url   = str(getattr(item, "thumbnail_url", "") or "")
+            thumb = url
+            dur   = 5.0
+
+        return {
+            "id":       pk,
+            "type":     "video" if is_video else "photo",
+            "url":      url,
+            "thumb":    thumb,
+            "duration": dur,
+        }
+    except Exception as e:
+        logger.error(f"_story_to_dict error: {e}")
+        return {}
+
+
+# ── ПУБЛИЧНЫЙ API ─────────────────────────────────────────────────────────────
+
+async def get_user_info(username: str) -> dict | None:
+    """Получить инфо о пользователе Instagram."""
+    username = username.lower().strip("@").strip()
+    if not username:
+        return None
+
+    def _fetch(cl: Client):
+        user = cl.user_info_by_username(username)
+        return _user_to_dict(user)
+
+    try:
+        result = await _POOL.run(_fetch)
+        if result:
+            logger.info(f"✅ get_user_info @{username}: {result.get('followers')} фолловеров")
+        return result
+    except UserNotFound:
+        logger.warning(f"UserNotFound: @{username}")
+        return None
+    except PrivateAccount:
+        logger.info(f"PrivateAccount: @{username}")
+        # Возвращаем минимальный dict с is_private=True
+        return {"id": "", "username": username, "full_name": username,
+                "biography": "", "followers": 0, "following": 0, "posts_count": 0,
+                "avatar_url": "", "is_private": True, "is_verified": False, "posts": []}
+    except Exception as e:
+        logger.error(f"get_user_info @{username}: {e}")
+        return None
+
+
+async def get_stories(username: str) -> list:
+    """Получить активные истории пользователя."""
+    info = await get_user_info(username)
+    if not info or info.get("is_private"):
+        return []
+
+    user_id = info.get("id", "")
+    if not user_id:
+        return []
+
+    def _fetch(cl: Client):
+        return cl.user_stories(int(user_id))
+
+    try:
+        items = await _POOL.run(_fetch)
+        if not items:
+            return []
+        stories = [_story_to_dict(s) for s in items]
+        stories = [s for s in stories if s.get("url")]
+        logger.info(f"✅ get_stories @{username}: {len(stories)} шт.")
+        return stories
+    except PrivateAccount:
+        return []
+    except Exception as e:
+        logger.error(f"get_stories @{username}: {e}")
+        return []
+
+
+async def get_posts(username: str, after_cursor: str = "") -> dict:
+    """
+    Получить посты пользователя.
+    after_cursor — числовой offset (строка) или пустая строка для начала.
+    """
+    info = await get_user_info(username)
+    if not info:
+        return {"posts": [], "next_cursor": "", "has_more": False}
+    if info.get("is_private"):
+        return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
+
+    user_id = info.get("id", "")
+    offset = int(after_cursor) if after_cursor.isdigit() else 0
+
+    # Кэш
+    all_posts = _cache_get(username)
+
+    if all_posts is None:
+        def _fetch(cl: Client):
+            # Загружаем до 33 постов (3 страницы × 12) для кэша
+            medias = cl.user_medias(int(user_id), amount=33)
+            return [_media_to_post(m) for m in medias if m]
+
+        try:
+            all_posts = await _POOL.run(_fetch) or []
+            # Фильтрация пустых
+            all_posts = [p for p in all_posts if p.get("id")]
+            if all_posts:
+                _cache_set(username, all_posts)
+                logger.info(f"📦 get_posts @{username}: {len(all_posts)} постов в кэш")
+        except PrivateAccount:
+            return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
+        except Exception as e:
+            logger.error(f"get_posts @{username}: {e}")
+            return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
+
+    chunk    = all_posts[offset: offset + 10]
+    has_more = (offset + 10) < len(all_posts)
+    next_cur = str(offset + 10) if has_more else ""
+
+    return {
+        "posts":        chunk,
+        "next_cursor":  next_cur,
+        "has_more":     has_more,
+        "total_cached": len(all_posts),
+        "user":         info,
+    }
+
+
+# ── АВАТАРКА (байты) ──────────────────────────────────────────────────────────
+
+async def get_avatar_bytes(username: str) -> bytes | None:
+    """Скачать аватарку через instagrapi (надёжнее, чем прямой URL)."""
+    import tempfile
+
+    def _fetch(cl: Client):
+        user = cl.user_info_by_username(username)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = cl.user_download_profile_pic(user.pk, folder=tmpdir)
+            with open(path, "rb") as f:
+                return f.read()
+
+    try:
+        return await _POOL.run(_fetch)
+    except Exception as e:
+        logger.error(f"get_avatar_bytes @{username}: {e}")
+        return None
+
+
+# ── БД (подписки — без изменений) ────────────────────────────────────────────
 
 def _db_path() -> str:
-    for candidate in [os.getenv("DB_DIR"), "/data", "/app/data", os.path.dirname(os.path.abspath(__file__))]:
+    for candidate in [os.getenv("DB_DIR"), "/data", "/app/data",
+                      os.path.dirname(os.path.abspath(__file__))]:
         if not candidate:
             continue
         try:
@@ -66,6 +498,7 @@ def _db_path() -> str:
             continue
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "instagram.db")
 
+
 IG_DB = _db_path()
 
 
@@ -75,7 +508,7 @@ def init_ig_db():
     c.execute("""CREATE TABLE IF NOT EXISTS ig_subscriptions (
         user_id     TEXT NOT NULL,
         ig_username TEXT NOT NULL,
-        sub_type    TEXT NOT NULL,   -- 'stories' | 'posts' | 'avatar'
+        sub_type    TEXT NOT NULL,
         last_seen   TEXT DEFAULT '',
         created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, ig_username, sub_type)
@@ -90,1544 +523,6 @@ def init_ig_db():
     conn.close()
     logger.info("🟢 Instagram DB инициализирована")
 
-
-# ── ЗАГОЛОВКИ ─────────────────────────────────────────────────────────────────
-
-# Заголовки браузера для обхода блокировок
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate",  # <-- Убрали br для стабильности
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
-}
-
-
-# Заголовки для API-запросов Instagram (внутренний API)
-IG_API_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-        "Version/17.0 Mobile/15E148 Safari/604.1"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "X-IG-App-ID": "936619743392459",
-    "X-ASBD-ID": "198387",
-    "X-IG-WWW-Claim": "0",
-    "Origin": "https://www.instagram.com",
-    "Referer": "https://www.instagram.com/",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
-}
-
-
-# ── ВСПОМОГАТЕЛЬНЫЕ ───────────────────────────────────────────────────────────
-
-async def _fetch_json(session: aiohttp.ClientSession, url: str, headers: dict, params: dict = None, timeout: int = 20) -> dict | None:
-    """GET → JSON или None при ошибке."""
-    try:
-        async with session.get(
-            url, params=params, headers=headers,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-            ssl=False  # некоторые scraper-сайты с самоподписанными сертами
-        ) as resp:
-            if resp.status != 200:
-                logger.warning(f"IG fetch {url[:80]} → {resp.status}")
-                return None
-            ct = resp.headers.get("Content-Type", "")
-            if "json" in ct:
-                return await resp.json(content_type=None)
-            text = await resp.text()
-            try:
-                return json.loads(text)
-            except Exception:
-                return {"_html": text}
-    except Exception as e:
-        logger.error(f"IG fetch error {url[:80]}: {e}")
-        return None
-
-
-async def _download_bytes(session: aiohttp.ClientSession, url: str, timeout: int = 60) -> bytes | None:
-    """Скачать файл в память."""
-    # CDN Instagram (cdninstagram.com / scontent-*.cdninstagram.com) требует
-    # Referer на instagram.com, иначе отдаёт 403/empty
-    cdn_headers = {
-        **BROWSER_HEADERS,
-        "Referer": "https://www.instagram.com/",
-        "Origin": "https://www.instagram.com",
-        "Sec-Fetch-Site": "cross-site",
-        "Sec-Fetch-Mode": "no-cors",
-        "Sec-Fetch-Dest": "image",
-    }
-    try:
-        async with session.get(
-            url, headers=cdn_headers,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-            ssl=False,
-            allow_redirects=True,
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.read()
-                return data if len(data) > 500 else None
-            logger.warning(f"IG download {url[:60]!r} → {resp.status}")
-    except Exception as e:
-        logger.error(f"IG download error: {e}")
-    return None
-
-async def _get_user_via_ig_meta(username: str) -> dict | None:
-    """Парсинг OG мета-тегов напрямую с Instagram через несколько User-Agent."""
-    url = f"https://www.instagram.com/{username}/"
-    user_agents = [
-        "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-        "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        "Twitterbot/1.0",
-        "LinkedInBot/1.0",
-    ]
-    for ua in user_agents:
-        try:
-            headers = {"User-Agent": ua, "Accept-Language": "en-US,en;q=0.9"}
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    url, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=12),
-                    allow_redirects=True, ssl=False,
-                ) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"ig_meta [{ua[:20]}] {username} → {resp.status}")
-                        continue
-                    html_text = await resp.text()
-
-            meta_desc  = re.search(r'<meta property="og:description" content="([^"]*)"', html_text)
-            meta_title = re.search(r'<meta property="og:title" content="([^"]*)"', html_text)
-            meta_image = re.search(r'<meta property="og:image" content="([^"]*)"', html_text)
-
-            if not meta_desc or not meta_title:
-                logger.debug(f"ig_meta [{ua[:20]}]: нет og-тегов для @{username}")
-                continue
-
-            desc = html.unescape(meta_desc.group(1))
-
-            def _pn(s_val: str) -> int:
-                if not s_val: return 0
-                s_val = s_val.upper().replace(",", "").replace(" ", "")
-                if "M" in s_val: return int(float(s_val.replace("M", "")) * 1_000_000)
-                if "K" in s_val: return int(float(s_val.replace("K", "")) * 1_000)
-                try: return int(s_val)
-                except: return 0
-
-            f_m    = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowers', desc)
-            fing_m = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowing', desc)
-            p_m    = re.search(r'([\d,KkMm.]+)\s+[Pp]osts', desc)
-
-            id_m = re.search(r'"profilePage_(\d+)"', html_text) or                    re.search(r'"id":"(\d+)"', html_text)
-            user_id = id_m.group(1) if id_m else ""
-
-            title = html.unescape(meta_title.group(1))
-            nm = re.search(r'^(.+?)\s*[@(]', title)
-            full_name = nm.group(1).strip() if nm else username
-
-            priv = bool(re.search(r'is_private.*?:.*?true', html_text, re.I))
-
-            logger.info(f"✅ ig_meta [{ua[:20]}] вернул данные @{username}")
-            return {
-                "id": user_id, "username": username, "full_name": full_name,
-                "biography": "",
-                "followers":   _pn(f_m.group(1) if f_m else ""),
-                "following":   _pn(fing_m.group(1) if fing_m else ""),
-                "posts_count": _pn(p_m.group(1) if p_m else ""),
-                "avatar_url": meta_image.group(1).replace("\\u0026", "&") if meta_image else "",
-                "is_private": priv, "is_verified": False, "posts": [],
-            }
-        except Exception as e:
-            logger.warning(f"ig_meta [{ua[:20]}] error @{username}: {e}")
-    return None
-
-# ── МЕТОД 1: SCRAPER VIA PICNOB ───────────────────────────────────────────────
-
-async def _get_user_via_picnob(username: str) -> dict | None:
-    """Получить данные профиля через picnob.com (публичный парсинг без API)."""
-    url = f"https://www.picnob.com/profile/{username}/"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(f"picnob {username} → {resp.status}")
-                    return None
-                html = await resp.text()
-
-        # Парсим JSON из window.__additionalData или __reactRouterContext
-        # Ищем ключевые данные профиля через regex
-        info = {}
-
-        # Извлекаем количество подписчиков
-        followers_match = re.search(r'"edge_followed_by":\{"count":(\d+)\}', html)
-        following_match = re.search(r'"edge_follow":\{"count":(\d+)\}', html)
-        posts_match = re.search(r'"edge_owner_to_timeline_media":\{"count":(\d+)', html)
-        fullname_match = re.search(r'"full_name":"([^"]*)"', html)
-        bio_match = re.search(r'"biography":"([^"]*)"', html)
-        avatar_match = re.search(r'"profile_pic_url_hd":"([^"]+)"', html)
-        if not avatar_match:
-            avatar_match = re.search(r'"profile_pic_url":"([^"]+)"', html)
-        id_match = re.search(r'"id":"(\d+)"', html)
-        private_match = re.search(r'"is_private":(true|false)', html)
-        verified_match = re.search(r'"is_verified":(true|false)', html)
-
-        if not (followers_match or id_match):
-            # Пробуем альтернативный парсинг meta-тегов
-            meta_desc = re.search(r'<meta property="og:description" content="([^"]*)"', html)
-            meta_title = re.search(r'<meta property="og:title" content="([^"]*)"', html)
-            if meta_desc and meta_title:
-                # "969 Followers, 291 Following, 55 Posts - See Instagram..."
-                desc = meta_desc.group(1)
-                followers_m = re.search(r'([\d,]+)\s+Followers?', desc)
-                following_m = re.search(r'([\d,]+)\s+Following', desc)
-                posts_m = re.search(r'([\d,]+)\s+Posts?', desc)
-                if followers_m:
-                    info["followers"] = int(followers_m.group(1).replace(",", ""))
-                if following_m:
-                    info["following"] = int(following_m.group(1).replace(",", ""))
-                if posts_m:
-                    info["posts_count"] = int(posts_m.group(1).replace(",", ""))
-                # username из title
-                title = meta_title.group(1)
-                name_m = re.search(r'^(.+?)\s*[@(]', title)
-                if name_m:
-                    info["full_name"] = name_m.group(1).strip()
-                # avatar
-                avatar_og = re.search(r'<meta property="og:image" content="([^"]+)"', html)
-                if avatar_og:
-                    info["avatar_url"] = avatar_og.group(1).replace("\\u0026", "&")
-                if info.get("followers") is not None:
-                    info.update({
-                        "id": "",
-                        "username": username,
-                        "biography": "",
-                        "is_private": False,
-                        "is_verified": False,
-                        "posts": [],
-                    })
-                    logger.info(f"picnob meta-парсинг успешен для @{username}")
-                    return info
-
-            logger.warning(f"picnob: не удалось распарсить данные @{username}")
-            return None
-
-        info = {
-            "id": id_match.group(1) if id_match else "",
-            "username": username,
-            "full_name": _unescape_unicode(fullname_match.group(1)) if fullname_match else "",
-            "biography": _unescape_unicode(bio_match.group(1)) if bio_match else "",
-            "followers": int(followers_match.group(1)) if followers_match else 0,
-            "following": int(following_match.group(1)) if following_match else 0,
-            "posts_count": int(posts_match.group(1)) if posts_match else 0,
-            "avatar_url": avatar_match.group(1).replace("\\u0026", "&") if avatar_match else "",
-            "is_private": (private_match.group(1) == "true") if private_match else False,
-            "is_verified": (verified_match.group(1) == "true") if verified_match else False,
-            "posts": [],
-        }
-        logger.info(f"picnob успешно: @{username} ({info['followers']} подписчиков)")
-        return info
-    except Exception as e:
-        logger.error(f"picnob error @{username}: {e}")
-        return None
-
-
-# ── МЕТОД 2: IMGINN ───────────────────────────────────────────────────────────
-
-async def _get_user_via_imginn(username: str) -> dict | None:
-    """Получить данные профиля через imginn.com."""
-    url = f"https://imginn.com/{username}/"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(f"imginn {username} → {resp.status}")
-                    return None
-                html = await resp.text()
-
-        info = {}
-
-        # imginn использует специфичный HTML
-        # Парсим через meta + inline данные
-        meta_desc = re.search(r'<meta name="description" content="([^"]*)"', html)
-        meta_og_image = re.search(r'<meta property="og:image" content="([^"]+)"', html)
-        meta_title = re.search(r'<meta property="og:title" content="([^"]*)"', html)
-
-        # Счётчики
-        followers_m = re.search(r'([\d,]+)\s*followers', html, re.IGNORECASE)
-        following_m = re.search(r'([\d,]+)\s*following', html, re.IGNORECASE)
-        posts_m = re.search(r'([\d,]+)\s*posts', html, re.IGNORECASE)
-
-        # Full name
-        fullname_m = re.search(r'<h1[^>]*class="[^"]*fullname[^"]*"[^>]*>([^<]+)</h1>', html)
-        if not fullname_m:
-            fullname_m = re.search(r'<span[^>]*class="[^"]*fullname[^"]*"[^>]*>([^<]+)</span>', html)
-
-        # Bio
-        bio_m = re.search(r'<p[^>]*class="[^"]*desc[^"]*"[^>]*>(.*?)</p>', html, re.DOTALL)
-
-        if not (followers_m or posts_m):
-            logger.warning(f"imginn: не удалось распарсить @{username}")
-            return None
-
-        avatar_url = meta_og_image.group(1) if meta_og_image else ""
-
-        info = {
-            "id": "",
-            "username": username,
-            "full_name": fullname_m.group(1).strip() if fullname_m else (username if not meta_title else re.sub(r'\s*[@(].*', '', meta_title.group(1)).strip()),
-            "biography": re.sub(r'<[^>]+>', '', bio_m.group(1)).strip() if bio_m else "",
-            "followers": int(followers_m.group(1).replace(",", "")) if followers_m else 0,
-            "following": int(following_m.group(1).replace(",", "")) if following_m else 0,
-            "posts_count": int(posts_m.group(1).replace(",", "")) if posts_m else 0,
-            "avatar_url": avatar_url,
-            "is_private": "private" in html.lower() and "this account is private" in html.lower(),
-            "is_verified": False,
-            "posts": [],
-        }
-        logger.info(f"imginn успешно: @{username}")
-        return info
-    except Exception as e:
-        logger.error(f"imginn error @{username}: {e}")
-        return None
-
-
-# ── МЕТОД 3: STORIESIG / ANON STORY VIEWER ────────────────────────────────────
-
-async def _get_user_via_storiesig(username: str) -> dict | None:
-    """Получить данные через storiesig API (публичный endpoint)."""
-    url = f"https://storiesig.info/api/ig/user/{username}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            data = await _fetch_json(s, url, headers=BROWSER_HEADERS, timeout=15)
-            if not data or data.get("error"):
-                return None
-            user = data.get("data") or data.get("user") or data
-            if not user or not isinstance(user, dict):
-                return None
-
-            return {
-                "id": str(user.get("pk") or user.get("id") or ""),
-                "username": user.get("username", username),
-                "full_name": user.get("full_name", ""),
-                "biography": user.get("biography", ""),
-                "followers": user.get("follower_count") or user.get("edge_followed_by", {}).get("count", 0),
-                "following": user.get("following_count") or user.get("edge_follow", {}).get("count", 0),
-                "posts_count": user.get("media_count") or user.get("edge_owner_to_timeline_media", {}).get("count", 0),
-                "avatar_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
-                "is_private": user.get("is_private", False),
-                "is_verified": user.get("is_verified", False),
-                "posts": [],
-            }
-    except Exception as e:
-        logger.error(f"storiesig error @{username}: {e}")
-    return None
-
-
-# ── МЕТОД 4: INSTAGRAM ОФИЦИАЛЬНЫЙ ENDPOINT (fallback) ────────────────────────
-
-async def _get_user_via_official(username: str) -> dict | None:
-    """
-    Попытка через официальный Instagram API (может не работать без cookies).
-    Используется как последний fallback.
-    """
-    url = f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url,
-                headers={**IG_API_HEADERS, "Accept": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    user = data.get("data", {}).get("user")
-                    if user:
-                        return {
-                            "id": user.get("id", ""),
-                            "username": user.get("username", username),
-                            "full_name": user.get("full_name", ""),
-                            "biography": user.get("biography", ""),
-                            "followers": user.get("edge_followed_by", {}).get("count", 0),
-                            "following": user.get("edge_follow", {}).get("count", 0),
-                            "posts_count": user.get("edge_owner_to_timeline_media", {}).get("count", 0),
-                            "avatar_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
-                            "is_private": user.get("is_private", False),
-                            "is_verified": user.get("is_verified", False),
-                            "posts": _extract_posts(user),
-                        }
-    except Exception as e:
-        logger.error(f"official API error @{username}: {e}")
-    return None
-
-
-# ── МЕТОД 5: INSTAGRAM VIA OEMBED ─────────────────────────────────────────────
-
-async def _get_user_via_oembed(username: str) -> dict | None:
-    """
-    Instagram oEmbed endpoint — работает для публичных профилей.
-    """
-    url = f"https://www.instagram.com/{username}/?__a=1&__d=dis"
-    headers = {
-        **BROWSER_HEADERS,
-        "Accept": "application/json, text/html, */*",
-        "X-Requested-With": "XMLHttpRequest"
-    }
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    try:
-                        data = await resp.json()
-                        user = data.get("graphql", {}).get("user") or data.get("data", {}).get("user")
-                        if user:
-                            return {
-                                "id": str(user.get("id", "")),
-                                "username": username,
-                                "full_name": user.get("full_name", username),
-                                "biography": user.get("biography", ""),
-                                "followers": user.get("edge_followed_by", {}).get("count", 0),
-                                "following": user.get("edge_follow", {}).get("count", 0),
-                                "posts_count": user.get("edge_owner_to_timeline_media", {}).get("count", 0),
-                                "avatar_url": user.get("profile_pic_url_hd") or user.get("profile_pic_url", ""),
-                                "is_private": user.get("is_private", False),
-                                "is_verified": user.get("is_verified", False),
-                                "posts": [],
-                            }
-                    except Exception:
-                        pass
-    except Exception as e:
-        logger.debug(f"oembed error @{username}: {e}")
-    return None
-
-
-
-# ── ГЛАВНАЯ ФУНКЦИЯ: КАСКАДНЫЙ ПОИСК ─────────────────────────────────────────
-
-async def _get_user_via_gramhir_profile(username: str) -> dict | None:
-    """Профиль через gramhir.com."""
-    for base in ["https://gramhir.com", "https://www.gramhir.com"]:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    f"{base}/profile/{username}/0",
-                    headers=BROWSER_HEADERS,
-                    timeout=aiohttp.ClientTimeout(total=20),
-                    allow_redirects=True, ssl=False,
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    html_text = await resp.text()
-
-            meta_d = re.search(r'<meta property="og:description" content="([^"]*)"', html_text)
-            meta_t = re.search(r'<meta property="og:title" content="([^"]*)"', html_text)
-            meta_i = re.search(r'<meta property="og:image" content="([^"]*)"', html_text)
-            if not meta_d or not meta_t:
-                continue
-
-            desc = html.unescape(meta_d.group(1))
-
-            def _pn(v: str) -> int:
-                if not v: return 0
-                v = v.upper().replace(",","").replace(" ","")
-                if "M" in v: return int(float(v.replace("M",""))*1_000_000)
-                if "K" in v: return int(float(v.replace("K",""))*1_000)
-                try: return int(v)
-                except: return 0
-
-            f_m  = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowers', desc)
-            fi_m = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowing', desc)
-            p_m  = re.search(r'([\d,KkMm.]+)\s+[Pp]osts', desc)
-            followers = _pn(f_m.group(1) if f_m else "")
-            if not followers and not p_m:
-                continue
-
-            title = html.unescape(meta_t.group(1))
-            nm = re.search(r'^(.+?)\s*[@(]', title)
-            logger.info(f"✅ gramhir-profile вернул @{username}")
-            return {
-                "id": "", "username": username,
-                "full_name": nm.group(1).strip() if nm else username,
-                "biography": "",
-                "followers": followers,
-                "following": _pn(fi_m.group(1) if fi_m else ""),
-                "posts_count": _pn(p_m.group(1) if p_m else ""),
-                "avatar_url": meta_i.group(1).replace("\\u0026","&") if meta_i else "",
-                "is_private": False, "is_verified": False, "posts": [],
-            }
-        except Exception as e:
-            logger.debug(f"gramhir-profile error: {e}")
-    return None
-
-
-async def _get_user_via_instanavigation(username: str) -> dict | None:
-    """Профиль через instanavigation.com."""
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://instanavigation.com/{username}/",
-                headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True, ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                html_text = await resp.text()
-
-        meta_d = re.search(r'<meta property="og:description" content="([^"]*)"', html_text)
-        meta_t = re.search(r'<meta property="og:title" content="([^"]*)"', html_text)
-        meta_i = re.search(r'<meta property="og:image" content="([^"]*)"', html_text)
-        if not meta_d or not meta_t:
-            return None
-
-        desc = html.unescape(meta_d.group(1))
-
-        def _pn(v: str) -> int:
-            if not v: return 0
-            v = v.upper().replace(",","").replace(" ","")
-            if "M" in v: return int(float(v.replace("M",""))*1_000_000)
-            if "K" in v: return int(float(v.replace("K",""))*1_000)
-            try: return int(v)
-            except: return 0
-
-        f_m  = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowers', desc)
-        fi_m = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowing', desc)
-        p_m  = re.search(r'([\d,KkMm.]+)\s+[Pp]osts', desc)
-        if not f_m and not p_m:
-            return None
-
-        title = html.unescape(meta_t.group(1))
-        nm = re.search(r'^(.+?)\s*[@(]', title)
-        logger.info(f"✅ instanavigation вернул @{username}")
-        return {
-            "id": "", "username": username,
-            "full_name": nm.group(1).strip() if nm else username,
-            "biography": "",
-            "followers": _pn(f_m.group(1) if f_m else ""),
-            "following": _pn(fi_m.group(1) if fi_m else ""),
-            "posts_count": _pn(p_m.group(1) if p_m else ""),
-            "avatar_url": meta_i.group(1).replace("\\u0026","&") if meta_i else "",
-            "is_private": False, "is_verified": False, "posts": [],
-        }
-    except Exception as e:
-        logger.debug(f"instanavigation error: {e}")
-    return None
-
-
-async def _get_user_via_snapinst(username: str) -> dict | None:
-    """Профиль через snapinst.app — стабильный вьювер."""
-    url = f"https://snapinst.app/user/{username}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True, ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(f"snapinst profile {username} → {resp.status}")
-                    return None
-                html_text = await resp.text()
-
-        # OG meta
-        meta_d = re.search(r'<meta property="og:description" content="([^"]*)"', html_text)
-        meta_t = re.search(r'<meta property="og:title" content="([^"]*)"', html_text)
-        meta_i = re.search(r'<meta property="og:image" content="([^"]*)"', html_text)
-
-        # inline JSON
-        f_m   = re.search(r'"follower_count"\s*:\s*(\d+)', html_text)
-        fi_m  = re.search(r'"following_count"\s*:\s*(\d+)', html_text)
-        p_m   = re.search(r'"media_count"\s*:\s*(\d+)', html_text)
-        fn_m  = re.search(r'"full_name"\s*:\s*"([^"]+)"', html_text)
-        bio_m = re.search(r'"biography"\s*:\s*"([^"]*)"', html_text)
-        av_m  = re.search(r'"profile_pic_url_hd"\s*:\s*"([^"]+)"', html_text)
-        if not av_m:
-            av_m = re.search(r'"profile_pic_url"\s*:\s*"([^"]+)"', html_text)
-        id_m  = re.search(r'"pk"\s*:\s*"?(\d+)"?', html_text)
-        prv_m = re.search(r'"is_private"\s*:\s*(true|false)', html_text)
-        ver_m = re.search(r'"is_verified"\s*:\s*(true|false)', html_text)
-
-        followers = int(f_m.group(1)) if f_m else 0
-        posts_cnt = int(p_m.group(1)) if p_m else 0
-
-        # Fallback: описание из og:description
-        if not followers and not posts_cnt and meta_d:
-            desc = html.unescape(meta_d.group(1))
-            fm2  = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowers', desc)
-            pm2  = re.search(r'([\d,KkMm.]+)\s+[Pp]osts', desc)
-            if fm2 or pm2:
-                def _pn(v: str) -> int:
-                    if not v: return 0
-                    v = v.upper().replace(",","").replace(" ","")
-                    if "M" in v: return int(float(v.replace("M",""))*1_000_000)
-                    if "K" in v: return int(float(v.replace("K",""))*1_000)
-                    try: return int(v)
-                    except: return 0
-                followers = _pn(fm2.group(1) if fm2 else "")
-                posts_cnt = _pn(pm2.group(1) if pm2 else "")
-
-        if not followers and not posts_cnt and not id_m:
-            return None
-
-        avatar_raw = av_m.group(1) if av_m else (meta_i.group(1) if meta_i else "")
-        avatar_url = avatar_raw.replace("\\u0026", "&").replace("\\/", "/")
-
-        full_name = ""
-        if fn_m:
-            full_name = _unescape_unicode(fn_m.group(1))
-        elif meta_t:
-            title = html.unescape(meta_t.group(1))
-            nm = re.search(r'^(.+?)\s*[@(]', title)
-            full_name = nm.group(1).strip() if nm else username
-
-        logger.info(f"✅ snapinst вернул данные @{username}")
-        return {
-            "id": id_m.group(1) if id_m else "",
-            "username": username,
-            "full_name": full_name or username,
-            "biography": _unescape_unicode(bio_m.group(1)) if bio_m else "",
-            "followers": followers,
-            "following": int(fi_m.group(1)) if fi_m else 0,
-            "posts_count": posts_cnt,
-            "avatar_url": avatar_url,
-            "is_private": (prv_m.group(1) == "true") if prv_m else False,
-            "is_verified": (ver_m.group(1) == "true") if ver_m else False,
-            "posts": [],
-        }
-    except Exception as e:
-        logger.warning(f"snapinst error @{username}: {e}")
-    return None
-
-
-async def _get_user_via_fastdl(username: str) -> dict | None:
-    """Профиль через fastdl.app."""
-    url = f"https://fastdl.app/instagram/user/{username}/"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True, ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(f"fastdl profile {username} → {resp.status}")
-                    return None
-                html_text = await resp.text()
-
-        meta_d = re.search(r'<meta property="og:description" content="([^"]*)"', html_text)
-        meta_t = re.search(r'<meta property="og:title" content="([^"]*)"', html_text)
-        meta_i = re.search(r'<meta property="og:image" content="([^"]*)"', html_text)
-        if not meta_d and not meta_t:
-            return None
-
-        desc = html.unescape(meta_d.group(1)) if meta_d else ""
-
-        def _pn(v: str) -> int:
-            if not v: return 0
-            v = v.upper().replace(",","").replace(" ","")
-            if "M" in v: return int(float(v.replace("M",""))*1_000_000)
-            if "K" in v: return int(float(v.replace("K",""))*1_000)
-            try: return int(v)
-            except: return 0
-
-        f_m  = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowers', desc)
-        fi_m = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowing', desc)
-        p_m  = re.search(r'([\d,KkMm.]+)\s+[Pp]osts', desc)
-
-        if not f_m and not p_m:
-            return None
-
-        title = html.unescape(meta_t.group(1)) if meta_t else username
-        nm = re.search(r'^(.+?)\s*[@(]', title)
-        full_name = nm.group(1).strip() if nm else username
-        avatar_url = meta_i.group(1).replace("\\u0026","&") if meta_i else ""
-
-        logger.info(f"✅ fastdl вернул данные @{username}")
-        return {
-            "id": "", "username": username, "full_name": full_name, "biography": "",
-            "followers": _pn(f_m.group(1) if f_m else ""),
-            "following":  _pn(fi_m.group(1) if fi_m else ""),
-            "posts_count": _pn(p_m.group(1) if p_m else ""),
-            "avatar_url": avatar_url,
-            "is_private": False, "is_verified": False, "posts": [],
-        }
-    except Exception as e:
-        logger.warning(f"fastdl error @{username}: {e}")
-    return None
-
-
-async def _get_posts_via_snapinst(username: str) -> list:
-    """Посты через snapinst.app."""
-    url = f"https://snapinst.app/user/{username}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True, ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-
-        posts: list = []
-        # ищем shortcode и thumbnail
-        items = re.findall(
-            r'href="[^"]*/p/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
-            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-            html_text, re.DOTALL,
-        )
-        if not items:
-            items = re.findall(
-                r'"shortcode"\s*:\s*"([A-Za-z0-9_-]{5,})".*?'
-                r'"display_url"\s*:\s*"([^"]+)"',
-                html_text, re.DOTALL,
-            )
-        seen: set = set()
-        for sc, img in items:
-            if sc in seen: continue
-            seen.add(sc)
-            clean = img.replace("&amp;", "&").replace("\\u0026", "&").replace("\\/", "/")
-            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                           "caption": "", "like_count": 0, "comment_count": 0,
-                           "media": [{"type": "video" if _is_vid(clean) else "photo",
-                                      "url": clean, "thumb": clean}]})
-        if posts:
-            logger.info(f"✅ snapinst posts: {len(posts)} постов @{username}")
-        return posts
-    except Exception as e:
-        logger.debug(f"snapinst posts error: {e}")
-    return []
-
-
-async def _get_posts_via_fastdl(username: str) -> list:
-    """Посты через fastdl.app."""
-    url = f"https://fastdl.app/instagram/user/{username}/"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True, ssl=False,
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-
-        posts: list = []
-        items = re.findall(
-            r'href="[^"]*/p/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
-            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-            html_text, re.DOTALL,
-        )
-        seen: set = set()
-        for sc, img in items:
-            if sc in seen: continue
-            seen.add(sc)
-            clean = img.replace("&amp;", "&").replace("\\u0026", "&").replace("\\/", "/")
-            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                           "caption": "", "like_count": 0, "comment_count": 0,
-                           "media": [{"type": "video" if _is_vid(clean) else "photo",
-                                      "url": clean, "thumb": clean}]})
-        if posts:
-            logger.info(f"✅ fastdl posts: {len(posts)} постов @{username}")
-        return posts
-    except Exception as e:
-        logger.debug(f"fastdl posts error: {e}")
-    return []
-
-
-async def get_user_info(username: str) -> dict | None:
-    """
-    Получить инфу о пользователе Instagram.
-    Перебирает источники от надёжных к запасным.
-    """
-    username = username.lower().strip("@").strip()
-    if not username:
-        return None
-
-    await asyncio.sleep(random.uniform(0.2, 0.5))
-
-    methods = [
-        ("snapinst",         _get_user_via_snapinst),         # snapinst.app — стабильный новый
-        ("fastdl",           _get_user_via_fastdl),           # fastdl.app — работает
-        ("instanavigation",  _get_user_via_instanavigation),  # viewer instanavigation
-        ("gramhir-profile",  _get_user_via_gramhir_profile),  # viewer gramhir
-        ("ig_meta",          _get_user_via_ig_meta),          # OG-теги напрямую (несколько UA)
-        ("picnob",           _get_user_via_picnob),
-        ("imginn",           _get_user_via_imginn),
-        ("storiesig",        _get_user_via_storiesig),
-        ("official",         _get_user_via_official),
-        ("oembed",           _get_user_via_oembed),
-    ]
-
-    for method_name, method_fn in methods:
-        try:
-            logger.info(f"Пробую {method_name} для @{username}...")
-            result = await method_fn(username)
-            if result:
-                logger.info(f"✅ {method_name} вернул данные для @{username}")
-                return result
-        except Exception as e:
-            logger.warning(f"❌ {method_name} упал для @{username}: {e}")
-        await asyncio.sleep(0.2)
-
-    logger.error(f"Все методы не дали результата для @{username}")
-    return None
-
-
-def _unescape_unicode(s: str) -> str:
-    """Декодировать \\uXXXX escape-последовательности."""
-    try:
-        return s.encode("raw_unicode_escape").decode("unicode_escape")
-    except Exception:
-        return s
-
-
-def _extract_posts(user: dict) -> list:
-    """Извлечь посты из ответа profile_info (для официального API)."""
-    edges = user.get("edge_owner_to_timeline_media", {}).get("edges", [])
-    posts = []
-    for edge in edges:
-        node = edge.get("node", {})
-        media_url = node.get("display_url", "")
-        sidecar = node.get("edge_sidecar_to_children", {}).get("edges", [])
-        if sidecar:
-            urls = []
-            for s in sidecar:
-                snode = s.get("node", {})
-                if snode.get("is_video"):
-                    urls.append({"type": "video", "url": snode.get("video_url", ""), "thumb": snode.get("display_url", "")})
-                else:
-                    urls.append({"type": "photo", "url": snode.get("display_url", ""), "thumb": snode.get("display_url", "")})
-        else:
-            if node.get("is_video"):
-                urls = [{"type": "video", "url": node.get("video_url", ""), "thumb": media_url}]
-            else:
-                urls = [{"type": "photo", "url": media_url, "thumb": media_url}]
-
-        caption_edges = node.get("edge_media_to_caption", {}).get("edges", [])
-        caption = caption_edges[0]["node"]["text"] if caption_edges else ""
-
-        posts.append({
-            "id": node.get("id", ""),
-            "shortcode": node.get("shortcode", ""),
-            "timestamp": node.get("taken_at_timestamp", 0),
-            "caption": caption[:500] if caption else "",
-            "like_count": node.get("edge_liked_by", {}).get("count", 0),
-            "comment_count": node.get("edge_media_to_comment", {}).get("count", 0),
-            "media": urls,
-        })
-    return posts
-
-
-# ── ИСТОРИИ ───────────────────────────────────────────────────────────────────
-
-async def get_stories(username: str) -> list:
-    """
-    Получить истории пользователя.
-    Пробует несколько методов.
-    """
-    info = await get_user_info(username)
-    if not info:
-        return []
-    if info.get("is_private"):
-        return []
-
-    user_id = info.get("id", "")
-
-    # Метод 1: официальный reels_media endpoint (нужен user_id)
-    if user_id:
-        stories = await _get_stories_official(user_id)
-        if stories:
-            return stories
-
-    # Метод 2: через storiesig (по username — user_id не нужен)
-    stories = await _get_stories_via_storiesig(username)
-    if stories:
-        return stories
-
-    # Метод 3: через instastories.io
-    stories = await _get_stories_via_instastories(username)
-    if stories:
-        return stories
-
-    # Метод 4: snapinsta / iganony как последний шанс
-    stories = await _get_stories_via_iganony(username)
-    return stories
-
-
-async def _get_stories_via_iganony(username: str) -> list:
-    """Запрос через iganony.io API — работает без user_id, по username."""
-    url = f"https://iganony.io/api/stories?username={username}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers={**BROWSER_HEADERS, "Referer": "https://iganony.io/"},
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(f"iganony stories {username} → {resp.status}")
-                    return []
-                data = await resp.json(content_type=None)
-        items = data if isinstance(data, list) else (data.get("data") or data.get("items") or [])
-        stories = []
-        for item in items:
-            is_video = item.get("is_video") or item.get("type") == "video"
-            stories.append({
-                "id": str(item.get("id") or item.get("pk") or f"ig_{len(stories)}"),
-                "type": "video" if is_video else "photo",
-                "url": item.get("video_url") or item.get("url") or item.get("display_url", ""),
-                "thumb": item.get("thumbnail_url") or item.get("display_url", ""),
-                "duration": item.get("video_duration", 15) if is_video else 5,
-            })
-        if stories:
-            logger.info(f"✅ iganony вернул {len(stories)} историй для @{username}")
-        return stories
-    except Exception as e:
-        logger.error(f"iganony stories error @{username}: {e}")
-    return []
-
-
-async def _get_stories_official(user_id: str) -> list:
-    """Через официальный endpoint Instagram."""
-    url = f"https://i.instagram.com/api/v1/feed/reels_media/?reel_ids={user_id}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers={**IG_API_HEADERS, "Accept": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    reels = data.get("reels", {})
-                    reel = reels.get(str(user_id)) or reels.get(user_id) or {}
-                    items = reel.get("items", [])
-                    if items:
-                        stories = []
-                        for item in items:
-                            is_video = item.get("media_type") == 2
-                            if is_video:
-                                versions = item.get("video_versions", [])
-                                vid_url = versions[0]["url"] if versions else ""
-                                img_versions = item.get("image_versions2", {}).get("candidates", [])
-                                thumb = img_versions[0]["url"] if img_versions else ""
-                                stories.append({
-                                    "id": str(item.get("pk", "")),
-                                    "type": "video",
-                                    "url": vid_url,
-                                    "thumb": thumb,
-                                    "duration": item.get("video_duration", 15),
-                                })
-                            else:
-                                candidates = item.get("image_versions2", {}).get("candidates", [])
-                                img_url = candidates[0]["url"] if candidates else ""
-                                stories.append({
-                                    "id": str(item.get("pk", "")),
-                                    "type": "photo",
-                                    "url": img_url,
-                                    "thumb": img_url,
-                                    "duration": 5,
-                                })
-                        return stories
-    except Exception as e:
-        logger.error(f"official stories error: {e}")
-    return []
-
-
-async def _get_stories_via_storiesig(username: str) -> list:
-    """Через storiesig.info API."""
-    url = f"https://storiesig.info/api/ig/stories/{username}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            data = await _fetch_json(s, url, headers=BROWSER_HEADERS, timeout=15)
-            if not data:
-                return []
-            items = data.get("data") or data.get("items") or []
-            if not isinstance(items, list):
-                return []
-            stories = []
-            for item in items:
-                is_video = item.get("is_video") or item.get("media_type") == 2
-                stories.append({
-                    "id": str(item.get("pk") or item.get("id") or ""),
-                    "type": "video" if is_video else "photo",
-                    "url": item.get("video_url") or item.get("url") or item.get("display_url", ""),
-                    "thumb": item.get("thumbnail_url") or item.get("display_url", ""),
-                    "duration": item.get("video_duration", 15) if is_video else 5,
-                })
-            return stories
-    except Exception as e:
-        logger.error(f"storiesig stories error: {e}")
-    return []
-
-
-async def _get_stories_via_instastories(username: str) -> list:
-    """Через instastories.io (парсинг)."""
-    url = f"https://www.instastories.watch/p/{username}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                url, headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                html = await resp.text()
-
-        # Ищем ссылки на медиа
-        stories = []
-        video_urls = re.findall(r'"videoSrc":"([^"]+)"', html)
-        photo_urls = re.findall(r'"imgSrc":"([^"]+)"', html)
-
-        for i, url in enumerate(video_urls):
-            stories.append({
-                "id": f"v_{i}",
-                "type": "video",
-                "url": url.replace("\\u0026", "&"),
-                "thumb": "",
-                "duration": 15,
-            })
-        for i, url in enumerate(photo_urls):
-            stories.append({
-                "id": f"p_{i}",
-                "type": "photo",
-                "url": url.replace("\\u0026", "&"),
-                "thumb": url.replace("\\u0026", "&"),
-                "duration": 5,
-            })
-        return stories
-    except Exception as e:
-        logger.error(f"instastories error: {e}")
-    return []
-
-
-# ── ПОСТЫ ─────────────────────────────────────────────────────────────────────
-
-# ── Новые скраперы (надёжнее старых) ─────────────────────────────────────────
-
-async def _get_posts_via_gramhir(username: str) -> list:
-    """gramhir.com — публичный viewer."""
-    for base in ["https://gramhir.com", "https://www.gramhir.com"]:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    f"{base}/profile/{username}/0",
-                    headers=BROWSER_HEADERS,
-                    timeout=aiohttp.ClientTimeout(total=20),
-                    allow_redirects=True,
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    html_text = await resp.text()
-            posts: list = []
-            items = re.findall(
-                r'href="[^"]*/(?:p|reel)/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
-                r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-                html_text, re.DOTALL,
-            )
-            seen: set = set()
-            for sc, img in items:
-                if sc in seen: continue
-                seen.add(sc)
-                clean = img.replace("&amp;", "&")
-                posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                               "caption": "", "like_count": 0, "comment_count": 0,
-                               "media": [{"type": "video" if _is_vid(clean) else "photo",
-                                          "url": clean, "thumb": clean}]})
-            if posts:
-                logger.info(f"✅ gramhir: {len(posts)} постов @{username}")
-                return posts
-        except Exception as e:
-            logger.debug(f"gramhir error: {e}")
-    return []
-
-
-async def _get_posts_via_inflact(username: str) -> list:
-    """inflact.com/profiles."""
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://inflact.com/profiles/{username}/",
-                headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True,
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-        posts: list = []
-        items = re.findall(
-            r'href="[^"]*/p/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
-            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-            html_text, re.DOTALL,
-        )
-        seen: set = set()
-        for sc, img in items:
-            if sc in seen: continue
-            seen.add(sc)
-            clean = img.replace("&amp;", "&")
-            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                           "caption": "", "like_count": 0, "comment_count": 0,
-                           "media": [{"type": "video" if _is_vid(clean) else "photo",
-                                      "url": clean, "thumb": clean}]})
-        if posts:
-            logger.info(f"✅ inflact: {len(posts)} постов @{username}")
-        return posts
-    except Exception as e:
-        logger.debug(f"inflact error: {e}")
-    return []
-
-
-async def _get_posts_via_dumpor(username: str) -> list:
-    """dumpor.com."""
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://dumpor.com/v/{username}",
-                headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True,
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-        posts: list = []
-        items = re.findall(
-            r'href="[^"]*/v/[^/]+/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
-            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-            html_text, re.DOTALL,
-        )
-        if not items:
-            items = re.findall(
-                r'data-shortcode="([A-Za-z0-9_-]{5,})".*?'
-                r'<img[^>]+src="(https?://[^"]+)"',
-                html_text, re.DOTALL,
-            )
-        seen: set = set()
-        for sc, img in items:
-            if sc in seen: continue
-            seen.add(sc)
-            clean = img.replace("&amp;", "&")
-            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                           "caption": "", "like_count": 0, "comment_count": 0,
-                           "media": [{"type": "video" if _is_vid(clean) else "photo",
-                                      "url": clean, "thumb": clean}]})
-        if posts:
-            logger.info(f"✅ dumpor: {len(posts)} постов @{username}")
-        return posts
-    except Exception as e:
-        logger.debug(f"dumpor error: {e}")
-    return []
-
-
-async def _get_posts_via_instanavigation(username: str) -> list:
-    """instanavigation.com — ещё один рабочий viewer."""
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://instanavigation.com/{username}/",
-                headers=BROWSER_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True,
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-        posts: list = []
-        items = re.findall(
-            r'href="[^"]*/p/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
-            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-            html_text, re.DOTALL,
-        )
-        seen: set = set()
-        for sc, img in items:
-            if sc in seen: continue
-            seen.add(sc)
-            clean = img.replace("&amp;", "&")
-            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                           "caption": "", "like_count": 0, "comment_count": 0,
-                           "media": [{"type": "video" if _is_vid(clean) else "photo",
-                                      "url": clean, "thumb": clean}]})
-        if posts:
-            logger.info(f"✅ instanavigation: {len(posts)} постов @{username}")
-        return posts
-    except Exception as e:
-        logger.debug(f"instanavigation error: {e}")
-    return []
-
-
-async def _get_posts_via_imginn_page(username: str) -> list:
-    """imginn.com — HTML страница профиля (не API)."""
-    try:
-        headers = {**BROWSER_HEADERS, "Accept": "text/html,application/xhtml+xml"}
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://imginn.com/{username}/",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=True,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(f"imginn page {username} → {resp.status}")
-                    return []
-                html_text = await resp.text()
-        posts: list = []
-        # shortcode из href /p/CODE/ и data-src или src картинки
-        items = re.findall(
-            r'href="/p/([A-Za-z0-9_-]{5,})/"[^>]*>.*?'
-            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-            html_text, re.DOTALL,
-        )
-        if not items:
-            items = re.findall(
-                r'<a[^>]+href="/p/([A-Za-z0-9_-]{5,})/".*?<img[^>]+src="([^"]+)"',
-                html_text, re.DOTALL,
-            )
-        seen: set = set()
-        for sc, img in items:
-            if sc in seen: continue
-            seen.add(sc)
-            clean = img.replace("&amp;", "&")
-            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                           "caption": "", "like_count": 0, "comment_count": 0,
-                           "media": [{"type": "video" if _is_vid(clean) else "photo",
-                                      "url": clean, "thumb": clean}]})
-        if posts:
-            logger.info(f"✅ imginn-page: {len(posts)} постов @{username}")
-        return posts
-    except Exception as e:
-        logger.debug(f"imginn-page error: {e}")
-    return []
-
-
-# ── Главная функция получения постов ──────────────────────────────────────────
-
-async def get_posts(username: str, after_cursor: str = "") -> dict:
-    info = await get_user_info(username)
-    if not info:
-        return {"posts": [], "next_cursor": "", "has_more": False}
-    if info.get("is_private"):
-        return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
-
-    is_graphql_cursor = bool(after_cursor) and not after_cursor.isdigit()
-    offset = int(after_cursor) if after_cursor.isdigit() else 0
-
-    # GraphQL-курсор (строка) → сразу туда
-    if is_graphql_cursor and info.get("id"):
-        return await _get_posts_graphql(info["id"], username, after_cursor, info)
-
-    # ── Кэш ──────────────────────────────────────────────────────────────────
-    # offset > 0 → ТОЛЬКО кэш, не парсим заново (иначе offset бессмысленен)
-    # offset == 0 → свежий кэш тоже подходит
-    all_posts = _cache_get(username)
-
-    if all_posts is None:
-        # Парсим каскадом — новые скраперы первые
-        _SCRAPERS = [
-            _get_posts_via_snapinst,
-            _get_posts_via_fastdl,
-            _get_posts_via_instanavigation,
-            _get_posts_via_gramhir,
-            _get_posts_via_imginn_page,
-            _get_posts_via_picuki,
-            _get_posts_via_inflact,
-            _get_posts_via_dumpor,
-            _get_posts_via_ig_html,
-            _get_posts_via_imginn,
-            _get_posts_via_picnob,
-        ]
-        all_posts = []
-        for fn in _SCRAPERS:
-            try:
-                all_posts = await fn(username)
-            except Exception as e:
-                logger.debug(f"{fn.__name__} exception: {e}")
-                all_posts = []
-            if all_posts:
-                break
-
-        if all_posts:
-            # Дедупликация по shortcode
-            seen: set = set()
-            unique: list = []
-            for p in all_posts:
-                pid = p.get("shortcode") or p.get("id") or ""
-                if pid and pid not in seen:
-                    seen.add(pid)
-                    unique.append(p)
-            all_posts = unique
-            _cache_set(username, all_posts)
-            logger.info(f"📦 Закэшировано {len(all_posts)} постов @{username}")
-        else:
-            # Все скраперы пусты → GraphQL как последний шанс
-            if info.get("id"):
-                logger.info(f"Все скраперы пусты → GraphQL @{username}")
-                gql_c = await _get_next_cursor(info["id"])
-                r = await _get_posts_graphql(info["id"], username, gql_c or "", info)
-                if r.get("posts"):
-                    return r
-            return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
-    else:
-        logger.info(f"📦 Кэш: {len(all_posts)} постов @{username}, offset={offset}")
-
-    chunk    = all_posts[offset: offset + 10]
-    has_more = (offset + 10) < len(all_posts)
-    next_cur = str(offset + 10) if has_more else ""
-    return {
-        "posts":        chunk,
-        "next_cursor":  next_cur,
-        "has_more":     has_more,
-        "total_cached": len(all_posts),
-        "user":         info,
-    }
-
-
-async def _get_posts_via_ig_html(username: str) -> list:
-    url = f"https://www.instagram.com/{username}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=headers, timeout=10) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-
-        posts = []
-        raw_posts = re.findall(r'"shortcode":"([A-Za-z0-9_-]+)".{1,500}?"display_url":"(https?:\/\/[^"]+)"', html_text)
-        
-        seen = set()
-        for shortcode, img_url in raw_posts:
-            if shortcode in seen:
-                continue
-            seen.add(shortcode)
-            clean_url = img_url.replace("\\u0026", "&").replace("\\/", "/")
-            posts.append({
-                "id": shortcode,
-                "shortcode": shortcode,
-                "timestamp": 0,
-                "caption": "",
-                "like_count": 0,
-                "comment_count": 0,
-                "media": [{"type": "video" if _is_vid(clean_url) else "photo", "url": clean_url, "thumb": clean_url}],
-            })
-        if posts:
-            logger.info(f"✅ Прямой парсинг HTML вытащил {len(posts)} постов для @{username}")
-        return posts
-    except Exception as e:
-        logger.error(f"ig_html posts error @{username}: {e}")
-    return []
-
-async def _get_posts_via_picuki(username: str) -> list:
-    url = f"https://www.picuki.com/profile/{username}"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=BROWSER_HEADERS, timeout=aiohttp.ClientTimeout(total=20),
-                             allow_redirects=True) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-
-        posts = []
-        items = re.findall(r'href="/media/([^"]+)"[^>]*>.*?<img[^>]+src="(https?://[^"]+)"', html_text, re.DOTALL)
-        if not items:
-            items = re.findall(r'href="/media/([^"]+)"[^>]*>.*?<img[^>]+(?:data-src|src)="(https?://[^"]+)"', html_text, re.DOTALL)
-            
-        seen = set()
-        for shortcode, img_url in items:
-            sc = shortcode.split("/")[0].split("?")[0]
-            if sc in seen or not sc:
-                continue
-            seen.add(sc)
-            clean_url = img_url.replace("&amp;", "&")
-            posts.append({
-                "id": sc,
-                "shortcode": sc,
-                "timestamp": 0,
-                "caption": "",
-                "like_count": 0,
-                "comment_count": 0,
-                "media": [{"type": "video" if _is_vid(clean_url) else "photo", "url": clean_url, "thumb": clean_url}],
-            })
-        return posts
-    except Exception as e:
-        logger.error(f"picuki posts error @{username}: {e}")
-    return []
-
-async def _get_posts_via_imginn(username: str) -> list:
-    url = f"https://imginn.com/{username}/"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=BROWSER_HEADERS, timeout=15) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-
-        posts = []
-        items = re.findall(r'href="/p/([^/]+)/"[^>]*>.*?<img[^>]+src="([^"]+)"', html_text, re.DOTALL)
-        for shortcode, img_url in items:
-            clean_url = img_url.replace("&amp;", "&")
-            posts.append({
-                "id": shortcode,
-                "shortcode": shortcode,
-                "timestamp": 0,
-                "caption": "",
-                "like_count": 0,
-                "comment_count": 0,
-                "media": [{"type": "video" if _is_vid(clean_url) else "photo", "url": clean_url, "thumb": clean_url}],
-            })
-        return posts
-    except Exception as e:
-        logger.error(f"imginn posts error: {e}")
-    return []
-
-async def _get_posts_via_picnob(username: str) -> list:
-    url = f"https://www.picnob.com/profile/{username}/"
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=BROWSER_HEADERS, timeout=20) as resp:
-                if resp.status != 200:
-                    return []
-                html_text = await resp.text()
-
-        posts = []
-        items = re.findall(r'data-shortcode="([^"]+)"[^>]*>.*?<img[^>]+(?:data-src|src)="([^"]+)"', html_text, re.DOTALL)
-        for shortcode, img_url in items:
-            clean_url = img_url.replace("&amp;", "&")
-            posts.append({
-                "id": shortcode,
-                "shortcode": shortcode,
-                "timestamp": 0,
-                "caption": "",
-                "like_count": 0,
-                "comment_count": 0,
-                "media": [{"type": "video" if _is_vid(clean_url) else "photo", "url": clean_url, "thumb": clean_url}],
-            })
-        return posts
-    except Exception as e:
-        logger.error(f"picnob posts error: {e}")
-    return []
-
-async def _get_next_cursor(user_id: str) -> str:
-    """Получить cursor для следующей страницы через GraphQL."""
-    if not user_id:
-        return ""
-    url = "https://www.instagram.com/graphql/query/"
-    params = {
-        "query_hash": "e769aa130647d2354c40ea6a439bfc08",
-        "variables": f'{{"id":"{user_id}","first":12,"after":""}}',
-    }
-    async with aiohttp.ClientSession() as s:
-        try:
-            async with s.get(
-                url, params=params, headers=IG_API_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    page_info = (
-                        data.get("data", {})
-                        .get("user", {})
-                        .get("edge_owner_to_timeline_media", {})
-                        .get("page_info", {})
-                    )
-                    if page_info.get("has_next_page"):
-                        return page_info.get("end_cursor", "")
-        except Exception:
-            pass
-    return ""
-
-
-async def _get_posts_graphql(user_id: str, username: str, cursor: str, base_info: dict) -> dict:
-    """Получить страницу постов через GraphQL с cursor."""
-    url = "https://www.instagram.com/graphql/query/"
-    params = {
-        "query_hash": "e769aa130647d2354c40ea6a439bfc08",
-        "variables": f'{{"id":"{user_id}","first":10,"after":"{cursor}"}}',
-    }
-    async with aiohttp.ClientSession() as s:
-        try:
-            async with s.get(
-                url, params=params, headers=IG_API_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    media_data = (
-                        data.get("data", {})
-                        .get("user", {})
-                        .get("edge_owner_to_timeline_media", {})
-                    )
-                    edges = media_data.get("edges", [])
-                    page_info = media_data.get("page_info", {})
-
-                    posts = []
-                    for edge in edges:
-                        node = edge.get("node", {})
-                        sidecar = node.get("edge_sidecar_to_children", {}).get("edges", [])
-                        if sidecar:
-                            urls = []
-                            for s2 in sidecar:
-                                snode = s2.get("node", {})
-                                if snode.get("is_video"):
-                                    urls.append({"type": "video", "url": snode.get("video_url", ""), "thumb": snode.get("display_url", "")})
-                                else:
-                                    urls.append({"type": "photo", "url": snode.get("display_url", ""), "thumb": snode.get("display_url", "")})
-                        else:
-                            durl = node.get("display_url", "")
-                            if node.get("is_video"):
-                                urls = [{"type": "video", "url": node.get("video_url", ""), "thumb": durl}]
-                            else:
-                                urls = [{"type": "photo", "url": durl, "thumb": durl}]
-
-                        caption_edges = node.get("edge_media_to_caption", {}).get("edges", [])
-                        caption = caption_edges[0]["node"]["text"] if caption_edges else ""
-                        posts.append({
-                            "id": node.get("id", ""),
-                            "shortcode": node.get("shortcode", ""),
-                            "timestamp": node.get("taken_at_timestamp", 0),
-                            "caption": caption[:500],
-                            "like_count": node.get("edge_liked_by", {}).get("count", 0),
-                            "comment_count": node.get("edge_media_to_comment", {}).get("count", 0),
-                            "media": urls,
-                        })
-
-                    return {
-                        "posts": posts,
-                        "next_cursor": page_info.get("end_cursor", "") if page_info.get("has_next_page") else "",
-                        "has_more": page_info.get("has_next_page", False),
-                        "user": base_info,
-                    }
-        except Exception as e:
-            logger.error(f"GraphQL posts error: {e}")
-    return {"posts": [], "next_cursor": "", "has_more": False, "user": base_info}
-
-
-# ── ПОДПИСКИ ──────────────────────────────────────────────────────────────────
 
 def ig_subscribe(user_id: str, ig_username: str, sub_type: str, last_seen: str = "") -> bool:
     ig_username = ig_username.lower().strip("@")
@@ -1691,21 +586,12 @@ def ig_update_last_seen(user_id: str, ig_username: str, sub_type: str, last_seen
 
 
 def ig_all_subscriptions() -> list:
-    """Все активные подписки (для фонового опроса)."""
     conn = sqlite3.connect(IG_DB)
     rows = conn.execute(
         "SELECT user_id, ig_username, sub_type, last_seen FROM ig_subscriptions ORDER BY ig_username"
     ).fetchall()
     conn.close()
     return [{"user_id": r[0], "ig_username": r[1], "sub_type": r[2], "last_seen": r[3]} for r in rows]
-    
-def _clean_username(text: str) -> str:
-    text = text.strip().lstrip("@")
-    # Извлекаем логин из ссылки, отсекая query-параметры (?igsh=...) и слэши
-    m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)", text)
-    if m:
-        return m.group(1).rstrip("/").lower()
-    return re.sub(r"[^A-Za-z0-9_.]", "", text).lower()
 
 
 def ig_mark_sent(user_id: str, media_id: str):
@@ -1717,6 +603,9 @@ def ig_mark_sent(user_id: str, media_id: str):
 
 def ig_already_sent(user_id: str, media_id: str) -> bool:
     conn = sqlite3.connect(IG_DB)
-    row = conn.execute("SELECT 1 FROM ig_sent WHERE user_id=? AND media_id=?", (str(user_id), media_id)).fetchone()
+    row = conn.execute(
+        "SELECT 1 FROM ig_sent WHERE user_id=? AND media_id=?",
+        (str(user_id), media_id)
+    ).fetchone()
     conn.close()
     return row is not None
