@@ -382,7 +382,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         m = media_list[0]
         is_video = m.get("type") == "video"
 
-        # Для видео пробуем mp4, для фото — url/thumb
+        # Для видео — mp4 URL, для фото — url или thumb
         vid_url   = m.get("url", "") if is_video else ""
         thumb_url = m.get("thumb") or m.get("url", "")
         fetch_url = vid_url or thumb_url
@@ -405,7 +405,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if link:
             cap += f"\n🔗 {link}"
 
-        # Настоящее mp4-видео → InputMediaVideo, иначе (jpg-превью) → Photo с 🎬
+        # Настоящий mp4 → InputMediaVideo, иначе (превью jpg) → Photo с 🎬
         real_video = is_video and vid_url and (
             vid_url.lower().endswith(".mp4") or "/videos/" in vid_url
         )
@@ -443,7 +443,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
 
     cursor_key = _store_cursor(f"{ig_username}_{next_cursor[:40]}", next_cursor) if next_cursor else ""
 
-    shown_up = int(next_cursor) if next_cursor.isdigit() else 0
+    shown_up   = int(next_cursor) if next_cursor.isdigit() else 0
     shown_from = max(0, shown_up - 10)
     total_str  = f" из ~{total}" if total else ""
     footer = f"✅ Посты {shown_from+1}–{shown_from+len(album_items)}{total_str} @{ig_username}"
