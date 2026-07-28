@@ -635,6 +635,229 @@ async def _get_user_via_instanavigation(username: str) -> dict | None:
     return None
 
 
+async def _get_user_via_snapinst(username: str) -> dict | None:
+    """Профиль через snapinst.app — стабильный вьювер."""
+    url = f"https://snapinst.app/user/{username}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                url, headers=BROWSER_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=True, ssl=False,
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"snapinst profile {username} → {resp.status}")
+                    return None
+                html_text = await resp.text()
+
+        # OG meta
+        meta_d = re.search(r'<meta property="og:description" content="([^"]*)"', html_text)
+        meta_t = re.search(r'<meta property="og:title" content="([^"]*)"', html_text)
+        meta_i = re.search(r'<meta property="og:image" content="([^"]*)"', html_text)
+
+        # inline JSON
+        f_m   = re.search(r'"follower_count"\s*:\s*(\d+)', html_text)
+        fi_m  = re.search(r'"following_count"\s*:\s*(\d+)', html_text)
+        p_m   = re.search(r'"media_count"\s*:\s*(\d+)', html_text)
+        fn_m  = re.search(r'"full_name"\s*:\s*"([^"]+)"', html_text)
+        bio_m = re.search(r'"biography"\s*:\s*"([^"]*)"', html_text)
+        av_m  = re.search(r'"profile_pic_url_hd"\s*:\s*"([^"]+)"', html_text)
+        if not av_m:
+            av_m = re.search(r'"profile_pic_url"\s*:\s*"([^"]+)"', html_text)
+        id_m  = re.search(r'"pk"\s*:\s*"?(\d+)"?', html_text)
+        prv_m = re.search(r'"is_private"\s*:\s*(true|false)', html_text)
+        ver_m = re.search(r'"is_verified"\s*:\s*(true|false)', html_text)
+
+        followers = int(f_m.group(1)) if f_m else 0
+        posts_cnt = int(p_m.group(1)) if p_m else 0
+
+        # Fallback: описание из og:description
+        if not followers and not posts_cnt and meta_d:
+            desc = html.unescape(meta_d.group(1))
+            fm2  = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowers', desc)
+            pm2  = re.search(r'([\d,KkMm.]+)\s+[Pp]osts', desc)
+            if fm2 or pm2:
+                def _pn(v: str) -> int:
+                    if not v: return 0
+                    v = v.upper().replace(",","").replace(" ","")
+                    if "M" in v: return int(float(v.replace("M",""))*1_000_000)
+                    if "K" in v: return int(float(v.replace("K",""))*1_000)
+                    try: return int(v)
+                    except: return 0
+                followers = _pn(fm2.group(1) if fm2 else "")
+                posts_cnt = _pn(pm2.group(1) if pm2 else "")
+
+        if not followers and not posts_cnt and not id_m:
+            return None
+
+        avatar_raw = av_m.group(1) if av_m else (meta_i.group(1) if meta_i else "")
+        avatar_url = avatar_raw.replace("\\u0026", "&").replace("\\/", "/")
+
+        full_name = ""
+        if fn_m:
+            full_name = _unescape_unicode(fn_m.group(1))
+        elif meta_t:
+            title = html.unescape(meta_t.group(1))
+            nm = re.search(r'^(.+?)\s*[@(]', title)
+            full_name = nm.group(1).strip() if nm else username
+
+        logger.info(f"✅ snapinst вернул данные @{username}")
+        return {
+            "id": id_m.group(1) if id_m else "",
+            "username": username,
+            "full_name": full_name or username,
+            "biography": _unescape_unicode(bio_m.group(1)) if bio_m else "",
+            "followers": followers,
+            "following": int(fi_m.group(1)) if fi_m else 0,
+            "posts_count": posts_cnt,
+            "avatar_url": avatar_url,
+            "is_private": (prv_m.group(1) == "true") if prv_m else False,
+            "is_verified": (ver_m.group(1) == "true") if ver_m else False,
+            "posts": [],
+        }
+    except Exception as e:
+        logger.warning(f"snapinst error @{username}: {e}")
+    return None
+
+
+async def _get_user_via_fastdl(username: str) -> dict | None:
+    """Профиль через fastdl.app."""
+    url = f"https://fastdl.app/instagram/user/{username}/"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                url, headers=BROWSER_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=True, ssl=False,
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"fastdl profile {username} → {resp.status}")
+                    return None
+                html_text = await resp.text()
+
+        meta_d = re.search(r'<meta property="og:description" content="([^"]*)"', html_text)
+        meta_t = re.search(r'<meta property="og:title" content="([^"]*)"', html_text)
+        meta_i = re.search(r'<meta property="og:image" content="([^"]*)"', html_text)
+        if not meta_d and not meta_t:
+            return None
+
+        desc = html.unescape(meta_d.group(1)) if meta_d else ""
+
+        def _pn(v: str) -> int:
+            if not v: return 0
+            v = v.upper().replace(",","").replace(" ","")
+            if "M" in v: return int(float(v.replace("M",""))*1_000_000)
+            if "K" in v: return int(float(v.replace("K",""))*1_000)
+            try: return int(v)
+            except: return 0
+
+        f_m  = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowers', desc)
+        fi_m = re.search(r'([\d,KkMm.]+)\s+[Ff]ollowing', desc)
+        p_m  = re.search(r'([\d,KkMm.]+)\s+[Pp]osts', desc)
+
+        if not f_m and not p_m:
+            return None
+
+        title = html.unescape(meta_t.group(1)) if meta_t else username
+        nm = re.search(r'^(.+?)\s*[@(]', title)
+        full_name = nm.group(1).strip() if nm else username
+        avatar_url = meta_i.group(1).replace("\\u0026","&") if meta_i else ""
+
+        logger.info(f"✅ fastdl вернул данные @{username}")
+        return {
+            "id": "", "username": username, "full_name": full_name, "biography": "",
+            "followers": _pn(f_m.group(1) if f_m else ""),
+            "following":  _pn(fi_m.group(1) if fi_m else ""),
+            "posts_count": _pn(p_m.group(1) if p_m else ""),
+            "avatar_url": avatar_url,
+            "is_private": False, "is_verified": False, "posts": [],
+        }
+    except Exception as e:
+        logger.warning(f"fastdl error @{username}: {e}")
+    return None
+
+
+async def _get_posts_via_snapinst(username: str) -> list:
+    """Посты через snapinst.app."""
+    url = f"https://snapinst.app/user/{username}"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                url, headers=BROWSER_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=True, ssl=False,
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                html_text = await resp.text()
+
+        posts: list = []
+        # ищем shortcode и thumbnail
+        items = re.findall(
+            r'href="[^"]*/p/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
+            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
+            html_text, re.DOTALL,
+        )
+        if not items:
+            items = re.findall(
+                r'"shortcode"\s*:\s*"([A-Za-z0-9_-]{5,})".*?'
+                r'"display_url"\s*:\s*"([^"]+)"',
+                html_text, re.DOTALL,
+            )
+        seen: set = set()
+        for sc, img in items:
+            if sc in seen: continue
+            seen.add(sc)
+            clean = img.replace("&amp;", "&").replace("\\u0026", "&").replace("\\/", "/")
+            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
+                           "caption": "", "like_count": 0, "comment_count": 0,
+                           "media": [{"type": "video" if _is_vid(clean) else "photo",
+                                      "url": clean, "thumb": clean}]})
+        if posts:
+            logger.info(f"✅ snapinst posts: {len(posts)} постов @{username}")
+        return posts
+    except Exception as e:
+        logger.debug(f"snapinst posts error: {e}")
+    return []
+
+
+async def _get_posts_via_fastdl(username: str) -> list:
+    """Посты через fastdl.app."""
+    url = f"https://fastdl.app/instagram/user/{username}/"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                url, headers=BROWSER_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=True, ssl=False,
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                html_text = await resp.text()
+
+        posts: list = []
+        items = re.findall(
+            r'href="[^"]*/p/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
+            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
+            html_text, re.DOTALL,
+        )
+        seen: set = set()
+        for sc, img in items:
+            if sc in seen: continue
+            seen.add(sc)
+            clean = img.replace("&amp;", "&").replace("\\u0026", "&").replace("\\/", "/")
+            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
+                           "caption": "", "like_count": 0, "comment_count": 0,
+                           "media": [{"type": "video" if _is_vid(clean) else "photo",
+                                      "url": clean, "thumb": clean}]})
+        if posts:
+            logger.info(f"✅ fastdl posts: {len(posts)} постов @{username}")
+        return posts
+    except Exception as e:
+        logger.debug(f"fastdl posts error: {e}")
+    return []
+
+
 async def get_user_info(username: str) -> dict | None:
     """
     Получить инфу о пользователе Instagram.
@@ -647,9 +870,11 @@ async def get_user_info(username: str) -> dict | None:
     await asyncio.sleep(random.uniform(0.2, 0.5))
 
     methods = [
-        ("ig_meta",          _get_user_via_ig_meta),          # OG-теги напрямую (несколько UA)
-        ("gramhir-profile",  _get_user_via_gramhir_profile),  # viewer gramhir
+        ("snapinst",         _get_user_via_snapinst),         # snapinst.app — стабильный новый
+        ("fastdl",           _get_user_via_fastdl),           # fastdl.app — работает
         ("instanavigation",  _get_user_via_instanavigation),  # viewer instanavigation
+        ("gramhir-profile",  _get_user_via_gramhir_profile),  # viewer gramhir
+        ("ig_meta",          _get_user_via_ig_meta),          # OG-теги напрямую (несколько UA)
         ("picnob",           _get_user_via_picnob),
         ("imginn",           _get_user_via_imginn),
         ("storiesig",        _get_user_via_storiesig),
@@ -1121,13 +1346,15 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     if all_posts is None:
         # Парсим каскадом — новые скраперы первые
         _SCRAPERS = [
+            _get_posts_via_snapinst,
+            _get_posts_via_fastdl,
+            _get_posts_via_instanavigation,
             _get_posts_via_gramhir,
+            _get_posts_via_imginn_page,
+            _get_posts_via_picuki,
             _get_posts_via_inflact,
             _get_posts_via_dumpor,
-            _get_posts_via_instanavigation,
-            _get_posts_via_imginn_page,
             _get_posts_via_ig_html,
-            _get_posts_via_picuki,
             _get_posts_via_imginn,
             _get_posts_via_picnob,
         ]
