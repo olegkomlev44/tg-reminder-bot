@@ -6,5 +6,5 @@ google-genai
 aiohttp>=3.10.11
 yt-dlp
 brotli
-
+instagrapi
 
