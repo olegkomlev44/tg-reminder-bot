@@ -26,23 +26,26 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # ── КЭШ ПОСТОВ ───────────────────────────────────────────────────────────────
+import time as _time
 _POSTS_CACHE: dict = {}
 _POSTS_CACHE_TTL = 600  # 10 минут
 
-def _cache_set(u: str, posts: list) -> None:
-    import time as _t
-    _POSTS_CACHE[u] = {"posts": posts, "ts": _t.time()}
+def _cache_set(username: str, posts: list) -> None:
+    _POSTS_CACHE[username] = {"posts": posts, "ts": _time.time()}
 
-def _cache_get(u: str) -> list | None:
-    import time as _t
-    e = _POSTS_CACHE.get(u)
-    if not e: return None
-    if _t.time() - e["ts"] > _POSTS_CACHE_TTL:
-        del _POSTS_CACHE[u]; return None
+def _cache_get(username: str) -> list | None:
+    e = _POSTS_CACHE.get(username)
+    if not e:
+        return None
+    if _time.time() - e["ts"] > _POSTS_CACHE_TTL:
+        del _POSTS_CACHE[username]
+        return None
     return e["posts"]
 
 def _is_vid(url: str) -> bool:
-    if not url: return False
+    """True если URL указывает на видео."""
+    if not url:
+        return False
     u = url.lower().split("?")[0]
     return u.endswith(".mp4") or "/videos/" in u
 
@@ -783,31 +786,37 @@ async def _get_stories_via_instastories(username: str) -> list:
 
 # ── ПОСТЫ ─────────────────────────────────────────────────────────────────────
 
+# ── Новые скраперы (надёжнее старых) ─────────────────────────────────────────
+
 async def _get_posts_via_gramhir(username: str) -> list:
-    """Через gramhir.com — один из немногих работающих публичных скраперов."""
+    """gramhir.com — публичный viewer."""
     for base in ["https://gramhir.com", "https://www.gramhir.com"]:
-        url = f"{base}/profile/{username}/0"
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.get(url, headers=BROWSER_HEADERS,
-                                  timeout=aiohttp.ClientTimeout(total=20),
-                                  allow_redirects=True) as resp:
+                async with s.get(
+                    f"{base}/profile/{username}/0",
+                    headers=BROWSER_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                    allow_redirects=True,
+                ) as resp:
                     if resp.status != 200:
                         continue
                     html_text = await resp.text()
-            posts = []
+            posts: list = []
             items = re.findall(
-                r'href="[^"]*/(p|reel)/([A-Za-z0-9_-]+)[^"]*"[^>]*>.*?<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-                html_text, re.DOTALL)
+                r'href="[^"]*/(?:p|reel)/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
+                r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
+                html_text, re.DOTALL,
+            )
             seen: set = set()
-            for _, sc, img in items:
-                if sc in seen or not sc: continue
+            for sc, img in items:
+                if sc in seen: continue
                 seen.add(sc)
                 clean = img.replace("&amp;", "&")
                 posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                              "caption": "", "like_count": 0, "comment_count": 0,
-                              "media": [{"type": _is_vid(clean) and "video" or "photo",
-                                         "url": clean, "thumb": clean}]})
+                               "caption": "", "like_count": 0, "comment_count": 0,
+                               "media": [{"type": "video" if _is_vid(clean) else "photo",
+                                          "url": clean, "thumb": clean}]})
             if posts:
                 logger.info(f"✅ gramhir: {len(posts)} постов @{username}")
                 return posts
@@ -817,29 +826,33 @@ async def _get_posts_via_gramhir(username: str) -> list:
 
 
 async def _get_posts_via_inflact(username: str) -> list:
-    """Через inflact.com/profiles."""
-    url = f"https://inflact.com/profiles/{username}/"
+    """inflact.com/profiles."""
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=BROWSER_HEADERS,
-                              timeout=aiohttp.ClientTimeout(total=20),
-                              allow_redirects=True) as resp:
+            async with s.get(
+                f"https://inflact.com/profiles/{username}/",
+                headers=BROWSER_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=True,
+            ) as resp:
                 if resp.status != 200:
                     return []
                 html_text = await resp.text()
-        posts = []
+        posts: list = []
         items = re.findall(
-            r'href="[^"]*/p/([A-Za-z0-9_-]+)[^"]*"[^>]*>.*?<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-            html_text, re.DOTALL)
+            r'href="[^"]*/p/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
+            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
+            html_text, re.DOTALL,
+        )
         seen: set = set()
         for sc, img in items:
-            if sc in seen or not sc: continue
+            if sc in seen: continue
             seen.add(sc)
             clean = img.replace("&amp;", "&")
             posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                          "caption": "", "like_count": 0, "comment_count": 0,
-                          "media": [{"type": _is_vid(clean) and "video" or "photo",
-                                     "url": clean, "thumb": clean}]})
+                           "caption": "", "like_count": 0, "comment_count": 0,
+                           "media": [{"type": "video" if _is_vid(clean) else "photo",
+                                      "url": clean, "thumb": clean}]})
         if posts:
             logger.info(f"✅ inflact: {len(posts)} постов @{username}")
         return posts
@@ -849,34 +862,39 @@ async def _get_posts_via_inflact(username: str) -> list:
 
 
 async def _get_posts_via_dumpor(username: str) -> list:
-    """Через dumpor.com."""
-    url = f"https://dumpor.com/v/{username}"
+    """dumpor.com."""
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=BROWSER_HEADERS,
-                              timeout=aiohttp.ClientTimeout(total=20),
-                              allow_redirects=True) as resp:
+            async with s.get(
+                f"https://dumpor.com/v/{username}",
+                headers=BROWSER_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=True,
+            ) as resp:
                 if resp.status != 200:
                     return []
                 html_text = await resp.text()
-        posts = []
+        posts: list = []
         items = re.findall(
-            r'href="[^"]*/v/[^/]+/([A-Za-z0-9_-]+)[^"]*"[^>]*>.*?<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
-            html_text, re.DOTALL)
+            r'href="[^"]*/v/[^/]+/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
+            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
+            html_text, re.DOTALL,
+        )
         if not items:
-            # альтернативный pattern
             items = re.findall(
-                r'data-shortcode="([A-Za-z0-9_-]+)".*?<img[^>]+src="(https?://[^"]+)"',
-                html_text, re.DOTALL)
+                r'data-shortcode="([A-Za-z0-9_-]{5,})".*?'
+                r'<img[^>]+src="(https?://[^"]+)"',
+                html_text, re.DOTALL,
+            )
         seen: set = set()
         for sc, img in items:
-            if sc in seen or not sc: continue
+            if sc in seen: continue
             seen.add(sc)
             clean = img.replace("&amp;", "&")
             posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
-                          "caption": "", "like_count": 0, "comment_count": 0,
-                          "media": [{"type": _is_vid(clean) and "video" or "photo",
-                                     "url": clean, "thumb": clean}]})
+                           "caption": "", "like_count": 0, "comment_count": 0,
+                           "media": [{"type": "video" if _is_vid(clean) else "photo",
+                                      "url": clean, "thumb": clean}]})
         if posts:
             logger.info(f"✅ dumpor: {len(posts)} постов @{username}")
         return posts
@@ -885,42 +903,87 @@ async def _get_posts_via_dumpor(username: str) -> list:
     return []
 
 
-async def _get_posts_via_instagramscraper_api(username: str) -> list:
-    """
-    Через публичный RapidAPI-совместимый endpoint Instagram scraper.
-    Endpoint не требует ключа при обращении через определённые прокси-сайты.
-    """
-    # imginn JSON API
+async def _get_posts_via_instanavigation(username: str) -> list:
+    """instanavigation.com — ещё один рабочий viewer."""
     try:
-        url = f"https://imginn.com/api/posts/?user={username}"
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers={**BROWSER_HEADERS, "Accept": "application/json"},
-                              timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    items = data if isinstance(data, list) else data.get("posts") or data.get("data") or []
-                    posts = []
-                    for item in items:
-                        sc = item.get("shortcode") or item.get("code") or ""
-                        if not sc: continue
-                        is_vid = item.get("is_video") or item.get("type") == "video"
-                        img = item.get("thumbnail_url") or item.get("display_url") or item.get("url") or ""
-                        vid = item.get("video_url") or ""
-                        posts.append({"id": sc, "shortcode": sc,
-                                      "timestamp": item.get("timestamp", 0),
-                                      "caption": (item.get("caption") or "")[:500],
-                                      "like_count": item.get("likes") or item.get("like_count") or 0,
-                                      "comment_count": item.get("comments") or item.get("comment_count") or 0,
-                                      "media": [{"type": "video" if is_vid else "photo",
-                                                 "url": vid if is_vid else img,
-                                                 "thumb": img}]})
-                    if posts:
-                        logger.info(f"✅ imginn-api: {len(posts)} постов @{username}")
-                        return posts
+            async with s.get(
+                f"https://instanavigation.com/{username}/",
+                headers=BROWSER_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=True,
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                html_text = await resp.text()
+        posts: list = []
+        items = re.findall(
+            r'href="[^"]*/p/([A-Za-z0-9_-]{5,})[^"]*"[^>]*>.*?'
+            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
+            html_text, re.DOTALL,
+        )
+        seen: set = set()
+        for sc, img in items:
+            if sc in seen: continue
+            seen.add(sc)
+            clean = img.replace("&amp;", "&")
+            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
+                           "caption": "", "like_count": 0, "comment_count": 0,
+                           "media": [{"type": "video" if _is_vid(clean) else "photo",
+                                      "url": clean, "thumb": clean}]})
+        if posts:
+            logger.info(f"✅ instanavigation: {len(posts)} постов @{username}")
+        return posts
     except Exception as e:
-        logger.debug(f"imginn-api error: {e}")
+        logger.debug(f"instanavigation error: {e}")
     return []
 
+
+async def _get_posts_via_imginn_page(username: str) -> list:
+    """imginn.com — HTML страница профиля (не API)."""
+    try:
+        headers = {**BROWSER_HEADERS, "Accept": "text/html,application/xhtml+xml"}
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://imginn.com/{username}/",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=True,
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"imginn page {username} → {resp.status}")
+                    return []
+                html_text = await resp.text()
+        posts: list = []
+        # shortcode из href /p/CODE/ и data-src или src картинки
+        items = re.findall(
+            r'href="/p/([A-Za-z0-9_-]{5,})/"[^>]*>.*?'
+            r'<img[^>]+(?:data-src|src)="(https?://[^"]+)"',
+            html_text, re.DOTALL,
+        )
+        if not items:
+            items = re.findall(
+                r'<a[^>]+href="/p/([A-Za-z0-9_-]{5,})/".*?<img[^>]+src="([^"]+)"',
+                html_text, re.DOTALL,
+            )
+        seen: set = set()
+        for sc, img in items:
+            if sc in seen: continue
+            seen.add(sc)
+            clean = img.replace("&amp;", "&")
+            posts.append({"id": sc, "shortcode": sc, "timestamp": 0,
+                           "caption": "", "like_count": 0, "comment_count": 0,
+                           "media": [{"type": "video" if _is_vid(clean) else "photo",
+                                      "url": clean, "thumb": clean}]})
+        if posts:
+            logger.info(f"✅ imginn-page: {len(posts)} постов @{username}")
+        return posts
+    except Exception as e:
+        logger.debug(f"imginn-page error: {e}")
+    return []
+
+
+# ── Главная функция получения постов ──────────────────────────────────────────
 
 async def get_posts(username: str, after_cursor: str = "") -> dict:
     info = await get_user_info(username)
@@ -932,51 +995,54 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     is_graphql_cursor = bool(after_cursor) and not after_cursor.isdigit()
     offset = int(after_cursor) if after_cursor.isdigit() else 0
 
-    # GraphQL-курсор → сразу туда
+    # GraphQL-курсор (строка) → сразу туда
     if is_graphql_cursor and info.get("id"):
         return await _get_posts_graphql(info["id"], username, after_cursor, info)
 
-    # ── Кэш ─────────────────────────────────────────────────────────────────
-    # offset>0: ТОЛЬКО кэш (не парсим заново, иначе offset бессмысленен)
-    # offset==0: свежий кэш тоже подходит
+    # ── Кэш ──────────────────────────────────────────────────────────────────
+    # offset > 0 → ТОЛЬКО кэш, не парсим заново (иначе offset бессмысленен)
+    # offset == 0 → свежий кэш тоже подходит
     all_posts = _cache_get(username)
 
     if all_posts is None:
-        # Парсим по очереди — новые надёжные скраперы первые
-        all_posts = []
-        for scraper_fn in [
-            _get_posts_via_instagramscraper_api,
+        # Парсим каскадом — новые скраперы первые
+        _SCRAPERS = [
             _get_posts_via_gramhir,
             _get_posts_via_inflact,
             _get_posts_via_dumpor,
+            _get_posts_via_instanavigation,
+            _get_posts_via_imginn_page,
             _get_posts_via_ig_html,
             _get_posts_via_picuki,
             _get_posts_via_imginn,
             _get_posts_via_picnob,
-        ]:
+        ]
+        all_posts = []
+        for fn in _SCRAPERS:
             try:
-                all_posts = await scraper_fn(username)
+                all_posts = await fn(username)
             except Exception as e:
-                logger.debug(f"{scraper_fn.__name__} error: {e}")
+                logger.debug(f"{fn.__name__} exception: {e}")
                 all_posts = []
             if all_posts:
                 break
 
         if all_posts:
-            # Дедупликация
+            # Дедупликация по shortcode
             seen: set = set()
             unique: list = []
             for p in all_posts:
                 pid = p.get("shortcode") or p.get("id") or ""
                 if pid and pid not in seen:
-                    seen.add(pid); unique.append(p)
+                    seen.add(pid)
+                    unique.append(p)
             all_posts = unique
             _cache_set(username, all_posts)
             logger.info(f"📦 Закэшировано {len(all_posts)} постов @{username}")
         else:
-            # Все скраперы пусты → пробуем GraphQL
+            # Все скраперы пусты → GraphQL как последний шанс
             if info.get("id"):
-                logger.info(f"Скраперы пусты → GraphQL @{username}")
+                logger.info(f"Все скраперы пусты → GraphQL @{username}")
                 gql_c = await _get_next_cursor(info["id"])
                 r = await _get_posts_graphql(info["id"], username, gql_c or "", info)
                 if r.get("posts"):
@@ -1064,7 +1130,7 @@ async def _get_posts_via_picuki(username: str) -> list:
                 "caption": "",
                 "like_count": 0,
                 "comment_count": 0,
-                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
+                "media": [{"type": "video" if _is_vid(clean_url) else "photo", "url": clean_url, "thumb": clean_url}],
             })
         return posts
     except Exception as e:
@@ -1091,7 +1157,7 @@ async def _get_posts_via_imginn(username: str) -> list:
                 "caption": "",
                 "like_count": 0,
                 "comment_count": 0,
-                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
+                "media": [{"type": "video" if _is_vid(clean_url) else "photo", "url": clean_url, "thumb": clean_url}],
             })
         return posts
     except Exception as e:
@@ -1118,7 +1184,7 @@ async def _get_posts_via_picnob(username: str) -> list:
                 "caption": "",
                 "like_count": 0,
                 "comment_count": 0,
-                "media": [{"type": "photo", "url": clean_url, "thumb": clean_url}],
+                "media": [{"type": "video" if _is_vid(clean_url) else "photo", "url": clean_url, "thumb": clean_url}],
             })
         return posts
     except Exception as e:
