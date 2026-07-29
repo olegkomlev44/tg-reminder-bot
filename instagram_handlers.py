@@ -415,20 +415,23 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if link:
             cap += f"\n🔗 {link}"
 
-        # Настоящий mp4 → InputMediaVideo, иначе (превью jpg) → Photo с 🎬
-        real_video = is_video and vid_url and (
-            vid_url.lower().endswith(".mp4") or "/videos/" in vid_url
-        )
-        if real_video:
-            album_items.append(InputMediaVideo(
+        # Видео → InputMediaVideo (тип из поля type, не из расширения URL)
+        if is_video:
+            thumb_data = None
+            if thumb_url and thumb_url != vid_url:
+                thumb_data = await _download(thumb_url)
+            video_kwargs = dict(
                 media=BufferedInputFile(data, filename=f"post_{i}.mp4"),
-                caption=cap[:1020]
-            ))
+                caption=cap[:1020],
+                supports_streaming=True,
+            )
+            if thumb_data:
+                video_kwargs["thumbnail"] = BufferedInputFile(thumb_data, filename=f"thumb_{i}.jpg")
+            album_items.append(InputMediaVideo(**video_kwargs))
         else:
-            prefix = "🎬 " if is_video else ""
             album_items.append(InputMediaPhoto(
                 media=BufferedInputFile(data, filename=f"post_{i}.jpg"),
-                caption=f"{prefix}{cap}"[:1020]
+                caption=cap[:1020]
             ))
         await asyncio.sleep(0.3)
 
