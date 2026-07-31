@@ -78,6 +78,15 @@ except Exception:
     logger.error("🔴 НЕ УДАЛОСЬ ИМПОРТИРОВАТЬ card_generator.py:\n" + traceback.format_exc())
     raise
 
+try:
+    from dembel_generator import make_dembel_card, get_all_timers, DEMBEL_DATES
+    logger.info(f"🟢 dembel_generator импортирован, людей в списке: {len(DEMBEL_DATES)}")
+except Exception:
+    logger.error("🔴 НЕ УДАЛОСЬ ИМПОРТИРОВАТЬ dembel_generator.py (команда /dembel будет отключена):\n" + traceback.format_exc())
+    make_dembel_card = None
+    get_all_timers = None
+    DEMBEL_DATES = {}
+
 TOKEN     = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHAT_ID   = os.getenv("CHAT_ID",   "YOUR_CHAT_ID_HERE")
 DATA_FILE = os.path.join(BASE_DIR, "duty_data.json")
@@ -220,6 +229,115 @@ async def cmd_weather(message: types.Message):
         await message.answer(f"☁️ *Метео-радар — {city}:*\n{text}", parse_mode="Markdown")
     else:
         await message.answer(f"❌ Метеостанция в *{city}* не отвечает. Выходи на свой страх и риск.", parse_mode="Markdown")
+
+
+# ── ДЕМБЕЛЬ-ТАЙМЕР ────────────────────────────────────────────────────────────
+
+def _dembel_list_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    row = []
+    for person in DEMBEL_DATES:
+        row.append(InlineKeyboardButton(text=f"🎖 {person}", callback_data=f"dembel_card:{person}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def cmd_dembel(message: types.Message):
+    """/dembel — список всех: кому сколько осталось (дни/часы). /dembel Имя — сразу карточка."""
+    if not get_all_timers:
+        await message.answer("❌ Дембель-таймер сейчас недоступен (ошибка загрузки модуля).")
+        return
+
+    raw = (message.text or "").replace("/dembel", "").strip()
+    if raw:
+        # Ищем совпадение по имени без учёта регистра
+        match = next((p for p in DEMBEL_DATES if p.lower() == raw.lower()), None)
+        if not match:
+            await message.answer(
+                f"❌ Не нашёл «{raw}» в списке.\nЕсть: {', '.join(DEMBEL_DATES)}"
+            )
+            return
+        await _send_dembel_card(message, match)
+        return
+
+    timers = get_all_timers()
+    lines = ["🎖 *ДЕМБЕЛЬ-ТАЙМЕР*\n"]
+    for t in timers:
+        if t["done"]:
+            lines.append(f"🏠 *{t['person']}* — дома!")
+        else:
+            lines.append(f"⏳ *{t['person']}* — {t['days']} дн. {t['hours']} ч. (дембель {t['target'].strftime('%d.%m.%Y')})")
+    lines.append("\n_Жми на имя — пришлю красивую карточку_")
+
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=_dembel_list_keyboard()
+    )
+
+
+async def _send_dembel_card(source, person: str):
+    """Генерирует и отправляет карточку для person. source — Message или CallbackQuery.message (у обоих есть .chat и .bot)."""
+    chat_id = source.chat.id
+    bot = source.bot
+
+    status = await bot.send_message(chat_id, f"🎨 Рисую карточку для *{person}*...", parse_mode="Markdown")
+
+    # Имя файла на диске — латиница+цифры независимо от языка имени человека,
+    # чтобы не зависеть от того, как конкретный хостинг обрабатывает не-ASCII пути.
+    _translit_map = str.maketrans({
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    })
+    translit = person.lower().translate(_translit_map)
+    safe_slug = "".join(c for c in translit if c.isalnum()) or "person"
+    img_path = os.path.join(TEMP_DIR, f"dembel_{safe_slug}_{int(time.time())}.jpg")
+    try:
+        theme_key = make_dembel_card(person, output_path=img_path, theme_key=random.choice(THEME_KEYS))
+    except Exception as e:
+        logger.error(f"Ошибка генерации дембель-карточки для {person}: {e}")
+        try: await status.delete()
+        except: pass
+        timers = {t["person"]: t for t in get_all_timers()}
+        t = timers.get(person, {})
+        if t.get("done"):
+            text = f"🏠 *{person}* — дома!"
+        else:
+            text = f"⏳ *{person}* — {t.get('days', '?')} дн. {t.get('hours', '?')} ч. до дембеля"
+        await bot.send_message(chat_id, text, parse_mode="Markdown")
+        return
+
+    try: await status.delete()
+    except: pass
+
+    try:
+        photo = FSInputFile(img_path)
+        await bot.send_photo(
+            chat_id, photo=photo,
+            caption=f"🎖 Дембель-таймер · *{person}*",
+            parse_mode="Markdown",
+            reply_markup=_dembel_list_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки дембель-карточки: {e}")
+        await bot.send_message(chat_id, f"❌ Не получилось отправить карточку для {person}.")
+    finally:
+        try: os.remove(img_path)
+        except: pass
+
+
+async def callback_dembel_card(callback: types.CallbackQuery):
+    person = callback.data.split(":", 1)[1]
+    await callback.answer()
+    await _send_dembel_card(callback.message, person)
+
 
 SVODKI_HEADERS_BY_DAY = {
     0: ["📋 понедельник. сводки. страдания. погнали", "📋 начало недели, начало боли. твой черёд, дежурный", "📋 пн детектед. наряд активирован. сопротивление бесполезно"],
@@ -2694,6 +2812,7 @@ async def main():
     dp.message.register(cmd_dj, Command("dj"))
     dp.message.register(cmd_wrapped, Command("wrapped"))
     dp.message.register(cmd_weather, Command("pogoda"))
+    dp.message.register(cmd_dembel, Command("dembel"))
     
     dp.message.register(cmd_today, F.text == "📋 Наряд сегодня")
     dp.message.register(cmd_tomorrow, F.text == "📅 Наряд завтра")
@@ -2731,6 +2850,7 @@ async def main():
     dp.callback_query.register(callback_back_to_dash, F.data == "back_to_dash")
     dp.callback_query.register(callback_start_wave, F.data == "start_wave")
     dp.callback_query.register(callback_radar, F.data == "radar_releases")
+    dp.callback_query.register(callback_dembel_card, F.data.startswith("dembel_card:"))
     # Плейлисты
     dp.callback_query.register(callback_pl_pick, F.data.startswith("pl_pick:"))
     dp.callback_query.register(callback_pl_new, F.data.startswith("pl_new:"))
