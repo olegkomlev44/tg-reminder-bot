@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 class IGStates(StatesGroup):
     waiting_username = State()
+    waiting_cookies  = State()   # для /ig_refresh
 
 
 # ── ВСПОМОГАТЕЛЬНЫЕ ───────────────────────────────────────────────────────────
@@ -1193,6 +1194,241 @@ async def cmd_ig_popular(message: types.Message):
     )
 
 
+
+# ── /ig_refresh — обновление кук прямо из бота ────────────────────────────────
+
+def _parse_cookie_block(text: str) -> dict:
+    """
+    Парсит блок кук в любом из форматов:
+      key:value
+      key=value
+      key	value
+    Возвращает dict с найденными значениями.
+    """
+    result = {}
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for sep in (":", "=", "\t"):
+            if sep in line:
+                key, _, val = line.partition(sep)
+                key = key.strip().lower()
+                val = val.strip().split()[0]  # убираем лишнее (размер, домен и т.д.)
+                result[key] = val
+                break
+    return result
+
+
+def _build_session_json(username: str, cookies: dict) -> dict | None:
+    """Собрать session.json из словаря кук."""
+    import uuid as _uuid, base64 as _b64, random as _rnd, time as _time
+
+    sessionid  = cookies.get("sessionid", "")
+    ds_user_id = cookies.get("ds_user_id", "")
+    if not sessionid or not ds_user_id:
+        return None
+
+    ig_did = cookies.get("ig_did", str(_uuid.uuid4()).upper())
+
+    return {
+        "uuids": {
+            "phone_id":           ig_did,
+            "uuid":               str(_uuid.uuid4()),
+            "client_session_id":  str(_uuid.uuid4()),
+            "advertising_id":     str(_uuid.uuid4()),
+            "device_id":          "android-" + _b64.b16encode(_rnd.randbytes(8)).decode().lower(),
+        },
+        "cookies": {
+            "sessionid":  sessionid,
+            "ds_user_id": ds_user_id,
+            "csrftoken":  cookies.get("csrftoken", ""),
+            "mid":        cookies.get("mid", ""),
+            "ig_did":     ig_did,
+            "datr":       cookies.get("datr", ""),
+            "rur":        cookies.get("rur", ""),
+        },
+        "last_login": _time.time(),
+        "device_settings": {
+            "app_version":     "428.0.0.47.67",
+            "android_version": 35,
+            "android_release": "15",
+            "dpi":             "560dpi",
+            "resolution":      "1344x2992",
+            "manufacturer":    "Google",
+            "device":          "husky",
+            "model":           "Pixel 8 Pro",
+            "cpu":             "arm64-v8a",
+            "version_code":    "671708408",
+        },
+        "user_agent":    "Instagram 428.0.0.47.67 Android (35/15; 560dpi; 1344x2992; Google; Pixel 8 Pro; husky; arm64-v8a; en_US; 671708408)",
+        "country":       "US",
+        "country_code":  1,
+        "locale":        "en_US",
+        "timezone_offset": 10800,
+        "authorization_data": {
+            "ds_user_id": ds_user_id,
+            "sessionid":  sessionid,
+        },
+    }
+
+
+def _get_admin_ids() -> set[int]:
+    """Список admin user_id из env IG_ADMIN_IDS=123456,789012"""
+    raw = os.getenv("IG_ADMIN_IDS", "")
+    ids = set()
+    for x in raw.split(","):
+        x = x.strip()
+        if x.isdigit():
+            ids.add(int(x))
+    return ids
+
+
+async def cmd_ig_refresh(message: types.Message, state: FSMContext):
+    """/ig_refresh — обновить куки для аккаунта-донора Instagram."""
+    admin_ids = _get_admin_ids()
+    if admin_ids and message.from_user.id not in admin_ids:
+        await message.answer("⛔ Команда доступна только администратору.")
+        return
+
+    from instagram_viewer import _POOL, _session_dir
+    accounts = [login for login, _ in _POOL._accounts]
+
+    if not accounts:
+        await message.answer("❌ Нет настроенных аккаунтов (IG_ACCOUNTS не задан).")
+        return
+
+    # Кнопки выбора аккаунта
+    buttons = [[InlineKeyboardButton(
+        text=f"👤 {acc}", callback_data=f"ig_refresh_pick:{acc}"
+    )] for acc in accounts]
+
+    await message.answer(
+        "🔄 <b>Обновление кук Instagram</b>\n\n"
+        "Выбери аккаунт для которого хочешь обновить куки:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+async def callback_ig_refresh_pick(callback: types.CallbackQuery, state: FSMContext):
+    """Выбран аккаунт — просим прислать куки."""
+    admin_ids = _get_admin_ids()
+    if admin_ids and callback.from_user.id not in admin_ids:
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    username = callback.data.split(":", 1)[1]
+    await state.set_state(IGStates.waiting_cookies)
+    await state.update_data(refresh_username=username)
+    await callback.answer()
+
+    await callback.message.edit_text(
+        f"👤 Аккаунт: <b>{username}</b>\n\n"
+        "📋 <b>Как получить куки:</b>\n"
+        "1. Открой Instagram в Firefox\n"
+        "2. В адресной строке введи:\n"
+        "<code>javascript:alert(document.cookie)</code>\n"
+        "   или\n"
+        "<code>javascript:document.write(document.cookie)</code>\n"
+        "3. Скопируй весь текст и пришли сюда\n\n"
+        "<i>Формат не важен — подойдёт любой (key:value, key=value, через пробел)</i>\n\n"
+        "Для отмены напиши /cancel",
+        parse_mode="HTML",
+    )
+
+
+async def process_ig_cookies(message: types.Message, state: FSMContext):
+    """Получили блок кук — парсим и сохраняем."""
+    admin_ids = _get_admin_ids()
+    if admin_ids and message.from_user.id not in admin_ids:
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    username = data.get("refresh_username", "")
+    await state.clear()
+
+    if not username:
+        await message.answer("❌ Сессия устарела, начни заново: /ig_refresh")
+        return
+
+    # Парсим куки
+    cookies = _parse_cookie_block(message.text or "")
+
+    sessionid  = cookies.get("sessionid", "")
+    ds_user_id = cookies.get("ds_user_id", "")
+
+    if not sessionid:
+        await message.answer(
+            "❌ Не нашёл <b>sessionid</b> в тексте.\n\n"
+            "Убедись что скопировал всё содержимое попапа.\n"
+            "Попробуй снова: /ig_refresh",
+            parse_mode="HTML",
+        )
+        return
+
+    if not ds_user_id:
+        await message.answer(
+            "⚠️ Не нашёл <b>ds_user_id</b> — попробую без него.\n"
+            "Если не сработает, скопируй куки полностью.",
+            parse_mode="HTML",
+        )
+
+    # Собираем session.json
+    session_data = _build_session_json(username, cookies)
+    if not session_data:
+        await message.answer(
+            "❌ Не хватает данных для сборки сессии.\n"
+            "Нужны как минимум <b>sessionid</b> и <b>ds_user_id</b>.\n"
+            "Попробуй снова: /ig_refresh",
+            parse_mode="HTML",
+        )
+        return
+
+    # Сохраняем файл
+    from instagram_viewer import _session_dir, _POOL
+    session_file = _session_dir() / f"{username}.json"
+    try:
+        import json as _json
+        session_file.write_text(_json.dumps(session_data, indent=2))
+    except Exception as e:
+        await message.answer(f"❌ Не удалось сохранить файл: {e}")
+        return
+
+    # Перезагружаем клиент в пуле
+    reload_ok = False
+    try:
+        idx = next(
+            (i for i, (login, _) in enumerate(_POOL._accounts) if login == username),
+            None
+        )
+        if idx is not None:
+            new_cl = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _POOL._make_client(username, "")
+            )
+            if idx < len(_POOL._clients):
+                _POOL._clients[idx] = new_cl
+            else:
+                _POOL._clients.append(new_cl)
+            reload_ok = True
+    except Exception as e:
+        logger.warning(f"ig_refresh reload {username}: {e}")
+
+    status = "✅ Клиент перезагружен в пуле" if reload_ok else "⚠️ Файл сохранён, перезагрузка не удалась — перезапусти бота"
+
+    await message.answer(
+        f"✅ <b>Куки обновлены!</b>\n\n"
+        f"👤 Аккаунт: <b>{username}</b>\n"
+        f"🔑 sessionid: <code>{sessionid[:30]}...</code>\n"
+        f"🆔 ds_user_id: <code>{ds_user_id}</code>\n"
+        f"📁 Файл: <code>{session_file}</code>\n\n"
+        f"{status}",
+        parse_mode="HTML",
+    )
+    logger.info(f"✅ ig_refresh: куки для {username} обновлены пользователем {message.from_user.id}")
+
+
 # ── РЕГИСТРАЦИЯ ───────────────────────────────────────────────────────────────
 
 def register_ig_handlers(dp: Dispatcher):
@@ -1211,6 +1447,11 @@ def register_ig_handlers(dp: Dispatcher):
     dp.callback_query.register(callback_ig_related,         F.data.startswith("ig_related:"))
     dp.callback_query.register(callback_ig_sub_filter,      F.data.startswith("ig_sf:"))
     dp.callback_query.register(callback_ig_sub_filter_menu, F.data.startswith("ig_sfm:"))
+
+    # /ig_refresh — обновление кук
+    dp.message.register(cmd_ig_refresh,        Command("ig_refresh"))
+    dp.callback_query.register(callback_ig_refresh_pick, F.data.startswith("ig_refresh_pick:"))
+    dp.message.register(process_ig_cookies,    IGStates.waiting_cookies)
     dp.message.register(cmd_ig_popular, Command("ig_popular"))
 
     logger.info("✅ Instagram хендлеры зарегистрированы")
