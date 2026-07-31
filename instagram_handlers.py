@@ -15,6 +15,8 @@ import time
 import os
 
 import aiohttp
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -102,11 +104,14 @@ def _profile_keyboard(ig_username: str, user_id: int) -> InlineKeyboardMarkup:
     sub_s = ig_is_subscribed(uid, ig_username, "stories")
     sub_p = ig_is_subscribed(uid, ig_username, "posts")
     sub_a = ig_is_subscribed(uid, ig_username, "avatar")
+    filter_p = _get_filter(uid, ig_username, "posts")
+    filter_icon = {"all": "🔔", "reels": "🎬", "photos": "🖼", "hot": "🔥"}.get(filter_p, "🔔")
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="📸 Истории", callback_data=f"ig_stories:{ig_username}"),
-            InlineKeyboardButton(text="🖼 Посты", callback_data=f"ig_posts:{ig_username}:"),
+            InlineKeyboardButton(text="📸 Истории",   callback_data=f"ig_stories:{ig_username}"),
+            InlineKeyboardButton(text="🖼 Посты",      callback_data=f"ig_posts:{ig_username}:"),
+            InlineKeyboardButton(text="👥 Похожие",   callback_data=f"ig_related:{ig_username}"),
         ],
         [
             InlineKeyboardButton(
@@ -123,6 +128,12 @@ def _profile_keyboard(ig_username: str, user_id: int) -> InlineKeyboardMarkup:
                 text=("🔔 Аватарка: вкл" if sub_a else "🔕 Аватарка: выкл"),
                 callback_data=f"ig_sub:avatar:{ig_username}"
             ),
+            InlineKeyboardButton(
+                text=f"{filter_icon} Фильтр уведомлений",
+                callback_data=f"ig_sfm:posts:{ig_username}"
+            ),
+        ],
+        [
             InlineKeyboardButton(text="📋 Мои подписки", callback_data="ig_my_subs"),
         ],
     ])
@@ -208,25 +219,19 @@ async def process_ig_username(message: types.Message, state: FSMContext):
     await _show_profile(message, username, message.from_user.id)
 
 async def _show_profile(source, ig_username: str, tg_user_id: int):
-    """Показать профиль Instagram и меню действий."""
-    import html  # Встроенный модуль для защиты от спецсимволов
-    
+    """Показать профиль Instagram — В4 анимация + В13 счётчики + В15 карточка."""
+    import html
     ig_username = ig_username.lower().strip("@")
 
-    # source может быть Message или callback.message
-    is_msg = isinstance(source, types.Message)
-    send_fn = source.answer if is_msg else source.edit_text
-
-    status = await source.answer(f"🔍 Ищу профиль @{ig_username}...")
+    # В4: поэтапная анимация загрузки
+    anim = _LoadingAnimation(source)
+    await anim.start(f"🔍 Ищу профиль @{ig_username}...")
+    await asyncio.sleep(0.3)
 
     info = await get_user_info(ig_username)
 
-    try:
-        await status.delete()
-    except Exception:
-        pass
-
     if not info:
+        await anim.done()
         await source.answer(
             f"❌ Пользователь <b>@{html.escape(ig_username)}</b> не найден или недоступен.\n"
             "<i>Возможно, профиль приватный или имя написано неверно.</i>",
@@ -234,27 +239,9 @@ async def _show_profile(source, ig_username: str, tg_user_id: int):
         )
         return
 
-    # Защищаем текст от поломки разметки
-    safe_full_name = html.escape(info.get('full_name') or ig_username)
-    safe_username = html.escape(ig_username)
-    safe_bio = html.escape(info.get("biography", "").strip())
+    await anim.step("📸 Загружаю аватарку...")
 
-    verified = "✅" if info.get("is_verified") else ""
-    private = "🔒 приватный" if info.get("is_private") else "🌐 открытый"
-    bio_line = f"\n📝 <i>{safe_bio}</i>" if safe_bio else ""
-
-    text = (
-        f"📸 <b>{safe_full_name}</b> {verified}\n"
-        f"👤 @{safe_username} · {private}\n\n"
-        f"👥 {_fmt_count(info.get('followers', 0))} подписчиков · "
-        f"👣 {_fmt_count(info.get('following', 0))} подписок · "
-        f"🖼 {_fmt_count(info.get('posts_count', 0))} постов"
-        f"{bio_line}"
-    )
-
-    kb = _profile_keyboard(ig_username, tg_user_id)
-
-    # Аватарка: сначала через instagrapi (надёжно), fallback — прямой URL
+    # Аватарка
     avatar_bytes: bytes | None = None
     try:
         avatar_bytes = await get_avatar_bytes(ig_username)
@@ -265,16 +252,16 @@ async def _show_profile(source, ig_username: str, tg_user_id: int):
         if avatar_url:
             avatar_bytes = await _download(avatar_url)
 
-    if avatar_bytes:
-        await source.answer_photo(
-            BufferedInputFile(avatar_bytes, filename="avatar.jpg"),
-            caption=text,
-            parse_mode="HTML",
-            reply_markup=kb
-        )
-        return
+    await anim.step("✨ Формирую карточку...")
+    await anim.done()
 
-    await source.answer(text, parse_mode="HTML", reply_markup=kb)
+    # Ф13: записываем просмотр
+    _record_view(ig_username, str(tg_user_id))
+
+    kb = _profile_keyboard(ig_username, tg_user_id)
+
+    # В13 + В15: карточка с анимацией счётчиков
+    await _send_profile_with_counter_animation(source, info, kb, avatar_bytes)
 
 # ── КОЛБЭК: ПРОФИЛЬ ───────────────────────────────────────────────────────────
 
@@ -415,23 +402,20 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if link:
             cap += f"\n🔗 {link}"
 
-        # Видео → InputMediaVideo (тип из поля type, не из расширения URL)
-        if is_video:
-            thumb_data = None
-            if thumb_url and thumb_url != vid_url:
-                thumb_data = await _download(thumb_url)
-            video_kwargs = dict(
+        # Настоящий mp4 → InputMediaVideo, иначе (превью jpg) → Photo с 🎬
+        real_video = is_video and vid_url and (
+            vid_url.lower().endswith(".mp4") or "/videos/" in vid_url
+        )
+        if real_video:
+            album_items.append(InputMediaVideo(
                 media=BufferedInputFile(data, filename=f"post_{i}.mp4"),
-                caption=cap[:1020],
-                supports_streaming=True,
-            )
-            if thumb_data:
-                video_kwargs["thumbnail"] = BufferedInputFile(thumb_data, filename=f"thumb_{i}.jpg")
-            album_items.append(InputMediaVideo(**video_kwargs))
+                caption=cap[:1020]
+            ))
         else:
+            prefix = "🎬 " if is_video else ""
             album_items.append(InputMediaPhoto(
                 media=BufferedInputFile(data, filename=f"post_{i}.jpg"),
-                caption=cap[:1020]
+                caption=f"{prefix}{cap}"[:1020]
             ))
         await asyncio.sleep(0.3)
 
@@ -663,40 +647,550 @@ async def _check_user(bot: Bot, ig_username: str, subs: list[dict]):
             posts = info.get("posts", [])
             if not posts:
                 continue
-            new_posts = [p for p in posts if p["id"] and not ig_already_sent(user_id, f"post_{p['id']}")]
+            # Ф1: фильтр уведомлений
+            active_filter = _get_filter(user_id, ig_username, "posts")
+            new_posts = [
+                p for p in posts
+                if p["id"]
+                and not ig_already_sent(user_id, f"post_{p['id']}")
+                and _post_passes_filter(p, active_filter)
+            ]
             if not new_posts:
                 continue
-
-            await bot.send_message(
-                user_id,
-                f"🖼 *@{ig_username}* опубликовал(а) {len(new_posts)} новых постов!",
-                parse_mode="Markdown"
-            )
             for post in new_posts[:5]:
-                media_list = post.get("media", [])
-                if not media_list:
-                    continue
-                m = media_list[0]
-                data = await _download(m.get("url") or m.get("thumb", ""))
-                if not data:
-                    continue
-                cap = (
-                    (post.get("caption", "")[:200] or "") +
-                    f"\n\n❤️ {_fmt_count(post.get('like_count', 0))}  "
-                    f"💬 {_fmt_count(post.get('comment_count', 0))}"
-                ).strip()
-                sc = post.get("shortcode", "")
-                if sc:
-                    cap += f"\n🔗 https://www.instagram.com/p/{sc}/"
-                try:
-                    if m["type"] == "video":
-                        await bot.send_video(user_id, BufferedInputFile(data, filename="post.mp4"), caption=cap[:1020])
-                    else:
-                        await bot.send_photo(user_id, BufferedInputFile(data, filename="post.jpg"), caption=cap[:1020])
-                    ig_mark_sent(user_id, f"post_{post['id']}")
-                except Exception as e:
-                    logger.warning(f"IG post notify {user_id}: {e}")
-                await asyncio.sleep(0.5)
+                # В5: стильное уведомление
+                await _notify_new_post_styled(bot, user_id, ig_username, post)
+                ig_mark_sent(user_id, f"post_{post['id']}")
+                await asyncio.sleep(0.8)
+
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# НОВЫЕ ФИЧИ: Ф1 умные уведомления | Ф7 похожие аккаунты | Ф13 счётчик просмотров
+#             В4 анимация загрузки  | В5 красивые уведомления
+#             В13 анимация счётчиков | В15 тёмная карточка Yandex-стиль
+# ════════════════════════════════════════════════════════════════════════════════
+
+import sqlite3 as _sqlite3
+
+# ── В15 + В13: ГЕНЕРАЦИЯ ТЁМНОЙ КАРТОЧКИ ПРОФИЛЯ ──────────────────────────────
+
+def _dominant_color(img_bytes: bytes) -> tuple[int, int, int]:
+    """Извлечь доминирующий цвет из изображения (упрощённо — средний по краям)."""
+    try:
+        img = Image.open(BytesIO(img_bytes)).convert("RGB").resize((50, 50))
+        pixels = list(img.getdata())
+        r = sum(p[0] for p in pixels) // len(pixels)
+        g = sum(p[1] for p in pixels) // len(pixels)
+        b = sum(p[2] for p in pixels) // len(pixels)
+        # Затемняем чтобы использовать как фон
+        return (max(0, r - 80), max(0, g - 80), max(0, b - 80))
+    except Exception:
+        return (18, 18, 18)
+
+
+def _make_profile_card(info: dict, avatar_bytes: bytes | None = None) -> bytes | None:
+    """
+    В15: Генерация тёмной карточки профиля в стиле Yandex Music.
+    Возвращает PNG байты или None при ошибке.
+    """
+    try:
+        W, H = 800, 320
+        BG     = (12, 12, 12)
+        YELLOW = (255, 213, 0)
+        WHITE  = (255, 255, 255)
+        GREY   = (160, 160, 160)
+        CARD_R = (28, 28, 28)
+
+        # Доминирующий цвет из аватарки для акцента
+        accent = _dominant_color(avatar_bytes) if avatar_bytes else (40, 40, 40)
+
+        img  = Image.new("RGB", (W, H), BG)
+        draw = ImageDraw.Draw(img)
+
+        # Градиентная полоса сверху (акцент)
+        for y in range(6):
+            alpha = int(255 * (1 - y / 6))
+            r = int(accent[0] * alpha / 255 + YELLOW[0] * (255 - alpha) / 255)
+            g = int(accent[1] * alpha / 255 + YELLOW[1] * (255 - alpha) / 255)
+            b = int(accent[2] * alpha / 255 + YELLOW[2] * (255 - alpha) / 255)
+            draw.line([(0, y), (W, y)], fill=(r, g, b))
+
+        # Основная карточка
+        draw.rounded_rectangle([16, 16, W - 16, H - 16], radius=18, fill=CARD_R)
+
+        # Боковая полоса-акцент
+        draw.rounded_rectangle([16, 16, 22, H - 16], radius=4, fill=YELLOW)
+
+        # Аватарка
+        avatar_x, avatar_y, avatar_size = 40, 40, 200
+        if avatar_bytes:
+            try:
+                av = Image.open(BytesIO(avatar_bytes)).convert("RGBA").resize((avatar_size, avatar_size))
+                # Обрезаем в круг
+                mask = Image.new("L", (avatar_size, avatar_size), 0)
+                ImageDraw.Draw(mask).ellipse([0, 0, avatar_size, avatar_size], fill=255)
+                av_out = Image.new("RGBA", (avatar_size, avatar_size), (0, 0, 0, 0))
+                av_out.paste(av, mask=mask)
+                # Жёлтое кольцо вокруг аватарки
+                ring = Image.new("RGBA", (avatar_size + 6, avatar_size + 6), (0, 0, 0, 0))
+                ImageDraw.Draw(ring).ellipse([0, 0, avatar_size + 5, avatar_size + 5],
+                                             outline=YELLOW, width=3)
+                img.paste(ring, (avatar_x - 3, avatar_y - 3), ring)
+                img.paste(av_out, (avatar_x, avatar_y), av_out)
+            except Exception:
+                draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size],
+                             fill=(40, 40, 40), outline=YELLOW, width=2)
+        else:
+            draw.ellipse([avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size],
+                         fill=(40, 40, 40), outline=YELLOW, width=2)
+
+        # Текстовая зона
+        tx = avatar_x + avatar_size + 28
+        ty = 45
+
+        # Загружаем шрифты (fallback на дефолтный)
+        try:
+            font_big   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
+            font_med   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
+        except Exception:
+            font_big = font_med = font_small = ImageFont.load_default()
+
+        # Имя
+        full_name = (info.get("full_name") or info.get("username", ""))[:28]
+        verified  = " ✓" if info.get("is_verified") else ""
+        draw.text((tx, ty), full_name + verified, font=font_big, fill=WHITE)
+
+        # Username
+        draw.text((tx, ty + 34), f"@{info.get('username', '')}", font=font_med, fill=YELLOW)
+
+        # Бейдж приватности
+        badge_text = "🔒 Приватный" if info.get("is_private") else "🌐 Открытый"
+        draw.text((tx, ty + 60), badge_text, font=font_small, fill=GREY)
+
+        # Разделитель
+        draw.line([(tx, ty + 88), (W - 32, ty + 88)], fill=(50, 50, 50), width=1)
+
+        # Счётчики — 3 блока
+        counters = [
+            (_fmt_count(info.get("followers", 0)),  "подписчики"),
+            (_fmt_count(info.get("following", 0)),  "подписки"),
+            (_fmt_count(info.get("posts_count", 0)), "посты"),
+        ]
+        block_w = (W - tx - 32) // 3
+        for i, (val, label) in enumerate(counters):
+            bx = tx + i * block_w
+            draw.text((bx, ty + 100), val,   font=font_big,   fill=YELLOW)
+            draw.text((bx, ty + 132), label, font=font_small, fill=GREY)
+
+        # Bio
+        bio = (info.get("biography") or "").strip()[:60]
+        if bio:
+            draw.text((tx, ty + 162), bio, font=font_small, fill=GREY)
+
+        # Бейджи (В6 — встроены сюда)
+        followers = info.get("followers", 0)
+        badge_x = 40
+        badge_y = H - 52
+        badges = []
+        if info.get("is_verified"):     badges.append(("✅ Верифицирован", (30, 120, 60)))
+        if followers >= 1_000_000:      badges.append(("🌟 1M+",           (120, 80, 0)))
+        elif followers >= 100_000:      badges.append(("📈 100K+",         (0, 80, 120)))
+        for badge_text, badge_color in badges[:3]:
+            bw = len(badge_text) * 9 + 16
+            draw.rounded_rectangle([badge_x, badge_y, badge_x + bw, badge_y + 26],
+                                   radius=6, fill=badge_color)
+            draw.text((badge_x + 8, badge_y + 5), badge_text, font=font_small, fill=WHITE)
+            badge_x += bw + 8
+
+        # Брендинг
+        draw.text((W - 160, H - 30), "Instagram Viewer", font=font_small, fill=(50, 50, 50))
+
+        out = BytesIO()
+        img.save(out, format="PNG", optimize=True)
+        return out.getvalue()
+
+    except Exception as e:
+        logger.error(f"_make_profile_card error: {e}")
+        return None
+
+
+# ── В4: АНИМИРОВАННАЯ ЗАГРУЗКА ─────────────────────────────────────────────────
+
+class _LoadingAnimation:
+    """Поэтапно редактирует одно сообщение показывая прогресс загрузки."""
+
+    def __init__(self, message: types.Message):
+        self._msg   = message
+        self._sent  = None
+
+    async def start(self, text: str = "🔍 Ищу профиль..."):
+        self._sent = await self._msg.answer(text)
+        return self
+
+    async def step(self, text: str):
+        if self._sent:
+            try:
+                self._sent = await self._sent.edit_text(text)
+            except Exception:
+                pass
+
+    async def done(self):
+        if self._sent:
+            try:
+                await self._sent.delete()
+            except Exception:
+                pass
+        self._sent = None
+
+
+# ── В13: АНИМАЦИЯ СЧЁТЧИКОВ ────────────────────────────────────────────────────
+
+async def _send_profile_with_counter_animation(
+    source, info: dict, kb: InlineKeyboardMarkup, avatar_bytes: bytes | None
+):
+    """
+    В13: Сначала шлём карточку с «?» вместо чисел, потом редактируем с реальными.
+    Создаёт эффект "загрузки данных".
+    """
+    import html
+    safe_name = html.escape(info.get("full_name") or info.get("username", ""))
+    safe_user = html.escape(info.get("username", ""))
+    verified  = "✅" if info.get("is_verified") else ""
+    private   = "🔒 приватный" if info.get("is_private") else "🌐 открытый"
+    bio_line  = (f"\n📝 <i>{html.escape(info.get('biography','').strip())}</i>"
+                 if info.get("biography","").strip() else "")
+
+    # Шаг 1: «?» вместо чисел
+    text_loading = (
+        f"📸 <b>{safe_name}</b> {verified}\n"
+        f"👤 @{safe_user} · {private}\n\n"
+        f"👥 <i>загружаю...</i> подписчиков · "
+        f"👣 <i>загружаю...</i> подписок · "
+        f"🖼 <i>загружаю...</i> постов"
+        f"{bio_line}"
+    )
+
+    # Шаг 2: реальные числа
+    text_final = (
+        f"📸 <b>{safe_name}</b> {verified}\n"
+        f"👤 @{safe_user} · {private}\n\n"
+        f"👥 <b>{_fmt_count(info.get('followers', 0))}</b> подписчиков · "
+        f"👣 <b>{_fmt_count(info.get('following', 0))}</b> подписок · "
+        f"🖼 <b>{_fmt_count(info.get('posts_count', 0))}</b> постов"
+        f"{bio_line}"
+    )
+
+    # Пробуем PNG-карточку (В15)
+    card = _make_profile_card(info, avatar_bytes)
+    if card:
+        if avatar_bytes or True:
+            sent = await source.answer_photo(
+                BufferedInputFile(card, filename="profile.png"),
+                caption=text_loading,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            await asyncio.sleep(0.8)
+            try:
+                await sent.edit_caption(caption=text_final, parse_mode="HTML", reply_markup=kb)
+            except Exception:
+                pass
+            return
+
+    # Fallback: текст
+    if avatar_bytes:
+        sent = await source.answer_photo(
+            BufferedInputFile(avatar_bytes, filename="avatar.jpg"),
+            caption=text_loading, parse_mode="HTML", reply_markup=kb,
+        )
+        await asyncio.sleep(0.8)
+        try:
+            await sent.edit_caption(caption=text_final, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+    else:
+        sent = await source.answer(text_loading, parse_mode="HTML", reply_markup=kb)
+        await asyncio.sleep(0.8)
+        try:
+            await sent.edit_text(text_final, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            pass
+
+
+# ── Ф13: СЧЁТЧИК ПРОСМОТРОВ ПРОФИЛЕЙ ──────────────────────────────────────────
+
+def _ig_views_db() -> str:
+    from instagram_viewer import _db_path as _ig_db_path
+    return _ig_db_path().replace("instagram.db", "ig_views.db")
+
+def _init_views_db():
+    conn = _sqlite3.connect(_ig_views_db())
+    conn.execute("""CREATE TABLE IF NOT EXISTS ig_profile_views (
+        ig_username TEXT NOT NULL,
+        user_id     TEXT NOT NULL,
+        view_count  INTEGER DEFAULT 1,
+        last_viewed DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ig_username, user_id)
+    )""")
+    conn.commit()
+    conn.close()
+
+def _record_view(ig_username: str, user_id: str):
+    try:
+        _init_views_db()
+        conn = _sqlite3.connect(_ig_views_db())
+        conn.execute("""
+            INSERT INTO ig_profile_views (ig_username, user_id, view_count, last_viewed)
+            VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(ig_username, user_id) DO UPDATE SET
+                view_count = view_count + 1,
+                last_viewed = CURRENT_TIMESTAMP
+        """, (ig_username, user_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"_record_view: {e}")
+
+def _get_popular_profiles(limit: int = 5) -> list[dict]:
+    try:
+        _init_views_db()
+        conn = _sqlite3.connect(_ig_views_db())
+        rows = conn.execute("""
+            SELECT ig_username, SUM(view_count) as total, MAX(last_viewed) as last_v
+            FROM ig_profile_views
+            GROUP BY ig_username
+            ORDER BY total DESC LIMIT ?
+        """, (limit,)).fetchall()
+        conn.close()
+        return [{"username": r[0], "views": r[1], "last": r[2]} for r in rows]
+    except Exception:
+        return []
+
+def _get_my_viewed(user_id: str, limit: int = 5) -> list[dict]:
+    try:
+        _init_views_db()
+        conn = _sqlite3.connect(_ig_views_db())
+        rows = conn.execute("""
+            SELECT ig_username, view_count, last_viewed
+            FROM ig_profile_views WHERE user_id=?
+            ORDER BY last_viewed DESC LIMIT ?
+        """, (user_id, limit)).fetchall()
+        conn.close()
+        return [{"username": r[0], "views": r[1], "last": r[2]} for r in rows]
+    except Exception:
+        return []
+
+
+# ── Ф7: ПОХОЖИЕ АККАУНТЫ ──────────────────────────────────────────────────────
+
+async def callback_ig_related(callback: types.CallbackQuery):
+    """Показать похожие аккаунты через instagrapi user_related_profiles."""
+    ig_username = callback.data.split(":", 1)[1]
+    await callback.answer("🔍 Ищу похожие аккаунты...")
+
+    try:
+        from instagram_viewer import _POOL
+
+        def _fetch(cl):
+            user = cl.user_info_by_username(ig_username)
+            related = cl.user_related_profiles(user.pk)
+            return related[:6]
+
+        profiles = await _POOL.run(_fetch)
+    except Exception as e:
+        logger.error(f"ig_related {ig_username}: {e}")
+        profiles = []
+
+    if not profiles:
+        await callback.message.answer("😕 Не удалось найти похожие аккаунты.")
+        return
+
+    lines = [f"👥 <b>Похожие на @{ig_username}:</b>\n"]
+    buttons = []
+    for p in profiles:
+        uname = getattr(p, "username", "")
+        fname = getattr(p, "full_name", "") or uname
+        followers = getattr(p, "follower_count", 0) or 0
+        verified  = " ✅" if getattr(p, "is_verified", False) else ""
+        lines.append(f"• <b>{fname}</b>{verified} @{uname} · {_fmt_count(followers)} подп.")
+        if uname:
+            buttons.append([InlineKeyboardButton(
+                text=f"👤 @{uname}", callback_data=f"ig_profile:{uname}"
+            )])
+
+    buttons.append([InlineKeyboardButton(
+        text="◀️ Назад", callback_data=f"ig_profile:{ig_username}"
+    )])
+
+    await callback.message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+# ── Ф1: УМНЫЕ УВЕДОМЛЕНИЯ — настройка фильтров ───────────────────────────────
+
+# Хранилище фильтров в памяти (можно вынести в БД)
+# user_id:ig_username:sub_type → set of filters
+_SUB_FILTERS: dict[str, set[str]] = {}
+
+NOTIFY_FILTERS = {
+    "all":    "🔔 Всё",
+    "reels":  "🎬 Только Reels",
+    "photos": "🖼 Только фото",
+    "hot":    "🔥 Только популярные (>1K лайков)",
+}
+
+def _filter_key(user_id: str, ig_username: str, sub_type: str) -> str:
+    return f"{user_id}:{ig_username}:{sub_type}"
+
+def _get_filter(user_id: str, ig_username: str, sub_type: str) -> str:
+    return _SUB_FILTERS.get(_filter_key(user_id, ig_username, sub_type), "all")
+
+def _set_filter(user_id: str, ig_username: str, sub_type: str, f: str):
+    _SUB_FILTERS[_filter_key(user_id, ig_username, sub_type)] = f
+
+def _post_passes_filter(post: dict, filter_name: str) -> bool:
+    if filter_name == "all":
+        return True
+    media = post.get("media", [{}])
+    mtype = media[0].get("type", "photo") if media else "photo"
+    if filter_name == "reels":
+        return mtype == "video"
+    if filter_name == "photos":
+        return mtype == "photo"
+    if filter_name == "hot":
+        return post.get("like_count", 0) >= 1000
+    return True
+
+
+async def callback_ig_sub_filter(callback: types.CallbackQuery):
+    """Выбрать фильтр уведомлений для подписки на посты."""
+    _, sub_type, ig_username, filter_name = callback.data.split(":", 3)
+    uid = str(callback.from_user.id)
+    _set_filter(uid, ig_username, sub_type, filter_name)
+    label = NOTIFY_FILTERS.get(filter_name, filter_name)
+    await callback.answer(f"✅ Фильтр: {label}", show_alert=False)
+    # Обновляем клавиатуру
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=_sub_filter_keyboard(ig_username, uid, sub_type)
+        )
+    except Exception:
+        pass
+
+
+def _sub_filter_keyboard(ig_username: str, user_id: str, sub_type: str) -> InlineKeyboardMarkup:
+    current = _get_filter(user_id, ig_username, sub_type)
+    rows = []
+    for key, label in NOTIFY_FILTERS.items():
+        mark = " ✅" if key == current else ""
+        rows.append([InlineKeyboardButton(
+            text=label + mark,
+            callback_data=f"ig_sf:{sub_type}:{ig_username}:{key}"
+        )])
+    rows.append([InlineKeyboardButton(
+        text="◀️ Профиль", callback_data=f"ig_profile:{ig_username}"
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def callback_ig_sub_filter_menu(callback: types.CallbackQuery):
+    """Открыть меню фильтров для подписки на посты."""
+    _, sub_type, ig_username = callback.data.split(":", 2)
+    uid = str(callback.from_user.id)
+    current = _get_filter(uid, ig_username, sub_type)
+    label   = NOTIFY_FILTERS.get(current, current)
+    await callback.answer()
+    await callback.message.answer(
+        f"🔔 <b>Фильтр уведомлений</b>\n"
+        f"@{ig_username} · тип: {sub_type}\n"
+        f"Сейчас: {label}",
+        parse_mode="HTML",
+        reply_markup=_sub_filter_keyboard(ig_username, uid, sub_type),
+    )
+
+
+# ── В5: КРАСИВЫЕ УВЕДОМЛЕНИЯ О НОВЫХ ПОСТАХ ──────────────────────────────────
+
+async def _notify_new_post_styled(bot: Bot, user_id: str, ig_username: str, post: dict):
+    """В5: Стильное уведомление о новом посте."""
+    import html as _html
+    media_list = post.get("media", [])
+    if not media_list:
+        return
+    m = media_list[0]
+    is_video = m.get("type") == "video"
+
+    cap_raw  = post.get("caption", "").strip()[:200]
+    likes    = _fmt_count(post.get("like_count", 0))
+    comments = _fmt_count(post.get("comment_count", 0))
+    sc       = post.get("shortcode", "")
+    icon     = "🎬" if is_video else "🖼"
+
+    caption = (
+        f"{'─' * 22}\n"
+        f"{icon} <b>Новый пост</b> от <a href=\"https://instagram.com/{ig_username}\">@{ig_username}</a>\n"
+        f"{'─' * 22}\n"
+        + (f"📝 <i>{_html.escape(cap_raw)}</i>\n" if cap_raw else "")
+        + f"\n❤️ {likes}   💬 {comments}"
+        + (f"\n\n🔗 <a href=\"https://www.instagram.com/p/{sc}/\">Открыть в Instagram</a>" if sc else "")
+    )
+
+    data = await _download(m.get("url") or m.get("thumb", ""))
+    if not data:
+        await bot.send_message(user_id, caption, parse_mode="HTML",
+                                disable_web_page_preview=True)
+        return
+
+    try:
+        if is_video:
+            await bot.send_video(user_id,
+                BufferedInputFile(data, filename="post.mp4"),
+                caption=caption[:1020], parse_mode="HTML")
+        else:
+            await bot.send_photo(user_id,
+                BufferedInputFile(data, filename="post.jpg"),
+                caption=caption[:1020], parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"_notify_new_post_styled {user_id}: {e}")
+
+
+# ── КОМАНДА /ig_popular ────────────────────────────────────────────────────────
+
+async def cmd_ig_popular(message: types.Message):
+    """/ig_popular — топ просматриваемых профилей."""
+    popular = _get_popular_profiles(5)
+    my      = _get_my_viewed(str(message.from_user.id), 3)
+
+    if not popular and not my:
+        await message.answer("📊 Статистика просмотров пока пуста.")
+        return
+
+    lines = ["📊 <b>Статистика просмотров Instagram</b>\n"]
+    if popular:
+        lines.append("🏆 <b>Топ профилей (все пользователи):</b>")
+        for i, p in enumerate(popular, 1):
+            lines.append(f"{i}. @{p['username']} — {p['views']} просмотров")
+    if my:
+        lines.append("\n👤 <b>Ты смотрел недавно:</b>")
+        for p in my:
+            lines.append(f"• @{p['username']} — {p['views']} раз")
+
+    buttons = []
+    for p in (popular[:3]):
+        buttons.append([InlineKeyboardButton(
+            text=f"👤 @{p['username']}",
+            callback_data=f"ig_profile:{p['username']}"
+        )])
+
+    await message.answer(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    )
 
 
 # ── РЕГИСТРАЦИЯ ───────────────────────────────────────────────────────────────
@@ -713,6 +1207,10 @@ def register_ig_handlers(dp: Dispatcher):
     dp.callback_query.register(callback_ig_stories, F.data.startswith("ig_stories:"))
     dp.callback_query.register(callback_ig_posts, F.data.startswith("ig_posts:"))
     dp.callback_query.register(callback_ig_sub, F.data.startswith("ig_sub:"))
-    dp.callback_query.register(callback_ig_my_subs, F.data == "ig_my_subs")
+    dp.callback_query.register(callback_ig_my_subs,         F.data == "ig_my_subs")
+    dp.callback_query.register(callback_ig_related,         F.data.startswith("ig_related:"))
+    dp.callback_query.register(callback_ig_sub_filter,      F.data.startswith("ig_sf:"))
+    dp.callback_query.register(callback_ig_sub_filter_menu, F.data.startswith("ig_sfm:"))
+    dp.message.register(cmd_ig_popular, Command("ig_popular"))
 
     logger.info("✅ Instagram хендлеры зарегистрированы")
