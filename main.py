@@ -672,17 +672,12 @@ def build_duty_message(target_date, label):
         ""
     ]
 
-        if target_date.month == 7 and target_date.day in JULY_DOCTORS:
-        d_vrach, d_hirurg1, d_hirurg2 = JULY_DOCTORS[target_date.day]
-        lines.extend([
-            "🏥 *ВРАЧЕБНАЯ БРИГАДА:*",
-            f"  🩺 Деж. врач: {d_vrach}",
-            f"  🔪 I хирург: {d_hirurg1}",
-            f"  🔪 II хирург: {d_hirurg2}",
-            div, ""
-        ])
-    elif target_date.month == 8 and target_date.day in AUGUST_DOCTORS:
-        d_vrach, d_hirurg1, d_hirurg2 = AUGUST_DOCTORS[target_date.day]
+    # Выбираем нужный словарь врачей в зависимости от месяца
+    doctors_map = {7: JULY_DOCTORS, 8: AUGUST_DOCTORS}
+    doctors_dict = doctors_map.get(target_date.month)
+
+    if doctors_dict and target_date.day in doctors_dict:
+        d_vrach, d_hirurg1, d_hirurg2 = doctors_dict[target_date.day]
         lines.extend([
             "🏥 *ВРАЧЕБНАЯ БРИГАДА:*",
             f"  🩺 Деж. врач: {d_vrach}",
