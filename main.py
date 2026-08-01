@@ -52,13 +52,10 @@ from aiogram.types import WebAppInfo
 from instagram_handlers import (
     register_ig_handlers,
     ig_checker_task,
-    ig_session_health_task,  # ← новый
-    _set_bot_ref,            # ← новый
+    ig_session_health_task,
+    _set_bot_ref,
 )
-
-# При старте:
-asyncio.create_task(ig_checker_task(bot))
-asyncio.create_task(ig_session_health_task(bot))  # ← новыйfrom media_downloader import register_media_handlers
+from media_downloader import register_media_handlers
 from feed_handlers import register_feed_handlers
 # ----------------------
 
