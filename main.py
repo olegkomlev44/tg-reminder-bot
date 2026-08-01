@@ -49,8 +49,16 @@ from db import (
 )
 from web_server import start_web_server
 from aiogram.types import WebAppInfo
-from instagram_handlers import register_ig_handlers, ig_checker_task
-from media_downloader import register_media_handlers
+from instagram_handlers import (
+    register_ig_handlers,
+    ig_checker_task,
+    ig_session_health_task,  # ← новый
+    _set_bot_ref,            # ← новый
+)
+
+# При старте:
+asyncio.create_task(ig_checker_task(bot))
+asyncio.create_task(ig_session_health_task(bot))  # ← новыйfrom media_downloader import register_media_handlers
 from feed_handlers import register_feed_handlers
 # ----------------------
 
@@ -2829,8 +2837,10 @@ async def main():
     # ---------------------------------
 
     bot = Bot(token=TOKEN)
+    _set_bot_ref(bot)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+    register_ig_handlers(dp)
 
     dp.inline_query.register(inline_music_search)
 
@@ -2936,6 +2946,7 @@ async def main():
     scheduler.add_job(send_retry_reminder, "interval", minutes=15, args=[bot, "proc"])
     scheduler.start()
     asyncio.create_task(ig_checker_task(bot))
+    asyncio.create_task(ig_session_health_task(bot))  # ← новый
 
     logger.info("✅ бот запущен. наряды под контролем 🫡")
     try:
