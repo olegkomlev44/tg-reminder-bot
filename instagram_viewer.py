@@ -137,6 +137,8 @@ class _AccountPool:
         self._initialized = False
         # Счётчик успешных запросов по индексу аккаунта (для статистики)
         self._request_counts: dict[int, int] = {}
+        # Уже известные мёртвые сессии — не спамим алертами повторно
+        self._known_dead: set[str] = set()
 
     # ── инициализация ────────────────────────────────────────────────────────
 
@@ -275,6 +277,7 @@ class _AccountPool:
                 self._clients.append(None)
             self._clients[idx] = new_cl
             self._request_counts[idx] = 0
+            self._known_dead.discard(login)  # сессия ожила — сбрасываем флаг
 
         logger.info(f"[pool] ✅ reload_client {login}: клиент заменён и протестирован")
         return True, "Клиент успешно перезагружен и протестирован"
@@ -323,12 +326,14 @@ class _AccountPool:
                 )
                 self._next_client()
                 last_err = e
-                # Асинхронно оповещаем админов (не блокируем цикл retry)
-                if _on_session_dead:
-                    try:
-                        asyncio.ensure_future(_on_session_dead(login))
-                    except Exception:
-                        pass
+                # Алерт только если эта сессия ещё не была помечена мёртвой
+                if login not in self._known_dead:
+                    self._known_dead.add(login)
+                    if _on_session_dead:
+                        try:
+                            asyncio.ensure_future(_on_session_dead(login))
+                        except Exception:
+                            pass
 
             except (UserNotFound, PrivateAccount):
                 raise  # не ошибка пула, пробрасываем выше

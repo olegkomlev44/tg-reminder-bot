@@ -692,17 +692,17 @@ async def ig_session_health_task(bot: Bot):
     while True:
         logger.info("🔍 IG session health check...")
         try:
+            from instagram_viewer import _POOL as _ig_pool
             statuses = get_sessions_status()
             dead_logins = []
 
             for s in statuses:
                 login = s["login"]
                 if not s["alive"]:
-                    # Слот пустой — возможно не инициализировался
                     dead_logins.append(login)
                     continue
 
-                # Делаем лёгкий тест для живых клиентов
+                # Тест только для живых клиентов
                 try:
                     ok = await validate_session(login)
                     status_icon = "✅" if ok else "💀"
@@ -713,14 +713,23 @@ async def ig_session_health_task(bot: Bot):
                     logger.warning(f"[health] ошибка проверки {login}: {e}")
                     dead_logins.append(login)
 
-                await asyncio.sleep(5)  # пауза между проверками аккаунтов
+                await asyncio.sleep(5)
 
-            if dead_logins:
-                logger.warning(f"[health] мёртвые сессии: {dead_logins}")
+            # Алертим только новые смерти — о которых ещё не уведомляли
+            new_dead = [l for l in dead_logins if l not in _ig_pool._known_dead]
+            already_known = [l for l in dead_logins if l in _ig_pool._known_dead]
+
+            if already_known:
+                logger.info(f"[health] уже известны как мёртвые (алерт не повторяем): {already_known}")
+
+            if new_dead:
+                # Помечаем как известных мёртвых
+                _ig_pool._known_dead.update(new_dead)
+                logger.warning(f"[health] новые мёртвые сессии: {new_dead}")
                 admin_ids = _get_admin_ids()
                 for uid in admin_ids:
                     try:
-                        dead_list = "\n".join(f"• <code>{l}</code>" for l in dead_logins)
+                        dead_list = "\n".join(f"• <code>{l}</code>" for l in new_dead)
                         await bot.send_message(
                             uid,
                             f"⚠️ <b>Health Check: мёртвые сессии</b>\n\n"
@@ -730,7 +739,7 @@ async def ig_session_health_task(bot: Bot):
                         )
                     except Exception as e:
                         logger.warning(f"[health] алерт {uid}: {e}")
-            else:
+            elif not dead_logins:
                 logger.info("[health] все сессии живы ✅")
 
         except Exception as e:
@@ -1360,20 +1369,22 @@ def _build_session_json(username: str, cookies: dict) -> dict | None:
         },
         "last_login": _time.time(),
         "device_settings": {
-            "app_version":     "428.0.0.47.67",
-            "android_version": 35,
-            "android_release": "15",
-            "dpi":             "560dpi",
-            "resolution":      "1344x2992",
-            "manufacturer":    "Google",
-            "device":          "husky",
-            "model":           "Pixel 8 Pro",
+            # Версию можно обновить: берётся из instagrapi → constants.py → SUPPORTED_APP_VERSION
+            # Или смотри тут: https://github.com/subzeroid/instagrapi/blob/master/instagrapi/constants.py
+            "app_version":     "365.0.0.39.109",
+            "android_version": 34,
+            "android_release": "14",
+            "dpi":             "480dpi",
+            "resolution":      "1080x2400",
+            "manufacturer":    "samsung",
+            "device":          "dm3q",
+            "model":           "SM-S918B",
             "cpu":             "arm64-v8a",
-            "version_code":    "671708408",
+            "version_code":    "568858490",
         },
         "user_agent": (
-            "Instagram 428.0.0.47.67 Android "
-            "(35/15; 560dpi; 1344x2992; Google; Pixel 8 Pro; husky; arm64-v8a; en_US; 671708408)"
+            "Instagram 365.0.0.39.109 Android "
+            "(34/14; 480dpi; 1080x2400; samsung; SM-S918B; dm3q; arm64-v8a; en_US; 568858490)"
         ),
         "country":        "US",
         "country_code":   1,
