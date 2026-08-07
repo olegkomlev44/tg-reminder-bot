@@ -13,6 +13,8 @@ import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 import io
 import textwrap
+from anixart_handler import register_anixart_handlers
+from ozon_handler import register_ozon_handlers
 from aiogram.types import BufferedInputFile, InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultCachedAudio
 from music_engine import music_engine, add_id3_tags 
 from recsys import generate_wave_tracks
