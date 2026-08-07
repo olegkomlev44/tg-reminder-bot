@@ -2843,6 +2843,8 @@ async def main():
 
     # ── Feed (Reddit лента) ──────────────────────────────────────────────────────
     register_feed_handlers(dp)
+    register_anixart_handlers(dp)
+    register_ozon_handlers(dp)
 
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
@@ -2924,8 +2926,6 @@ async def main():
 
     dp.message.register(handle_photo, F.photo)
 
-    register_anixart_handlers(dp)
-    register_ozon_handlers(dp)
     # ── Media Downloader ────────────────────────────────────────────────────────
     # Регистрируем ДО handle_ai_chat — иначе ссылки уйдут в AI
     register_media_handlers(dp)
