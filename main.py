@@ -2941,6 +2941,14 @@ async def main():
     asyncio.create_task(ig_checker_task(bot))
     asyncio.create_task(ig_session_health_task(bot))  # ← новый
 
+    # ── Глобальный перехват ошибок ────────────────────────────────────────────
+    @dp.errors()
+    async def _error_handler(event: types.ErrorEvent):
+        logger.exception(
+            f"❌ Ошибка в хэндлере [{type(event.exception).__name__}]: {event.exception}",
+            exc_info=event.exception,
+        )
+
     logger.info("✅ бот запущен. наряды под контролем 🫡")
     try:
         await dp.start_polling(bot, skip_updates=True)
