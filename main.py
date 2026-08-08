@@ -2834,17 +2834,14 @@ async def main():
     _set_bot_ref(bot)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
-    register_ig_handlers(dp)
 
-    dp.inline_query.register(inline_music_search)
-
-    # ── Instagram Viewer ──────────────────────────────────────────────────────
-    register_ig_handlers(dp)
-
-    # ── Feed (Reddit лента) ──────────────────────────────────────────────────────
-    register_feed_handlers(dp)
+    # ── Специализированные роутеры с командами — ПЕРВЫМИ ─────────────────────
     register_anixart_handlers(dp)
     register_ozon_handlers(dp)
+    register_ig_handlers(dp)
+    register_feed_handlers(dp)
+
+    dp.inline_query.register(inline_music_search)
 
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
