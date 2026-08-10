@@ -13,8 +13,6 @@ import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 import io
 import textwrap
-from anixart_handler import register_anixart_handlers
-from ozon_handler import register_ozon_handlers
 from aiogram.types import BufferedInputFile, InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultCachedAudio
 from music_engine import music_engine, add_id3_tags 
 from recsys import generate_wave_tracks
@@ -2836,13 +2834,24 @@ async def main():
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
-    # ── Специализированные роутеры с командами — ПЕРВЫМИ ─────────────────────
-    register_anixart_handlers(dp)
-    register_ozon_handlers(dp)
+    # ── Роутеры Instagram и Feed ──────────────────────────────────────────────
     register_ig_handlers(dp)
     register_feed_handlers(dp)
 
     dp.inline_query.register(inline_music_search)
+
+    # ── /anime и /ozon — напрямую через dp.message.register ──────────────────
+    from anixart_handler import cmd_anime
+    from ozon_handler import cmd_ozon
+    dp.message.register(cmd_anime, Command("anime"))
+    dp.message.register(cmd_ozon,  Command("ozon"))
+
+    # ── Callback-хэндлеры anixart ─────────────────────────────────────────────
+    from anixart_handler import cb_random, cb_info, cb_genre, cb_close
+    dp.callback_query.register(cb_random, F.data == "anix:random")
+    dp.callback_query.register(cb_info,   F.data.startswith("anix:info:"))
+    dp.callback_query.register(cb_genre,  F.data.startswith("anix:genre:"))
+    dp.callback_query.register(cb_close,  F.data == "anix:close")
 
     dp.message.register(cmd_start, Command("start"))
     dp.message.register(cmd_getchatid, Command("chatid"))
