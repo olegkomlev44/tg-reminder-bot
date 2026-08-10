@@ -1125,6 +1125,7 @@ async def cmd_settings(message: types.Message):
 
 
 async def handle_ai_chat(message: types.Message):
+    logger.info(f"🤖 handle_ai_chat получил: {repr(message.text)}")
     if not gemini_client: return
     
     if message.text and (message.text.startswith('/') or message.text in ["📋 Наряд сегодня", "📅 Наряд завтра", "📊 Расписание на неделю", "📓 Журнал", "🔔 Напомнить сейчас", "⚙️ Настройки"]):

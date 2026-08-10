@@ -556,6 +556,16 @@ HELP_TEXT = (
 
 @router.message(Command("ozon"))
 async def cmd_ozon(msg: Message):
+    print(f"✅ CMD_OZON ВЫЗВАН: {msg.text}", flush=True)
+    logger.info(f"✅ CMD_OZON ВЫЗВАН от chat_id={msg.chat.id}: {msg.text}")
+    try:
+        await msg.answer("🔍 Тест: ozon_handler работает!")
+        logger.info("✅ CMD_OZON: ответ отправлен")
+    except Exception as e:
+        logger.error(f"❌ CMD_OZON: не могу ответить: {e}", exc_info=True)
+        print(f"❌ CMD_OZON ERROR: {e}", flush=True)
+        return
+
     args  = (msg.text or "").split(maxsplit=1)
     query = args[1].strip() if len(args) > 1 else ""
 
