@@ -425,15 +425,18 @@ async def search_ozon(p: ParsedQuery, want: int = MAX_RESULTS) -> List[dict]:
             for name, api_url in API_ENDPOINTS:
                 data = await _fetch_json(session, api_url, page_url, UA_DESKTOP)
                 if data:
+                    logger.info(f"Ozon [{name}] ответил, top-level keys: {list(data.keys())[:10]}")
                     page_items = _extract_products(data)
+                    logger.info(f"Ozon [{name}] _extract_products нашёл: {len(page_items)} товаров")
                     if page_items:
-                        logger.debug(f"Ozon [{name}] page={page}: {len(page_items)} товаров")
                         break
+                else:
+                    logger.info(f"Ozon [{name}] не ответил или вернул None")
 
             # HTML-фолбэк
             if not page_items:
                 page_items = await _fetch_html(session, page_url)
-                logger.debug(f"Ozon [html] page={page}: {len(page_items)} товаров")
+                logger.info(f"Ozon [html] нашёл: {len(page_items)} товаров")
 
             if not page_items:
                 break
