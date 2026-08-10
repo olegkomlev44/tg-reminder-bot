@@ -305,6 +305,15 @@ async def _fetch_google_shopping(query: str) -> List[dict]:
                     return []
                 html = await resp.text()
                 logger.info(f"Google Shopping HTML длина: {len(html)}")
+                # Дамп структуры для отладки
+                import re as _re2
+                rub_idx = html.find("₽")
+                logger.info(f"Позиция первого ₽: {rub_idx}")
+                if rub_idx > 0:
+                    logger.info(f"КОНТЕКСТ вокруг ₽: {repr(html[max(0,rub_idx-300):rub_idx+100])}")
+                # Найдём все классы div вблизи цен
+                classes_near_price = _re2.findall(r'class="([^"]{5,60})"', html[max(0,rub_idx-2000):rub_idx+500] if rub_idx > 0 else html[:3000])
+                logger.info(f"Классы вблизи цены: {list(set(classes_near_price))[:20]}")
                 items = _parse_google_shopping(html)
                 logger.info(f"Google Shopping нашёл: {len(items)} товаров")
                 return items
