@@ -171,7 +171,25 @@ async def _wb_search(p: ParsedQuery) -> List[dict]:
                     logger.warning(f"WB: статус {r.status}")
                     return []
                 data = await r.json(content_type=None)
-                products = data.get("data", {}).get("products") or []
+                # Дамп структуры для отладки
+                top_keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
+                logger.info(f"WB JSON top keys: {top_keys}")
+                if isinstance(data, dict):
+                    for k in list(data.keys())[:5]:
+                        v = data[k]
+                        if isinstance(v, dict):
+                            logger.info(f"  WB[{k}] keys: {list(v.keys())[:8]}")
+                        elif isinstance(v, list):
+                            logger.info(f"  WB[{k}] list len={len(v)}, first={str(v[0])[:100] if v else 'empty'}")
+                        else:
+                            logger.info(f"  WB[{k}] = {str(v)[:80]}")
+                products = (
+                    data.get("data", {}).get("products") or
+                    data.get("products") or
+                    data.get("catalog", {}).get("products") or
+                    data.get("value", {}).get("data", {}).get("products") or
+                    []
+                )
                 logger.info(f"WB: {len(products)} товаров")
                 return _parse_wb(products, p)
         except Exception as e:
