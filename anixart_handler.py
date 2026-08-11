@@ -32,17 +32,14 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InlineQuery,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
     Message,
 )
 
 logger = logging.getLogger(__name__)
 
 # ── API ──────────────────────────────────────────────────────────────────────
-BASE_URL   = "https://api-s.anixsekai.com"
-BASE_URL_V2 = "https://api2.anixsekai.com"
+BASE_URL    = "https://api.anixart.tv"
+BASE_URL_V2 = "https://api.anixart.tv"  # api2.anixsekai.com недоступен
 USER_AGENT = (
     "AnixartApp/9.0 BETA 7-25082901 "
     "(Android 9; SDK 28; x86_64; ROG ASUS AI2201_B; ru)"
@@ -87,8 +84,6 @@ async def _api_post(path: str, body: dict = None, v2: bool = False, token: str =
     base = BASE_URL_V2 if v2 else BASE_URL
     url  = base + path
     h = _headers(token)
-    if v2:
-        h["Api-Version"] = "v2"
     async with aiohttp.ClientSession() as s:
         async with s.post(url, json=body or {}, headers=h, timeout=aiohttp.ClientTimeout(total=15)) as r:
             r.raise_for_status()
@@ -276,8 +271,13 @@ async def _do_info(ctx, rid: int):
 async def _do_search(ctx, query: str):
     wait = await _reply(ctx, f"🔍 Ищу «{query}»…")
     try:
-        data    = await _api_post("/search/releases/0", {"query": query, "searchBy": 0}, v2=True)
-        content = data.get("releases") or data.get("content", [])
+        # Пробуем POST поиск
+        try:
+            data = await _api_post("/search/releases/0", {"query": query, "searchBy": 0})
+        except Exception:
+            # Fallback: GET поиск
+            data = await _api_get("/search/releases/0", {"q": query, "query": query})
+        content = data.get("releases") or data.get("content", []) or data.get("data", [])
         if not content:
             await wait.edit_text(f"😔 По запросу «{query}» ничего не найдено.")
             return
@@ -388,48 +388,6 @@ async def cb_close(cq: CallbackQuery):
     except Exception:
         pass
 
-
-# ── Инлайн-режим ─────────────────────────────────────────────────────────────
-@router.inline_query()
-async def inline_anime(iq: InlineQuery):
-    query = (iq.query or "").strip()
-    if not query or len(query) < 2:
-        await iq.answer([], cache_time=5, switch_pm_text="Введите название аниме", switch_pm_parameter="start")
-        return
-
-    try:
-        data    = await _api_post("/search/releases/0", {"query": query, "searchBy": 0}, v2=True)
-        content = data.get("releases") or data.get("content", [])
-    except Exception:
-        content = []
-
-    results = []
-    for item in content[:10]:
-        rid        = item.get("id", 0)
-        title_ru   = item.get("title_ru") or item.get("title_original") or "Без названия"
-        title_orig = item.get("title_original") or ""
-        year       = item.get("year") or "?"
-        st         = item.get("status", {})
-        status     = st.get("name") if isinstance(st, dict) else str(st)
-        ep_rel     = item.get("episodes_released", 0)
-        ep_tot     = item.get("episodes_total", 0) or "?"
-        rating     = item.get("rating", 0)
-
-        text = (
-            f"<b>{title_ru}</b>\n"
-            f"<i>{title_orig}</i>\n\n"
-            f"📅 {year} | 📊 {status}\n"
-            f"⭐ {rating} | 🎬 {ep_rel}/{ep_tot} эп.\n\n"
-            f"🔗 https://anixart.tv/release/{rid}"
-        )
-        results.append(InlineQueryResultArticle(
-            id=str(rid),
-            title=f"{title_ru} ({year})",
-            description=f"{status} • {ep_rel}/{ep_tot} эп. • ⭐{rating}",
-            input_message_content=InputTextMessageContent(message_text=text, parse_mode="HTML"),
-        ))
-
-    await iq.answer(results, cache_time=60)
 
 
 # ── Вспомогалки ──────────────────────────────────────────────────────────────
