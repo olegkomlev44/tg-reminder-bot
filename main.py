@@ -46,7 +46,7 @@ from duty_handlers import (
 )
 from ai_handlers import (
     cmd_weather, cmd_meme, cmd_tldr, cmd_pollinations, cmd_imagen,
-    handle_photo, handle_ai_chat,
+    cmd_ai, handle_photo, handle_document, handle_ai_chat,
 )
 from music_handlers import (
     cmd_music_find, cmd_charts, cmd_music_dashboard, cmd_my_music,
@@ -123,6 +123,7 @@ async def main():
     dp.message.register(cmd_dj,           Command("dj"))
     dp.message.register(cmd_wrapped,      Command("wrapped"))
     dp.message.register(cmd_weather,      Command("pogoda"))
+    dp.message.register(cmd_ai,           Command("ai"))
     dp.message.register(cmd_dembel,       Command("dembel"))
 
     # ── Кнопки клавиатуры ─────────────────────────────────────────────────────
@@ -195,6 +196,7 @@ async def main():
     dp.callback_query.register(cb_info,   F.data.startswith("anix:search:"))  # пагинация поиска
 
     # ── Фото и текст (всегда последними) ─────────────────────────────────────
+    dp.message.register(handle_document, F.document)
     dp.message.register(handle_photo,    F.photo)
     register_media_handlers(dp)
     dp.message.register(handle_ai_chat, F.text)
