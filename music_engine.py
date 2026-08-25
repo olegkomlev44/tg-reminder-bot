@@ -2,6 +2,7 @@ import aiohttp
 import re
 import logging
 import struct
+import time
 import urllib.parse
 import asyncio
 import os
@@ -12,6 +13,35 @@ except ImportError:
     yt_dlp = None
 
 logger = logging.getLogger(__name__)
+
+
+class _TTLCache:
+    """
+    Простой in-memory TTL-кэш (без внешних зависимостей типа cachetools/redis).
+    Достаточно для одного процесса на bothost — снижает число запросов
+    к SoundCloud API (риск бана client_id) и ускоряет отклик на частые запросы.
+    """
+    def __init__(self, ttl: float = 300, maxsize: int = 300):
+        self.ttl = ttl
+        self.maxsize = maxsize
+        self._store: dict[str, tuple[float, object]] = {}
+
+    def get(self, key: str):
+        item = self._store.get(key)
+        if not item:
+            return None
+        ts, value = item
+        if time.monotonic() - ts > self.ttl:
+            self._store.pop(key, None)
+            return None
+        return value
+
+    def set(self, key: str, value):
+        if len(self._store) >= self.maxsize:
+            # Вытесняем самую старую запись (простой LRU-подобный лимит)
+            oldest_key = min(self._store, key=lambda k: self._store[k][0])
+            self._store.pop(oldest_key, None)
+        self._store[key] = (time.monotonic(), value)
 
 SC_API = "https://api-v2.soundcloud.com"
 SC_HEADERS = {
@@ -39,6 +69,9 @@ class MusicEngine:
     def __init__(self):
         self.dynamic_cid = None
         self.current_cid_idx = 0
+        # Кэш поиска и чартов — снижает нагрузку на SoundCloud API
+        self.search_cache = _TTLCache(ttl=300, maxsize=300)   # 5 минут
+        self.charts_cache = _TTLCache(ttl=600, maxsize=20)    # 10 минут
 
     # ─────────────────────────────────────────────
     #  SoundCloud helpers
@@ -57,8 +90,8 @@ class MusicEngine:
                             if m:
                                 self.dynamic_cid = m.group(1)
                                 return self.dynamic_cid
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Не удалось получить динамический client_id SoundCloud: {e}")
         return self.dynamic_cid or SC_CLIENT_IDS[self.current_cid_idx]
 
     def invalidate_cid(self):
@@ -137,11 +170,20 @@ class MusicEngine:
 
     async def search_multi(self, query: str, limit: int = 5, offset: int = 0) -> list:
         """
-        Мультиплатформенный поиск: SoundCloud → YouTube Music
+        Мультиплатформенный поиск: SoundCloud → YouTube Music.
+        Результаты кэшируются на self.search_cache.ttl секунд, чтобы не
+        дёргать SoundCloud API повторно на одинаковые запросы (риск бана
+        client_id + лишняя нагрузка на слабом хостинге).
         """
+        cache_key = f"{query.strip().lower()}::{limit}::{offset}"
+        cached = self.search_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         # 1. SoundCloud (основной)
         sc = await self.search_sc(query, limit=limit, offset=offset)
         if sc:
+            self.search_cache.set(cache_key, sc)
             return sc
 
         # Пагинация SC провалилась — YT не поддерживает offset
@@ -151,14 +193,23 @@ class MusicEngine:
         logger.info(f"SC дал 0 результатов для '{query}', пробуем YouTube Music...")
 
         # 2. YouTube Music
-        return await self.search_yt(query, limit=limit)
+        yt = await self.search_yt(query, limit=limit)
+        if yt:
+            self.search_cache.set(cache_key, yt)
+        return yt
 
     # ─────────────────────────────────────────────
     #  ЧАРТЫ
     # ─────────────────────────────────────────────
 
     async def get_charts(self, limit: int = 5, offset: int = 0):
-        """Чарты SC."""
+        """Чарты SC. Кэшируются на self.charts_cache.ttl секунд — чарты не
+        меняются от запроса к запросу, дёргать SC на каждый /api/wave не нужно."""
+        cache_key = f"{limit}::{offset}"
+        cached = self.charts_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         async with aiohttp.ClientSession() as session:
             cid = await self.get_valid_cid(session)
             params = {
@@ -192,6 +243,8 @@ class MusicEngine:
                                 "artist_avatar": avatar,
                                 "source": "SoundCloud"
                             })
+                        if results:
+                            self.charts_cache.set(cache_key, results)
                         return results
             except Exception as e:
                 logger.error(f"Chart SC error: {e}")
@@ -431,5 +484,6 @@ def add_id3_tags(audio_bytes: bytes, title: str = "", artist: str = "", cover_by
             sz = (((sb[0] & 0x7F) << 21) | ((sb[1] & 0x7F) << 14) | ((sb[2] & 0x7F) << 7) | (sb[3] & 0x7F))
             payload = payload[10 + sz:]
         return header + bytes(frames) + payload
-    except:
+    except Exception as e:
+        logger.warning(f"add_id3_tags failed, возвращаю файл без тегов: {e}")
         return audio_bytes

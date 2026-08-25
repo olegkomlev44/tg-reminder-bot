@@ -105,19 +105,24 @@ def init_db():
         linked_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # Миграция старых колонок (если их не было)
-    try: c.execute("ALTER TABLE favorites ADD COLUMN artwork_url TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE favorites ADD COLUMN source TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE history ADD COLUMN artwork_url TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE history ADD COLUMN source TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE playlists ADD COLUMN artwork_url TEXT")
-    except: pass
-    try: c.execute("ALTER TABLE history ADD COLUMN duration_sec INTEGER DEFAULT 0")
-    except: pass
+    # Миграция старых колонок (если их не было).
+    # Ловим именно sqlite3.OperationalError ("duplicate column") — это
+    # ожидаемая ошибка при повторном запуске; любая другая ошибка (например,
+    # опечатка в SQL или отсутствие самой таблицы) должна быть видна в логах.
+    for stmt in (
+        "ALTER TABLE favorites ADD COLUMN artwork_url TEXT",
+        "ALTER TABLE favorites ADD COLUMN source TEXT",
+        "ALTER TABLE history ADD COLUMN artwork_url TEXT",
+        "ALTER TABLE history ADD COLUMN source TEXT",
+        "ALTER TABLE playlists ADD COLUMN artwork_url TEXT",
+        "ALTER TABLE history ADD COLUMN duration_sec INTEGER DEFAULT 0",
+    ):
+        try:
+            c.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует — это нормально
+        except Exception as e:
+            logger.error(f"Миграция БД неожиданно упала на '{stmt}': {e}")
 
     conn.commit()
     conn.close()
@@ -220,13 +225,16 @@ def get_playlists(user_id) -> dict:
 def save_playlist_track(user_id, name, track_info):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    ok = True
     try:
         c.execute("INSERT OR IGNORE INTO playlists (user_id, name, track_id, title, artist, source, artwork_url) VALUES (?, ?, ?, ?, ?, ?, ?)",
                   (str(user_id), name, str(track_info['id']), track_info.get('title', ''), track_info.get('artist', ''), track_info.get('source', 'SoundCloud'), track_info.get('artwork_url', '')))
         conn.commit()
-    except Exception: pass
+    except Exception as e:
+        logger.error(f"save_playlist_track error (user={user_id}, playlist={name}): {e}")
+        ok = False
     conn.close()
-    return True
+    return ok
 
 def rename_playlist(user_id, old_name, new_name):
     conn = sqlite3.connect(DB_PATH)

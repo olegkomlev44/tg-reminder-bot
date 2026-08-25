@@ -5,8 +5,9 @@ from music_engine import music_engine
 from db import (
                 init_db, get_cached_file_id, save_cached_file_id,
                 save_music_fav, get_music_favs, log_track_history, get_user_history, 
-                get_total_listen_seconds, save_playlist_track,
+                get_total_listen_seconds, save_playlist_track, get_playlists,
                 rename_playlist, remove_track_from_playlist, delete_playlist_db,
+                remove_music_fav, clear_history,
                 init_db, add_dislike, get_blacklist,
                 collab_create, collab_get_meta, collab_get_tracks,
                 collab_add_track, collab_remove_track, collab_delete,
@@ -19,33 +20,89 @@ from db import (
                 add_notification, get_notifications, mark_notifications_read,
                 get_unread_notifications_count)
 import logging
+import time
+from collections import defaultdict, deque
 
 logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# DEV_MODE включает фейкового пользователя для локальной разработки без
+# реального Telegram-клиента. НИКОГДА не должен быть включён в продакшене —
+# при DEV_MODE=1 подпись initData вообще не проверяется.
+DEV_MODE = os.getenv("DEV_MODE", "0") == "1"
 CHUNK = 32 * 1024
+INITDATA_MAX_AGE = 24 * 3600  # секунд — старше считаем протухшим (защита от replay)
 
 init_db()
 
-def verify(init_data: str):
-    if not init_data or init_data == 'test_mode':
-        return {"id": "123456789", "first_name": "TestUser"}
+if not BOT_TOKEN and not DEV_MODE:
+    logger.error(
+        "BOT_TOKEN не задан! Проверка initData Telegram невозможна — "
+        "все запросы будут отклонены с 401. Установите BOT_TOKEN или DEV_MODE=1 для локальной разработки."
+    )
+
+
+def _check_telegram_auth(init_data: str) -> dict | None:
+    """
+    Проверяет подпись Telegram WebApp initData по алгоритму из документации:
+    https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+    Возвращает распарсенного пользователя при успешной проверке, иначе None.
+    """
+    if not init_data or not BOT_TOKEN:
+        return None
     try:
-        d = dict(parse_qsl(init_data))
-        if "user" in d:
-            user = json.loads(d["user"])
-            # Сохраняем профиль при каждом запросе (кеш актуальных данных)
-            try:
-                uid = str(user.get("id", ""))
-                if uid:
-                    first = user.get("first_name", "")
-                    last = user.get("last_name", "")
-                    name = (first + " " + last).strip() or user.get("username") or "Пользователь"
-                    upsert_user_profile(uid, name, user.get("username", ""), user.get("photo_url", ""))
-            except Exception:
-                pass
-            return user
-    except Exception: pass
-    return {"id": "123456789", "first_name": "DevUser"}
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = pairs.pop("hash", None)
+        if not received_hash:
+            return None
+
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(computed_hash, received_hash):
+            logger.warning("initData: подпись не совпала (возможна подделка запроса)")
+            return None
+
+        auth_date = int(pairs.get("auth_date", 0) or 0)
+        if auth_date and (time.time() - auth_date) > INITDATA_MAX_AGE:
+            logger.warning("initData: подпись просрочена (auth_date старше суток)")
+            return None
+
+        user_raw = pairs.get("user")
+        if not user_raw:
+            return None
+        return json.loads(user_raw)
+    except Exception as e:
+        logger.warning(f"initData: ошибка при проверке: {e}")
+        return None
+
+
+def verify(init_data: str):
+    """
+    Возвращает словарь пользователя Telegram, только если initData прошла
+    криптографическую проверку. Бросает web.HTTPUnauthorized, если проверка
+    не пройдена — aiohttp сам превратит это в корректный 401-ответ.
+    """
+    if DEV_MODE and (not init_data or init_data == "test_mode"):
+        return {"id": "123456789", "first_name": "DevUser"}
+
+    user = _check_telegram_auth(init_data)
+    if not user:
+        raise web.HTTPUnauthorized(text=json.dumps({"error": "invalid or missing Telegram auth"}),
+                                    content_type="application/json")
+
+    # Сохраняем профиль при каждом успешно проверенном запросе (кеш актуальных данных)
+    try:
+        uid = str(user.get("id", ""))
+        if uid:
+            first = user.get("first_name", "")
+            last = user.get("last_name", "")
+            name = (first + " " + last).strip() or user.get("username") or "Пользователь"
+            upsert_user_profile(uid, name, user.get("username", ""), user.get("photo_url", ""))
+    except Exception as e:
+        logger.warning(f"upsert_user_profile failed for user {user.get('id')}: {e}")
+
+    return user
 
 def cors(r):
     r.headers.update({
@@ -54,6 +111,70 @@ def cors(r):
         "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
     })
     return r
+
+
+@web.middleware
+async def cors_middleware(request, handler):
+    """
+    Гарантирует CORS-заголовки на ЛЮБОМ ответе, включая ошибки (например,
+    401 из verify() при неверной initData) — без этого браузер показывал бы
+    "CORS error" вместо реального кода ошибки, что маскирует настоящую причину.
+    """
+    if request.method == "OPTIONS":
+        return cors(web.Response())
+    try:
+        response = await handler(request)
+    except web.HTTPException as ex:
+        cors(ex)
+        raise
+    return cors(response)
+
+
+# ═══════════════════════════════════════════════════════════════
+# RATE LIMITING
+# ═══════════════════════════════════════════════════════════════
+# Простой in-memory sliding-window лимитер на процесс. Для одного инстанса
+# на bothost этого достаточно; при горизонтальном масштабировании нужно
+# заменить на Redis (INCR + EXPIRE) — единый счётчик на все инстансы.
+
+RATE_LIMIT_RULES = [
+    # (префикс пути, лимит запросов, окно в секундах)
+    ("/api/stream/", 60, 60),        # аудиостримы — разрешаем чаще
+    ("/api/search", 30, 60),
+    ("/api/wave", 20, 60),
+    ("/api/lyrics", 30, 60),
+    ("/api/users/search", 20, 60),
+]
+
+_rate_buckets: dict[str, deque] = defaultdict(deque)
+
+
+def _is_rate_limited(key: str, limit: int, window: int) -> bool:
+    now = time.monotonic()
+    bucket = _rate_buckets[key]
+    while bucket and now - bucket[0] > window:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        return True
+    bucket.append(now)
+    return False
+
+
+@web.middleware
+async def rate_limit_middleware(request, handler):
+    if request.method == "OPTIONS":
+        return await handler(request)
+    for prefix, limit, window in RATE_LIMIT_RULES:
+        if request.path.startswith(prefix):
+            ip = request.headers.get("X-Forwarded-For", request.remote or "unknown").split(",")[0].strip()
+            key = f"{ip}:{prefix}"
+            if _is_rate_limited(key, limit, window):
+                logger.warning(f"Rate limit hit: {key}")
+                return cors(web.json_response(
+                    {"error": "too_many_requests", "retry_after": window}, status=429
+                ))
+            break
+    return await handler(request)
 
 async def handle_index(request):
     p = os.path.join(os.path.dirname(__file__), "webapp", "index.html")
@@ -256,7 +377,8 @@ async def api_fav_add(request):
         if body.get("track_data"):
             ok = save_music_fav(user["id"], body["track_data"])
             return cors(web.json_response({"ok": ok}))
-    except Exception: pass
+    except Exception as e:
+        logger.warning(f"api_fav_add: {e}")
     return cors(web.json_response({"error": "bad req"}, status=400))
 
 async def api_fav_remove(request):
@@ -268,7 +390,8 @@ async def api_fav_remove(request):
         if track_id:
             remove_music_fav(user["id"], track_id)
             return cors(web.json_response({"ok": True}))
-    except Exception: pass
+    except Exception as e:
+        logger.warning(f"api_fav_remove: {e}")
     return cors(web.json_response({"error": "bad req"}, status=400))
 
 async def api_history_clear(request):
@@ -329,11 +452,12 @@ async def api_history_add(request):
                 try:
                     parts = str(track_data['duration']).split(':')
                     track_data['duration_sec'] = int(parts[0]) * 60 + int(parts[1]) if len(parts) == 2 else 0
-                except:
+                except (ValueError, IndexError):
                     track_data['duration_sec'] = 0
             log_track_history(user["id"], track_data)
         return cors(web.json_response({"ok": True}))
-    except Exception: pass
+    except Exception as e:
+        logger.warning(f"api_history_add: {e}")
     return cors(web.json_response({"error": "bad"}, status=400))
   
 async def api_pl_add(request):
@@ -581,7 +705,7 @@ async def api_notifications_read(request):
 
 
 async def start_web_server():
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware, rate_limit_middleware])
     app.router.add_get("/", handle_index)
     app.router.add_get("/sw.js", handle_sw)
     app.router.add_get("/api/tracks", api_get_tracks)
