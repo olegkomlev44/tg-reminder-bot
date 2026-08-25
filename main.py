@@ -203,7 +203,7 @@ async def main():
     # ── Фото и текст (всегда последними) ─────────────────────────────────────
     dp.message.register(handle_photo,    F.photo)
     register_media_handlers(dp)
-    dp.message.register(handle_ai_chat, F.text)
+    dp.message.register(handle_ai_chat, F.text & ~F.text.startswith("/"))
 
     # ── Планировщик ───────────────────────────────────────────────────────────
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
