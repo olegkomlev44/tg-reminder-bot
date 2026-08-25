@@ -46,7 +46,7 @@ from duty_handlers import (
 )
 from ai_handlers import (
     cmd_weather, cmd_meme, cmd_tldr, cmd_pollinations, cmd_imagen,
-    cmd_ai, handle_photo, handle_document, handle_ai_chat,
+    handle_photo, handle_ai_chat,
 )
 from music_handlers import (
     cmd_music_find, cmd_charts, cmd_music_dashboard, cmd_my_music,
@@ -63,10 +63,7 @@ from music_handlers import (
     callback_dj_vote, callback_dj_finish,
     MusicStates, process_playlist_name,
 )
-from anixart_handler import (
-    cmd_anime, cb_random, cb_info, cb_genre, cb_close,
-    inline_anime,
-)
+from anixart_handler import register_anixart_handlers, inline_anime, check_anime_episodes
 from ozon_handler import cmd_ozon
 
 try:
@@ -98,15 +95,27 @@ async def main():
     # ── Сторонние роутеры ─────────────────────────────────────────────────────
     register_ig_handlers(dp)
     register_feed_handlers(dp)
+    register_anixart_handlers(dp)
 
     # ── Inline ────────────────────────────────────────────────────────────────
-    # Музыкальный инлайн — только для запросов без префикса "a:"
-    dp.inline_query.register(inline_music_search, ~F.query.startswith("a:"))
-    # Аниме инлайн — запросы с префиксом "a:" или через switch_pm
-    dp.inline_query.register(inline_anime, F.query.startswith("a:"))
+    # Telegram присылает боту ровно один inline_query на запрос. Раньше на это
+    # событие вешались два отдельных хэндлера с противоположными фильтрами
+    # (~startswith / startswith) — победитель зависел от порядка регистрации
+    # и от того, не перехватит ли запрос ещё что-то раньше (ig/feed роутеры).
+    # Теперь один диспетчер сам решает маршрут — единственная точка, которую
+    # нужно смотреть при отладке через логи BotHost.
+    async def inline_query_router(iq: types.InlineQuery):
+        raw = iq.query or ""
+        if raw.strip().startswith("a:"):
+            logger.info(f"🎬 inline → anime: {raw!r}")
+            await inline_anime(iq)
+        else:
+            logger.info(f"🎵 inline → music: {raw!r}")
+            await inline_music_search(iq)
+
+    dp.inline_query.register(inline_query_router)
 
     # ── Команды ───────────────────────────────────────────────────────────────
-    dp.message.register(cmd_anime,        Command("anime"))
     dp.message.register(cmd_ozon,         Command("ozon"))
     dp.message.register(cmd_start,        Command("start"))
     dp.message.register(cmd_getchatid,    Command("chatid"))
@@ -123,7 +132,6 @@ async def main():
     dp.message.register(cmd_dj,           Command("dj"))
     dp.message.register(cmd_wrapped,      Command("wrapped"))
     dp.message.register(cmd_weather,      Command("pogoda"))
-    dp.message.register(cmd_ai,           Command("ai"))
     dp.message.register(cmd_dembel,       Command("dembel"))
 
     # ── Кнопки клавиатуры ─────────────────────────────────────────────────────
@@ -188,15 +196,11 @@ async def main():
     dp.callback_query.register(callback_dj_vote,         F.data.startswith("dj_vote:"))
     dp.callback_query.register(callback_dj_finish,       F.data == "dj_finish")
 
-    # ── Callbacks — anixart ───────────────────────────────────────────────────
-    dp.callback_query.register(cb_random, F.data == "anix:random")
-    dp.callback_query.register(cb_info,   F.data.startswith("anix:info:"))
-    dp.callback_query.register(cb_genre,  F.data.startswith("anix:genre:"))
-    dp.callback_query.register(cb_close,  F.data == "anix:close")
-    dp.callback_query.register(cb_info,   F.data.startswith("anix:search:"))  # пагинация поиска
+    # Аниме (cmd_anime, все anix:* callbacks, FSM привязки аккаунта) регистрируются
+    # через register_anixart_handlers(dp) выше — единым роутером, чтобы не забывать
+    # вручную добавлять сюда новые хендлеры (как раньше забыли cb_search_page).
 
     # ── Фото и текст (всегда последними) ─────────────────────────────────────
-    dp.message.register(handle_document, F.document)
     dp.message.register(handle_photo,    F.photo)
     register_media_handlers(dp)
     dp.message.register(handle_ai_chat, F.text)
@@ -210,6 +214,7 @@ async def main():
     scheduler.add_job(daily_pinned_update,    CronTrigger(hour=0, minute=1,   timezone=TIMEZONE), args=[bot])
     scheduler.add_job(send_retry_reminder,    "interval", minutes=15, args=[bot, "svodki"])
     scheduler.add_job(send_retry_reminder,    "interval", minutes=15, args=[bot, "proc"])
+    scheduler.add_job(check_anime_episodes,   "interval", hours=4, args=[bot])  # подписки на новые серии
     scheduler.start()
 
     asyncio.create_task(ig_checker_task(bot))

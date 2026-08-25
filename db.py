@@ -82,6 +82,28 @@ def init_db():
     
     # Плейлисты
     c.execute("""CREATE TABLE IF NOT EXISTS playlists (user_id TEXT, name TEXT, track_id TEXT, title TEXT, artist TEXT, source TEXT, UNIQUE(user_id, name, track_id))""")
+
+    # ── АНИМЕ (Anixart) ──────────────────────────────────────────────────────
+    c.execute('''CREATE TABLE IF NOT EXISTS anime_favorites (
+        user_id TEXT, release_id INTEGER, title TEXT, poster TEXT,
+        added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, release_id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS anime_history (
+        user_id TEXT, release_id INTEGER, title TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    # Подписки на новые серии (last_episodes — сколько серий было при подписке/последней проверке)
+    c.execute('''CREATE TABLE IF NOT EXISTS anime_subscriptions (
+        user_id TEXT, release_id INTEGER, title TEXT, last_episodes INTEGER DEFAULT 0,
+        subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, release_id)
+    )''')
+    # Привязанный личный аккаунт Anixart (хранится ТОЛЬКО токен, не пароль)
+    c.execute('''CREATE TABLE IF NOT EXISTS anixart_accounts (
+        user_id TEXT PRIMARY KEY, anixart_token TEXT, anixart_login TEXT,
+        linked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
     
     # Миграция старых колонок (если их не было)
     try: c.execute("ALTER TABLE favorites ADD COLUMN artwork_url TEXT")
@@ -574,5 +596,134 @@ def collab_delete(cid: str, owner_id: str) -> bool:
     _init_collab_tables(conn)
     conn.execute("DELETE FROM collab_tracks WHERE collab_id=?", (cid,))
     conn.execute("DELETE FROM collab_meta WHERE id=? AND owner_id=?", (cid, owner_id))
+    conn.commit(); conn.close()
+    return True
+
+
+# --- АНИМЕ (Anixart): избранное, история, подписки, привязка аккаунта ---
+def save_anime_fav(user_id, release: dict) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM anime_favorites WHERE user_id=? AND release_id=?",
+              (str(user_id), int(release["id"])))
+    if c.fetchone():
+        conn.close()
+        return False
+    c.execute("INSERT INTO anime_favorites (user_id, release_id, title, poster) VALUES (?, ?, ?, ?)",
+              (str(user_id), int(release["id"]), release.get("title", ""), release.get("poster", "")))
+    conn.commit(); conn.close()
+    return True
+
+def remove_anime_fav(user_id, release_id) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM anime_favorites WHERE user_id=? AND release_id=?",
+                 (str(user_id), int(release_id)))
+    conn.commit(); conn.close()
+    return True
+
+def is_anime_fav(user_id, release_id) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM anime_favorites WHERE user_id=? AND release_id=?",
+              (str(user_id), int(release_id)))
+    res = c.fetchone(); conn.close()
+    return bool(res)
+
+def get_anime_favs(user_id) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT release_id, title, poster FROM anime_favorites WHERE user_id=? ORDER BY added_at DESC",
+              (str(user_id),))
+    rows = c.fetchall(); conn.close()
+    return [{"id": r[0], "title": r[1], "poster": r[2]} for r in rows]
+
+def log_anime_history(user_id, release: dict):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM anime_history WHERE user_id=? AND release_id=?",
+              (str(user_id), int(release["id"])))
+    c.execute("INSERT INTO anime_history (user_id, release_id, title) VALUES (?, ?, ?)",
+              (str(user_id), int(release["id"]), release.get("title", "")))
+    c.execute("""DELETE FROM anime_history WHERE user_id=? AND rowid NOT IN
+                 (SELECT rowid FROM anime_history WHERE user_id=? ORDER BY timestamp DESC LIMIT 100)""",
+              (str(user_id), str(user_id)))
+    conn.commit(); conn.close()
+
+def get_anime_history(user_id, limit=20) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT release_id, title, timestamp FROM anime_history WHERE user_id=? ORDER BY timestamp DESC LIMIT ?",
+              (str(user_id), limit))
+    rows = c.fetchall(); conn.close()
+    return [{"id": r[0], "title": r[1], "timestamp": r[2]} for r in rows]
+
+def subscribe_anime(user_id, release: dict) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM anime_subscriptions WHERE user_id=? AND release_id=?",
+              (str(user_id), int(release["id"])))
+    if c.fetchone():
+        conn.close()
+        return False
+    c.execute("INSERT INTO anime_subscriptions (user_id, release_id, title, last_episodes) VALUES (?, ?, ?, ?)",
+              (str(user_id), int(release["id"]), release.get("title", ""),
+               int(release.get("episodes_released", 0) or 0)))
+    conn.commit(); conn.close()
+    return True
+
+def unsubscribe_anime(user_id, release_id) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM anime_subscriptions WHERE user_id=? AND release_id=?",
+                 (str(user_id), int(release_id)))
+    conn.commit(); conn.close()
+    return True
+
+def is_anime_subscribed(user_id, release_id) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM anime_subscriptions WHERE user_id=? AND release_id=?",
+              (str(user_id), int(release_id)))
+    res = c.fetchone(); conn.close()
+    return bool(res)
+
+def get_anime_subscriptions(user_id) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT release_id, title, last_episodes FROM anime_subscriptions WHERE user_id=?",
+              (str(user_id),))
+    rows = c.fetchall(); conn.close()
+    return [{"id": r[0], "title": r[1], "last_episodes": r[2]} for r in rows]
+
+def get_all_anime_subscriptions() -> list:
+    """Все подписки всех пользователей — используется кроном проверки новых серий."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id, release_id, title, last_episodes FROM anime_subscriptions")
+    rows = c.fetchall(); conn.close()
+    return [{"user_id": r[0], "id": r[1], "title": r[2], "last_episodes": r[3]} for r in rows]
+
+def update_anime_sub_episodes(user_id, release_id, episodes: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE anime_subscriptions SET last_episodes=? WHERE user_id=? AND release_id=?",
+                 (int(episodes), str(user_id), int(release_id)))
+    conn.commit(); conn.close()
+
+def save_anixart_token(user_id, token: str, login: str):
+    """Сохраняет только токен привязанного аккаунта Anixart. Пароль здесь никогда не хранится."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("REPLACE INTO anixart_accounts (user_id, anixart_token, anixart_login) VALUES (?, ?, ?)",
+                 (str(user_id), token, login))
+    conn.commit(); conn.close()
+
+def get_anixart_token(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT anixart_token, anixart_login FROM anixart_accounts WHERE user_id=?", (str(user_id),))
+    res = c.fetchone(); conn.close()
+    return {"token": res[0], "login": res[1]} if res else None
+
+def remove_anixart_token(user_id) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM anixart_accounts WHERE user_id=?", (str(user_id),))
     conn.commit(); conn.close()
     return True
