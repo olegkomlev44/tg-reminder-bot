@@ -19,7 +19,7 @@ import math
 import random
 import sys
 import colorsys
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -493,6 +493,82 @@ def _draw_outlined_text(draw, xy, text, font, fill, outline_color=(0, 0, 0), out
     draw.text((x, y), text, font=font, fill=fill)
 
 
+def _draw_glow_text(img, xy, text, font, fill, glow_color=None, blur_radius=10,
+                    glow_passes=2, outline_color=(0, 0, 0), outline_w=4):
+    """Рисует текст с настоящим неоновым свечением (размытие по Гауссу),
+    а не просто жирной обводкой — даёт эффект как на референсных карточках.
+    img должен быть RGB-изображением; функция рисует ПРЯМО в него."""
+    if glow_color is None:
+        glow_color = fill
+    x, y = xy
+    pad = blur_radius * 4 + 20
+
+    layer = Image.new("RGBA", (img.width + pad * 2, img.height + pad * 2), (0, 0, 0, 0))
+    ldraw = ImageDraw.Draw(layer)
+    ldraw.text((x + pad, y + pad), text, font=font, fill=glow_color + (255,))
+
+    glow = layer
+    for i in range(glow_passes):
+        glow = glow.filter(ImageFilter.GaussianBlur(blur_radius))
+    # усиливаем яркость свечения, слегка приглушая альфу базового слоя
+    glow_alpha = glow.split()[3].point(lambda a: min(255, int(a * 1.6)))
+    glow.putalpha(glow_alpha)
+
+    img_rgba = img.convert("RGBA")
+    img_rgba.alpha_composite(glow, (-pad, -pad))
+    img.paste(img_rgba.convert("RGB"), (0, 0))
+
+    draw = ImageDraw.Draw(img)
+    _draw_outlined_text(draw, (x, y), text, font, fill=fill,
+                        outline_color=outline_color, outline_w=outline_w)
+
+
+def _draw_icon(draw, cx, cy, r, kind, color):
+    """Простые абстрактные векторные значки (не логотипы игр) для бейджей:
+    diamond / shield / star / chevron / hex."""
+    if kind == "diamond":
+        draw.polygon([(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)],
+                     outline=color, width=2)
+        draw.polygon([(cx, cy - r * 0.4), (cx + r * 0.4, cy), (cx, cy + r * 0.4), (cx - r * 0.4, cy)],
+                     fill=color)
+    elif kind == "shield":
+        pts = [(cx, cy - r), (cx + r * 0.85, cy - r * 0.5), (cx + r * 0.85, cy + r * 0.2),
+               (cx, cy + r), (cx - r * 0.85, cy + r * 0.2), (cx - r * 0.85, cy - r * 0.5)]
+        draw.polygon(pts, outline=color, width=2)
+        draw.line([(cx, cy - r * 0.45), (cx, cy + r * 0.45)], fill=color, width=2)
+    elif kind == "star":
+        pts = []
+        for i in range(10):
+            ang = math.pi / 2 + i * math.pi / 5
+            rr = r if i % 2 == 0 else r * 0.42
+            pts.append((cx + rr * math.cos(ang), cy - rr * math.sin(ang)))
+        draw.polygon(pts, outline=color, width=2)
+    elif kind == "chevron":
+        draw.line([(cx - r * 0.6, cy - r * 0.5), (cx, cy), (cx - r * 0.6, cy + r * 0.5)],
+                  fill=color, width=3, joint="curve")
+        draw.line([(cx, cy - r * 0.5), (cx + r * 0.6, cy), (cx, cy + r * 0.5)],
+                  fill=color, width=3, joint="curve")
+    else:  # hex
+        pts = [(cx + r * math.cos(math.radians(60 * i - 30)),
+                cy + r * math.sin(math.radians(60 * i - 30))) for i in range(6)]
+        draw.polygon(pts, outline=color, width=2)
+
+
+def _draw_panel_frame(draw, margin, accent, cut=26, width=2):
+    """Полноконтурная скошенная рамка-панель вокруг всей карточки
+    (углы срезаны, как на техно-интерфейсах) — вместо/вместе с уголками."""
+    x0, y0, x1, y1 = margin, margin, W - margin, H - margin
+    pts = [
+        (x0 + cut, y0), (x1 - cut, y0), (x1, y0 + cut),
+        (x1, y1 - cut), (x1 - cut, y1), (x0 + cut, y1),
+        (x0, y1 - cut), (x0, y0 + cut),
+    ]
+    draw.line(pts + [pts[0]], fill=accent, width=width)
+    # маленькие засечки на срезах углов
+    for px, py in pts:
+        draw.ellipse([px - 3, py - 3, px + 3, py + 3], fill=accent)
+
+
 def _draw_noise(img, amount=8):
     px = img.load()
     w, h = img.size
@@ -657,16 +733,26 @@ def _badge_rect(draw, box, accent, shape=None, fill=(16, 16, 22), outline_w=1):
     return shape
 
 
-def _draw_stat_badge(draw, label, value, x, y, accent, font_label, font_value, shape=None):
-    """Рисует маленький бейдж со статистикой."""
+def _draw_stat_badge(draw, label, value, x, y, accent, font_label, font_value, shape=None, icon=None):
+    """Рисует маленький бейдж со статистикой. icon (опционально) — простой
+    векторный значок слева ('diamond'/'shield'/'star'/'chevron'/'hex')."""
     pad_x, pad_y = 14, 10
     lb = draw.textbbox((0, 0), label, font=font_label)
     vb = draw.textbbox((0, 0), value, font=font_value)
-    box_w = max(lb[2] - lb[0], vb[2] - vb[0]) + pad_x * 2
+    text_w = max(lb[2] - lb[0], vb[2] - vb[0])
     box_h = (lb[3] - lb[1]) + (vb[3] - vb[1]) + pad_y * 3
+    icon_w = box_h - 2 * pad_y + 10 if icon else 0
+    box_w = text_w + pad_x * 2 + icon_w
     _badge_rect(draw, (x, y, x + box_w, y + box_h), accent, shape=shape)
-    draw.text((x + pad_x, y + pad_y), label, font=font_label, fill=(130, 130, 150))
-    draw.text((x + pad_x, y + pad_y + (lb[3] - lb[1]) + 4), value,
+    text_x = x + pad_x
+    if icon:
+        icon_r = (box_h - 2 * pad_y) // 2
+        icon_cx = x + pad_x + icon_r
+        icon_cy = y + box_h // 2
+        _draw_icon(draw, icon_cx, icon_cy, icon_r, icon, accent)
+        text_x = x + pad_x + icon_w
+    draw.text((text_x, y + pad_y), label, font=font_label, fill=(130, 130, 150))
+    draw.text((text_x, y + pad_y + (lb[3] - lb[1]) + 4), value,
               font=font_value, fill=(255, 255, 255))
     return box_w, box_h
 

@@ -20,7 +20,8 @@ from card_generator import (
     FONT_BOLD_PATH, FONT_REGULAR_PATH,
     load_font, generate_background, get_accent2, pick_style,
     _clean_for_image, _centered_x, _draw_centered, _wrap_text,
-    _draw_outlined_text, _draw_noise, _draw_corner_decorations,
+    _draw_outlined_text, _draw_glow_text, _draw_icon, _draw_panel_frame,
+    _draw_noise, _draw_corner_decorations,
     _draw_neon_line, _draw_stat_badge, _badge_rect,
 )
 
@@ -44,24 +45,26 @@ SERVICE_LENGTH_DAYS = 730
 
 
 def _time_left(target: date, now: datetime | None = None) -> dict:
-    """Считает, сколько осталось до target: дни/часы/минуты + флаг 'уже дома'."""
+    """Считает, сколько осталось до target: дни/часы/минуты/секунды + флаг 'уже дома'."""
     now = now or datetime.now()
     target_dt = datetime.combine(target, datetime.min.time())
     delta = target_dt - now
     total_seconds = delta.total_seconds()
 
     if total_seconds <= 0:
-        return {"done": True, "days": 0, "hours": 0, "minutes": 0, "total_seconds": 0}
+        return {"done": True, "days": 0, "hours": 0, "minutes": 0, "seconds": 0, "total_seconds": 0}
 
     days = int(total_seconds // 86400)
     hours = int((total_seconds % 86400) // 3600)
     minutes = int((total_seconds % 3600) // 60)
+    seconds = int(total_seconds % 60)
 
     return {
         "done": False,
         "days": days,
         "hours": hours,
         "minutes": minutes,
+        "seconds": seconds,
         "total_seconds": total_seconds,
     }
 
@@ -92,6 +95,34 @@ def get_all_timers(now: datetime | None = None) -> list[dict]:
         })
     result.sort(key=lambda r: r["total_seconds"] if not r["done"] else -1)
     return result
+
+
+def _draw_timer_segments(draw, img, cx, y, segments, accent, val_font, label_font):
+    """Рисует сегментированный таймер вида '17 | 04 | 32' с подписями
+    (часов/минуты/секунды) под каждым значением — как на цифровых табло."""
+    gap = 46
+    widths = []
+    for val, _ in segments:
+        vb = draw.textbbox((0, 0), val, font=val_font)
+        widths.append(vb[2] - vb[0])
+    total_w = sum(widths) + gap * (len(segments) - 1)
+    x = cx - total_w // 2
+    val_h = draw.textbbox((0, 0), "0", font=val_font)[3]
+
+    for i, (val, label) in enumerate(segments):
+        vw = widths[i]
+        seg_cx = x + vw // 2
+        _draw_glow_text(img, (x, y), val, val_font, fill=WHITE, glow_color=accent,
+                        blur_radius=6, glow_passes=1, outline_w=2)
+        lb = draw.textbbox((0, 0), label, font=label_font)
+        lw = lb[2] - lb[0]
+        draw.text((seg_cx - lw // 2, y + val_h + 14), label, font=label_font, fill=(160, 160, 180))
+        x += vw
+        if i < len(segments) - 1:
+            sep_x = x + gap // 2
+            draw.text((sep_x - 4, y), "·", font=val_font, fill=(90, 90, 105))
+            x += gap
+    return total_w
 
 
 def make_dembel_card(person: str, output_path: str, theme_key: str | None = None, now: datetime | None = None) -> str:
@@ -135,6 +166,8 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         draw = ImageDraw.Draw(img)
 
         _draw_corner_decorations(draw, accent, margin=30, style=style["corner"])
+        if style["corner"] != "frame":
+            _draw_panel_frame(draw, margin=16, accent=accent, cut=22, width=1)
 
         # ── 2. Верхний бейдж темы ────────────────────────────────────────
         badge_font = load_font(FONT_BOLD_PATH, 24)
@@ -182,9 +215,9 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         gw, gh = gb[2] - gb[0], gb[3] - gb[1]
         gx = (W - gw) // 2
         gy = ny + nh + 30
-        draw.text((gx + 5, gy + 5), big_text, font=big_font, fill=accent2)
-        _draw_outlined_text(draw, (gx, gy), big_text, big_font,
-                            fill=accent, outline_color=(0, 0, 0), outline_w=6)
+        _draw_glow_text(img, (gx, gy), big_text, big_font, fill=accent,
+                        glow_color=accent2, blur_radius=14, glow_passes=2, outline_w=5)
+        draw = ImageDraw.Draw(img)
 
         sub_y = gy + gb[3] + 14
         if not tl["done"]:
@@ -199,17 +232,18 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
             _draw_centered(draw, "уже дома!", sub_font, sub_y, color=(200, 200, 215), shadow=True, so=2)
             sub_y += 40
 
-        # ── 5. Часы / минуты — вторичная строка (только пока не дома) ────
+        # ── 5. Сегментированный таймер ЧЧ / ММ / СС (только пока не дома) ─
         if not tl["done"]:
-            hm_font = load_font(FONT_BOLD_PATH, 34)
-            hm_text = f"{tl['hours']:02d} ч  {tl['minutes']:02d} мин"
-            hx = _centered_x(draw, hm_text, hm_font)
-            hb = draw.textbbox((0, 0), hm_text, font=hm_font)
-            hw = hb[2] - hb[0]
-            _badge_rect(draw, ((W - hw) // 2 - 20, sub_y - 4, (W + hw) // 2 + 20, sub_y + (hb[3] - hb[1]) + 12),
-                        accent, shape=style["badge"], fill=(16, 16, 22))
-            draw.text((hx, sub_y + 2), hm_text, font=hm_font, fill=WHITE)
-            sub_y += (hb[3] - hb[1]) + 20
+            seg_val_font = load_font(FONT_BOLD_PATH, 44)
+            seg_label_font = load_font(FONT_REGULAR_PATH, 16)
+            segments = [
+                (f"{tl['hours']:02d}", "часов"),
+                (f"{tl['minutes']:02d}", "минуты"),
+                (f"{tl['seconds']:02d}", "секунды"),
+            ]
+            _draw_timer_segments(draw, img, W // 2, sub_y, segments, accent, seg_val_font, seg_label_font)
+            draw = ImageDraw.Draw(img)
+            sub_y += 44 + 16 + 26 + 14
 
         # ── 6. Нижняя панель: дата дембеля + прогресс-бар ────────────────
         text_y = BG_H + 30
@@ -223,10 +257,10 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         _draw_neon_line(draw, 60, text_y, W - 60, text_y, accent, width=2, style=style["line"])
         text_y += 26
 
-        # прогресс-бар службы
+        # прогресс-бар службы — процент рисуется ПОВЕРХ заливки, как на референсе
         bar_w = W - 200
         bar_x = 100
-        bar_h = 26
+        bar_h = 40
         draw.rounded_rectangle(
             [bar_x, text_y, bar_x + bar_w, text_y + bar_h],
             radius=bar_h // 2, fill=(22, 22, 30), outline=(60, 60, 75), width=1
@@ -237,12 +271,16 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
                 [bar_x, text_y, bar_x + filled_w, text_y + bar_h],
                 radius=bar_h // 2, fill=accent
             )
-        pct_font = load_font(FONT_BOLD_PATH, 16)
-        pct_text = f"{int(progress * 100)}% службы позади"
+        pct_font = load_font(FONT_BOLD_PATH, 22)
+        pct_text = f"{int(progress * 100)}%"
         pt = draw.textbbox((0, 0), pct_text, font=pct_font)
-        pw = pt[2] - pt[0]
-        draw.text(((W - pw) // 2, text_y + bar_h + 10), pct_text, font=pct_font, fill=(160, 160, 180))
-        text_y += bar_h + 46
+        pw, ph = pt[2] - pt[0], pt[3] - pt[1]
+        draw.text(((W - pw) // 2, text_y + (bar_h - ph) // 2 - 2), pct_text, font=pct_font, fill=WHITE)
+        cap_font = load_font(FONT_REGULAR_PATH, 16)
+        cap_text = "службы позади"
+        cb = draw.textbbox((0, 0), cap_text, font=cap_font)
+        draw.text(((W - (cb[2] - cb[0])) // 2, text_y + bar_h + 8), cap_text, font=cap_font, fill=(150, 150, 170))
+        text_y += bar_h + 44
 
         # ── 7. Остальные — краткая сводка (кто следующий/предыдущий) ────
         all_timers = get_all_timers(now)
@@ -260,14 +298,14 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
                 w1, h1 = _draw_stat_badge(
                     draw, label="РАНЬШЕ УХОДИТ", value=f"{prev_r['person']} ({prev_r['days']}д)",
                     x=x_cursor, y=badges_y, accent=accent,
-                    font_label=label_font, font_value=val_font, shape=style["badge"]
+                    font_label=label_font, font_value=val_font, shape=style["badge"], icon="chevron"
                 )
                 x_cursor += w1 + 20
             if next_r:
                 _draw_stat_badge(
                     draw, label="СЛЕДУЮЩИЙ", value=f"{next_r['person']} ({next_r['days']}д)",
                     x=x_cursor, y=badges_y, accent=accent2,
-                    font_label=label_font, font_value=val_font, shape=style["badge"]
+                    font_label=label_font, font_value=val_font, shape=style["badge"], icon="shield"
                 )
 
         # ── 8. Футер ──────────────────────────────────────────────────────
