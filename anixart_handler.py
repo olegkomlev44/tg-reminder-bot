@@ -36,7 +36,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    BufferedInputFile, CallbackQuery,
+    BufferedInputFile, FSInputFile, CallbackQuery,
     InlineKeyboardButton, InlineKeyboardMarkup,
     InlineQuery, InlineQueryResultArticle,
     InlineQueryResultCachedPhoto, InlineQueryResultPhoto,
@@ -112,8 +112,9 @@ async def _download_poster(url: str) -> Optional[bytes]:
                              timeout=aiohttp.ClientTimeout(total=10)) as r:
                 if r.status == 200:
                     return await r.read()
-    except Exception:
-        pass
+                logger.warning(f"Постер {url} вернул статус {r.status}")
+    except Exception as e:
+        logger.warning(f"Не удалось скачать постер {url}: {e}")
     return None
 
 def _img_url(raw: str) -> str:
@@ -122,6 +123,32 @@ def _img_url(raw: str) -> str:
     if raw.startswith("//"): return "https:" + raw
     if "." not in raw: raw += ".jpg"
     return f"https://s.anixstatic.org/posters/{raw}"
+
+# Поле с постером в ответах Anixart на практике встречается под разными именами
+# и в разных формах — то плоская строка, то вложенный объект с несколькими
+# размерами. Раньше код брал только rel.get("poster") or rel.get("image") как
+# строку — если поле называется иначе или пришло объектом, _img_url тихо
+# получал "" и постер никогда не прикреплялся (падало в текстовый фолбэк).
+# Здесь перебираем правдоподобные варианты и логируем сырые ключи релиза, если
+# вообще ничего не нашли — это покажет в логах BotHost, как поле называется
+# на самом деле, и точечный фикс потом займёт одну строку.
+def _extract_poster_url(rel: dict) -> str:
+    for key in ("poster", "image", "image_original", "poster_image", "cover", "picture", "img"):
+        val = rel.get(key)
+        if not val:
+            continue
+        if isinstance(val, str):
+            return _img_url(val)
+        if isinstance(val, dict):
+            for subkey in ("original", "medium", "small", "url", "path", "src", "image"):
+                sub = val.get(subkey)
+                if isinstance(sub, str) and sub:
+                    return _img_url(sub)
+    logger.warning(
+        f"Не нашёл постер в релизе #{rel.get('id')} «{rel.get('title_ru')}»: "
+        f"доступные ключи={sorted(rel.keys())}"
+    )
+    return ""
 
 
 # ── Anixart: вход в личный аккаунт (best-effort) ──────────────────────────────
@@ -342,6 +369,82 @@ async def _render_anime_card(poster_bytes: bytes, rel: dict) -> Optional[bytes]:
         return None
 
 
+# ── Трейлер ───────────────────────────────────────────────────────────────────
+# У Anixart нет задокументированного поля с трейлером (в разных версиях API
+# видели то "trailer", то вложенный объект с youtube id — и то и другое
+# ненадёжно). Поэтому: сначала пробуем достать прямую ссылку из релиза (если
+# она там есть), а если нет — ищем официальный трейлер на YouTube по названию
+# и качаем через тот же yt-dlp пайплайн, что уже используется в
+# media_downloader.py (лимит на размер файла общий — MAX_VIDEO_BYTES).
+def _trailer_url_from_release(rel: dict) -> Optional[str]:
+    direct = rel.get("trailer") or rel.get("trailer_url") or rel.get("video_trailer")
+    if isinstance(direct, str) and direct.startswith("http"):
+        return direct
+    if isinstance(direct, dict):
+        yt_id = direct.get("youtube_id") or direct.get("id") or direct.get("video_id")
+        url = direct.get("url")
+        if isinstance(url, str) and url.startswith("http"):
+            return url
+        if yt_id:
+            return f"https://www.youtube.com/watch?v={yt_id}"
+    return None
+
+async def _fetch_trailer(rel: dict) -> tuple[Optional[str], dict]:
+    """Возвращает (путь_к_файлу, info) как media_downloader._download_media,
+    или (None, {...}) с описанием причины неудачи."""
+    from media_downloader import _download_media  # переиспользуем yt-dlp пайплайн
+
+    title = rel.get("title_ru") or rel.get("title_original") or ""
+    direct_url = _trailer_url_from_release(rel)
+    query_url = direct_url or f"ytsearch1:{title} трейлер аниме"
+    try:
+        return await _download_media(query_url, "youtube")
+    except Exception as e:
+        logger.warning(f"Не удалось скачать трейлер для «{title}»: {e}")
+        return None, {"_error": str(e)[:200]}
+
+
+# ── Ссылки на конкретные серии ─────────────────────────────────────────────────
+# У anixart.tv нет задокументированного deep-link'а на конкретную серию — сайт
+# сам решает, как открыть плеер после клика по номеру серии в приложении.
+# Ниже — самый распространённый шаблон среди подобных сайтов (release/{id}/episode/{n}).
+# Если у тебя он не сработает (просто откроет страницу релиза без конкретной
+# серии) — пришли мне реальную ссылку на серию, скопированную из браузера или
+# из "Поделиться" в приложении, и я поправлю константу за один шаг, без
+# переписывания остальной логики.
+EPISODE_URL_TEMPLATE = "https://anixart.tv/release/{rid}/episode/{ep}"
+
+def _episode_url(rid: int, ep: int) -> str:
+    return EPISODE_URL_TEMPLATE.format(rid=rid, ep=ep)
+
+_EP_PAGE_SIZE = 30
+
+def _episode_keyboard(rid: int, ep_total: int, offset: int = 0) -> InlineKeyboardMarkup:
+    page = list(range(offset + 1, min(ep_total, offset + _EP_PAGE_SIZE) + 1))
+    rows, row = [], []
+    for ep in page:
+        row.append(InlineKeyboardButton(text=str(ep), url=_episode_url(rid, ep)))
+        if len(row) == 5:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(
+            text="⬅️ Назад", callback_data=f"anix:eplist:{rid}:{max(0, offset - _EP_PAGE_SIZE)}"
+        ))
+    if offset + _EP_PAGE_SIZE < ep_total:
+        nav.append(InlineKeyboardButton(
+            text="Ещё ➡️", callback_data=f"anix:eplist:{rid}:{offset + _EP_PAGE_SIZE}"
+        ))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="anix:close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 # ── Клавиатуры ────────────────────────────────────────────────────────────────
 def _release_keyboard(rel: dict, user_id: int) -> InlineKeyboardMarkup:
     rid = rel.get("id", 0)
@@ -352,7 +455,11 @@ def _release_keyboard(rel: dict, user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=("💔 Убрать" if fav else "🤍 В закладки"), callback_data=f"anix:fav:{rid}"),
             InlineKeyboardButton(text=("🔕 Отписаться" if sub else "🔔 Новые серии"), callback_data=f"anix:sub:{rid}"),
         ],
-        [InlineKeyboardButton(text="🤖 Вайб-чек (AI)", callback_data=f"anix:vibe:{rid}")],
+        [
+            InlineKeyboardButton(text="🤖 Вайб-чек (AI)", callback_data=f"anix:vibe:{rid}"),
+            InlineKeyboardButton(text="🎬 Трейлер", callback_data=f"anix:trailer:{rid}"),
+        ],
+        [InlineKeyboardButton(text="▶️ Серии", callback_data=f"anix:eplist:{rid}:0")],
         [
             InlineKeyboardButton(text="🌐 Открыть", url=f"https://anixart.tv/release/{rid}"),
             InlineKeyboardButton(text="🔀 Ещё случайный", callback_data="anix:random"),
@@ -376,7 +483,7 @@ async def _send_release(ctx, rel: dict):
 
     log_anime_history(user_id, rel)
 
-    poster_url = _img_url(rel.get("poster") or rel.get("image") or "")
+    poster_url = _extract_poster_url(rel)
     if poster_url:
         data = await _download_poster(poster_url)
         if data:
@@ -840,6 +947,88 @@ async def cb_vibe(cq: CallbackQuery):
         logger.error(f"Ошибка AI-вайба: {e}")
         await cq.message.answer("❌ AI сейчас недоступен, попробуй позже.")
 
+@router.callback_query(F.data.startswith("anix:trailer:"))
+async def cb_trailer(cq: CallbackQuery):
+    rid = int(cq.data.split(":")[2])
+    await cq.answer("🎬 Ищу трейлер…")
+    rel = await _get_release(rid)
+    if not rel:
+        await cq.message.answer("❌ Не нашёл этот релиз."); return
+
+    title = rel.get("title_ru") or rel.get("title_original") or "?"
+    status = await cq.message.answer(f"🎬 Ищу трейлер «{title}»…")
+
+    from media_downloader import MAX_VIDEO_MB, _cleanup  # общие константы/утилита очистки
+    filepath, info = await _fetch_trailer(rel)
+
+    if not filepath:
+        if info.get("_too_large"):
+            text = f"❌ Трейлер нашёлся, но весит больше {MAX_VIDEO_MB} МБ — Telegram не пропустит."
+        else:
+            text = "😔 Не нашёл трейлер для этого релиза. Попробуй поискать вручную на YouTube."
+        try:
+            await status.edit_text(text)
+        except Exception:
+            await cq.message.answer(text)
+        return
+
+    try:
+        await status.edit_text("🎬 Загружаю трейлер в Telegram…")
+    except Exception:
+        pass
+
+    try:
+        video_file = FSInputFile(filepath, filename="trailer.mp4")
+        await cq.message.answer_video(
+            video_file,
+            caption=f"🎬 Трейлер: <b>{title}</b>",
+            parse_mode="HTML",
+            width=info.get("width") or None,
+            height=info.get("height") or None,
+            duration=int(info.get("duration") or 0) or None,
+            supports_streaming=True,
+        )
+        try:
+            await status.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(f"Не удалось отправить трейлер: {e}")
+        try:
+            await status.edit_text(f"❌ Не удалось отправить трейлер: <code>{str(e)[:150]}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+    finally:
+        _cleanup(filepath, info)
+
+@router.callback_query(F.data.startswith("anix:eplist:"))
+async def cb_episodes(cq: CallbackQuery):
+    # anix:eplist:{rid}:{offset}
+    _, _, rid_s, offset_s = cq.data.split(":")
+    rid, offset = int(rid_s), int(offset_s)
+    await cq.answer()
+
+    rel = await _get_release(rid)
+    if not rel:
+        await cq.message.answer("❌ Не нашёл этот релиз."); return
+
+    ep_total = rel.get("episodes_released") or 0
+    if not ep_total:
+        await cq.message.answer("😔 Пока нет вышедших серий."); return
+
+    title = rel.get("title_ru") or rel.get("title_original") or "?"
+    kb = _episode_keyboard(rid, ep_total, offset)
+    text = f"▶️ <b>{title}</b>\nВыбери серию ({ep_total} доступно):"
+
+    # Если это уже клавиатура серий — редактируем (листание), иначе шлём новым сообщением
+    if cq.message.text and cq.message.text.startswith("▶️"):
+        try:
+            await cq.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await cq.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
 @router.callback_query(F.data == "anix:close")
 async def cb_close(cq: CallbackQuery):
     await cq.answer()
@@ -883,8 +1072,7 @@ async def inline_anime(iq: InlineQuery):
         ep_rel     = item.get("episodes_released", 0)
         ep_tot     = item.get("episodes_total", 0) or "?"
         rating     = item.get("rating", 0)
-        poster_raw = item.get("poster") or item.get("image") or ""
-        poster_url = _img_url(poster_raw)
+        poster_url = _extract_poster_url(item)
 
         text = (
             f"<b>{title_ru}</b>\n"
