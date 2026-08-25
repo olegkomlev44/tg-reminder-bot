@@ -15,9 +15,10 @@
 
 import os
 import re
+import math
 import random
 import sys
-import math
+import colorsys
 from PIL import Image, ImageDraw, ImageFont
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,14 +27,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 #  ШРИФТЫ
 # ══════════════════════════════════════════════
 _FONT_CANDIDATES_BOLD = [
-    os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf"),
+    os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf"),   # бандл в репозитории — основной
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
 ]
 _FONT_CANDIDATES_REG = [
-    os.path.join(BASE_DIR, "fonts", "DejaVuSans.ttf"),
+    os.path.join(BASE_DIR, "fonts", "DejaVuSans.ttf"),        # бандл в репозитории — основной
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
@@ -82,16 +83,21 @@ def load_font(path, size):
 # ══════════════════════════════════════════════
 #  ОЧИСТКА ТЕКСТА ОТ ЭМОДЗИ ДЛЯ КАРТИНКИ
 # ══════════════════════════════════════════════
+# Bundled-шрифт DejaVu отлично рисует кириллицу и латиницу, но не содержит
+# цветных эмодзи — без чистки они рисовались бы как те же "тофу"-квадраты.
+# В тексте сообщений (caption, обычные сообщения бота) эмодзи остаются —
+# Telegram рисует их сам. А вот в текст, который идёт НА картинку, эмодзи
+# подчищаем, чтобы не было лишних артефактов.
 _EMOJI_PATTERN = re.compile(
     "["
-    "🀀-🿿"
-    "☀-⛿"
-    "✀-➿"
-    "←-⇿"
-    "⌀-⏿"
-    "⬀-⯿"
-    "︀-️"
-    "‍"
+    "\U0001F000-\U0001FFFF"
+    "\U00002600-\U000026FF"
+    "\U00002700-\U000027BF"
+    "\U00002190-\U000021FF"
+    "\U00002300-\U000023FF"
+    "\U00002B00-\U00002BFF"
+    "\U0000FE00-\U0000FE0F"
+    "\U0000200D"
     "]+",
     flags=re.UNICODE,
 )
@@ -101,7 +107,7 @@ def _clean_for_image(text):
     if not text:
         return text
     text = _EMOJI_PATTERN.sub("", text)
-    text = re.sub(r"[ 	]+", " ").strip()
+    text = re.sub(r"[ \t]+", " ", text).strip()
     return text
 
 
@@ -115,10 +121,9 @@ WHITE = (255, 255, 255)
 DARK = (12, 12, 16)
 
 # ══════════════════════════════════════════════
-#  38 ТЕМ (23 старых + 15 новых)
+#  23 ТЕМЫ
 # ══════════════════════════════════════════════
 THEMES = {
-    # --- Классические ---
     "cs2": {"title": "CS2", "accent": (255, 178, 40)},
     "dota2": {"title": "DOTA 2", "accent": (210, 60, 60)},
     "genshin": {"title": "GENSHIN IMPACT", "accent": (130, 195, 255)},
@@ -142,49 +147,62 @@ THEMES = {
     "marvel": {"title": "SUPERHEROES", "accent": (235, 45, 45)},
     "synthwave": {"title": "SYNTHWAVE", "accent": (255, 60, 180)},
     "matrix": {"title": "TERMINAL", "accent": (60, 255, 110)},
-    # --- Новые темы ---
-    "neon_tokyo": {"title": "NEON TOKYO", "accent": (255, 0, 128)},
-    "blood_moon": {"title": "BLOOD MOON", "accent": (220, 20, 60)},
-    "deep_ocean": {"title": "DEEP OCEAN", "accent": (0, 180, 255)},
-    "sunset_boulevard": {"title": "SUNSET", "accent": (255, 94, 77)},
-    "enchanted_forest": {"title": "FOREST", "accent": (50, 255, 150)},
-    "northern_lights": {"title": "AURORA", "accent": (57, 255, 200)},
-    "lavender_dream": {"title": "LAVENDER", "accent": (180, 130, 255)},
-    "sakura": {"title": "SAKURA", "accent": (255, 150, 180)},
-    "midnight_purple": {"title": "MIDNIGHT", "accent": (147, 51, 234)},
-    "golden_hour": {"title": "GOLDEN HOUR", "accent": (255, 200, 50)},
-    "frost_ice": {"title": "FROST", "accent": (150, 230, 255)},
-    "magma": {"title": "MAGMA", "accent": (255, 80, 0)},
-    "galaxy": {"title": "GALAXY", "accent": (200, 120, 255)},
-    "retro_arcade": {"title": "RETRO ARCADE", "accent": (255, 50, 100)},
-    "pastel_clouds": {"title": "PASTEL", "accent": (255, 180, 200)},
 }
 THEME_KEYS = list(THEMES.keys())
 
 
+def _shift_hue(rgb, degrees):
+    """Сдвигает оттенок цвета на `degrees` градусов — используется, чтобы
+    получить вторую (парную) акцентную краску из основной темы без того,
+    чтобы вручную прописывать её для всех 23 тем."""
+    r, g, b = [c / 255 for c in rgb]
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    h = (h + degrees / 360.0) % 1.0
+    r2, g2, b2 = colorsys.hls_to_rgb(h, min(0.72, max(0.32, l)), min(1.0, s * 1.05))
+    return (int(r2 * 255), int(g2 * 255), int(b2 * 255))
+
+
+def get_accent2(accent):
+    """Вторая акцентная краска темы — тёплый/холодный сосед по кругу цвета.
+    Используется для двухцветных градиентов, свечения и текста."""
+    return _shift_hue(accent, 38)
+
+
 # ══════════════════════════════════════════════
-#  УТИЛИТЫ ЦВЕТА
+#  СТИЛЕВЫЕ ПАКЕТЫ — задают "характер" конкретной карточки
 # ══════════════════════════════════════════════
-def _lerp_color(a, b, t):
-    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+# Каждая генерация карточки случайно выбирает один пакет — набор:
+#   - формы уголков (corner)
+#   - формы разделительной линии (line)
+#   - формы бейджей (badge)
+#   - предпочитаемых стилей фона (bg)
+# Это даёт разнообразие БЕЗ потери цельности: элементы одной карточки
+# нарисованы в одном "почерке", а не случайной мешаниной.
+STYLE_PACKS = {
+    "tactical": {"corner": "bracket", "line": "solid",   "badge": "rect",  "bg": ["circuit", "nebula"]},
+    "soft":     {"corner": "dot",     "line": "dashed",  "badge": "pill",  "bg": ["aurora", "wave"]},
+    "hex":      {"corner": "hex",     "line": "diamond", "badge": "cut",   "bg": ["sunburst", "particles"]},
+    "cyber":    {"corner": "frame",   "line": "solid",   "badge": "cut",   "bg": ["circuit", "sunburst"]},
+    "orbit":    {"corner": "dot",     "line": "diamond", "badge": "pill",  "bg": ["particles", "aurora"]},
+}
+STYLE_KEYS = list(STYLE_PACKS.keys())
 
 
-def _darken(color, amount=120):
-    return tuple(max(0, c - amount) for c in color)
-
-
-def _lighten(color, amount=60):
-    return tuple(min(255, c + amount) for c in color)
+def pick_style():
+    """Возвращает (style_key, style_dict) — случайный стилевой пакет на карточку."""
+    key = random.choice(STYLE_KEYS)
+    return key, STYLE_PACKS[key]
 
 
 # ══════════════════════════════════════════════
 #  ФОН — КРАСИВЫЙ АРТ
 # ══════════════════════════════════════════════
 def _draw_glow_circle(overlay_draw, cx, cy, r, color_rgb, max_alpha=120):
-    layers = 8
+    """Рисует светящийся круг — несколько слоёв с убывающей прозрачностью."""
+    layers = 6
     for i in range(layers):
         ratio = i / layers
-        cur_r = int(r * (1 - ratio * 0.5))
+        cur_r = int(r * (1 - ratio * 0.6))
         alpha = int(max_alpha * (1 - ratio))
         overlay_draw.ellipse(
             [cx - cur_r, cy - cur_r, cx + cur_r, cy + cur_r],
@@ -193,6 +211,8 @@ def _draw_glow_circle(overlay_draw, cx, cy, r, color_rgb, max_alpha=120):
 
 
 def _draw_hex_grid(draw, width, height, accent, spacing=120, alpha=18):
+    """Рисует тонкую гексагональную решётку поверх фона."""
+    import math
     hex_w = spacing
     hex_h = int(hex_w * 0.866)
     col_r = (*accent, alpha)
@@ -205,6 +225,7 @@ def _draw_hex_grid(draw, width, height, accent, spacing=120, alpha=18):
                 angle = math.radians(60 * i - 30)
                 pts.append((cx + spacing // 2 * math.cos(angle),
                              cy + spacing // 2 * math.sin(angle)))
+            # рисуем только рёбра, не заливку
             for i in range(6):
                 x1, y1 = pts[i]
                 x2, y2 = pts[(i + 1) % 6]
@@ -212,6 +233,7 @@ def _draw_hex_grid(draw, width, height, accent, spacing=120, alpha=18):
 
 
 def _draw_scan_lines(img, height, alpha=12):
+    """Лёгкие горизонтальные scanlines — даёт ощущение экрана."""
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     for y in range(0, height, 4):
@@ -221,209 +243,207 @@ def _draw_scan_lines(img, height, alpha=12):
     return img_rgba.convert("RGB")
 
 
-# --- НОВЫЕ ЭФФЕКТЫ ---
-def _draw_bokeh(odraw, width, height, accent, count=25):
-    """Размытые круги разных размеров — эффект боке."""
-    for _ in range(count):
-        x = random.randint(0, width)
-        y = random.randint(0, height)
-        r = random.randint(30, 120)
-        alpha = random.randint(10, 50)
-        odraw.ellipse([x - r, y - r, x + r, y + r], fill=(*accent, alpha))
+def _draw_vignette(img, strength=90):
+    """Затемняет края картинки, оставляя центр светлее — придаёт глубину."""
+    w, h = img.size
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    cx, cy = w // 2, int(h * 0.42)
+    max_r = int(math.hypot(w, h) * 0.6)
+    steps = 10
+    for i in range(steps):
+        r = int(max_r * (i + 1) / steps)
+        a = int(strength * (i / steps) ** 2)
+        od.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 0, 0, a), width=max_r // steps + 2)
+    img_rgba = img.convert("RGBA")
+    img_rgba.alpha_composite(overlay)
+    return img_rgba.convert("RGB")
 
 
-def _draw_wave_lines(odraw, width, height, accent, count=8):
-    """Волновые линии по синусоиде."""
-    for i in range(count):
-        y_base = int(height * (0.2 + 0.6 * i / count))
-        amplitude = random.randint(20, 60)
-        freq = random.uniform(0.01, 0.03)
-        phase = random.uniform(0, 6.28)
-        alpha = random.randint(20, 60)
-        points = []
-        for x in range(0, width + 10, 5):
-            y = y_base + int(amplitude * math.sin(x * freq + phase))
-            points.append((x, y))
-        if len(points) > 1:
-            odraw.line(points, fill=(*accent, alpha), width=2)
-
-
-def _draw_grid(odraw, width, height, accent, spacing=80, alpha=15):
-    """Декартова сетка с перспективой."""
-    col = (*accent, alpha)
-    for x in range(0, width + 1, spacing):
-        odraw.line([(x, 0), (x, height)], fill=col, width=1)
-    for y in range(0, height + 1, spacing):
-        odraw.line([(0, y), (width, y)], fill=col, width=1)
-
-
-def _draw_triangles(odraw, width, height, accent, count=15):
-    """Low-poly треугольники."""
-    for _ in range(count):
-        x = random.randint(0, width)
-        y = random.randint(0, height)
-        size = random.randint(40, 100)
-        alpha = random.randint(8, 30)
-        angle = random.uniform(0, 6.28)
-        pts = []
-        for i in range(3):
-            a = angle + i * 2.094
-            pts.append((x + size * math.cos(a), y + size * math.sin(a)))
-        odraw.polygon(pts, fill=(*accent, alpha))
-
-
-def _draw_speed_lines(odraw, width, height, accent, count=40):
-    """Аниме-style speed lines из центра."""
-    cx, cy = width // 2, height // 2
-    for _ in range(count):
-        angle = random.uniform(0, 6.28)
-        r1 = random.randint(100, 250)
-        r2 = r1 + random.randint(80, 200)
-        x1 = cx + int(r1 * math.cos(angle))
-        y1 = cy + int(r1 * math.sin(angle))
-        x2 = cx + int(r2 * math.cos(angle))
-        y2 = cy + int(r2 * math.sin(angle))
-        alpha = random.randint(15, 60)
-        odraw.line([(x1, y1), (x2, y2)], fill=(*accent, alpha), width=random.randint(1, 3))
-
-
-def _draw_circuit(odraw, width, height, accent, count=20):
-    """Линии как на печатной плате."""
-    col = (*accent, 30)
-    for _ in range(count):
-        x = random.randint(0, width)
-        y = random.randint(0, height)
-        direction = random.choice(["h", "v"])
-        length = random.randint(60, 200)
-        if direction == "h":
-            odraw.line([(x, y), (x + length, y)], fill=col, width=2)
-            if random.random() < 0.5:
-                odraw.line([(x + length, y), (x + length, y + random.randint(-60, 60))], fill=col, width=2)
-        else:
-            odraw.line([(x, y), (x, y + length)], fill=col, width=2)
-            if random.random() < 0.5:
-                odraw.line([(x, y + length), (x + random.randint(-60, 60), y + length)], fill=col, width=2)
-
-
-def generate_background(theme_key, width, height):
-    theme = THEMES.get(theme_key, THEMES["matrix"])
-    accent = theme["accent"]
-
-    # ── 1. Многослойный градиент фона ──────────────────────────────────────
+def _base_gradient(width, height, accent, accent2, diagonal=True):
+    """Базовый двухцветный тёмный градиент — общая основа для всех стилей фона."""
     img = Image.new("RGB", (width, height), (4, 4, 8))
     draw = ImageDraw.Draw(img)
-
-    dark_a = _darken(accent, 170)
-
+    dark_a = tuple(max(0, c - 170) for c in accent)
+    dark_b = tuple(max(0, c - 190) for c in accent2)
     for y in range(height):
         t = y / height
-        r = int(6  + dark_a[0] * (1 - t) * 0.6)
-        g = int(6  + dark_a[1] * (1 - t) * 0.6)
-        b = int(10 + dark_a[2] * (1 - t) * 0.7)
+        mix = 0.65 + 0.35 * t if diagonal else 0.5
+        r = int(6 + (dark_a[0] * (1 - t) + dark_b[0] * t * 0.5) * 0.6)
+        g = int(6 + (dark_a[1] * (1 - t) + dark_b[1] * t * 0.5) * 0.6)
+        b = int(10 + (dark_a[2] * (1 - t) + dark_b[2] * t * 0.5) * 0.7)
         draw.line([(0, y), (width, y)], fill=(min(255, r), min(255, g), min(255, b)))
+    return img
 
-    # ── 2. Основная RGBA-оверлей ──────────────────────────────────────────
-    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    odraw = ImageDraw.Draw(overlay)
 
-    # --- Крупный glow в центре-верхней части ---
-    cx, cy = width // 2, int(height * 0.38)
-    _draw_glow_circle(odraw, cx, cy, int(min(width, height) * 0.55), accent, max_alpha=55)
+def _draw_sunburst_rays(odraw, width, height, cx, cy, accent, accent2, n=26):
+    """Веерные лучи из одной точки — эффект софита/восхода."""
+    max_len = int(math.hypot(width, height))
+    for i in range(n):
+        angle = (2 * math.pi / n) * i + random.uniform(-0.05, 0.05)
+        length = int(max_len * random.uniform(0.7, 1.0))
+        x2 = cx + int(length * math.cos(angle))
+        y2 = cy + int(length * math.sin(angle))
+        col = accent if i % 2 == 0 else accent2
+        alpha = random.randint(10, 34)
+        odraw.line([(cx, cy), (x2, y2)], fill=col + (alpha,), width=random.randint(2, 5))
 
-    # --- Маленький яркий glow смещённый ---
-    offset_x = random.randint(-width // 5, width // 5)
-    offset_y = random.randint(-height // 8, height // 8)
-    _draw_glow_circle(odraw, cx + offset_x, cy + offset_y,
-                      int(min(width, height) * 0.25), accent, max_alpha=80)
 
-    # --- Концентрические кольца ---
-    ring_step = random.randint(70, 110)
-    for ring_r in range(ring_step, max(width, height), ring_step):
-        alpha = max(8, 80 - ring_r // 14)
-        w_ring = random.randint(1, 3)
-        odraw.ellipse(
-            [cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r],
-            outline=accent + (alpha,), width=w_ring
-        )
+def _draw_circuit_lines(odraw, width, height, accent, spacing=90):
+    """Прямоугольная 'плата' — ломаные линии-дорожки с узлами, техно-стиль."""
+    cols = width // spacing + 2
+    rows = height // spacing + 2
+    for _ in range(random.randint(14, 22)):
+        cx = random.randint(0, cols - 1) * spacing
+        cy = random.randint(0, rows - 1) * spacing
+        path_len = random.randint(2, 5)
+        pts = [(cx, cy)]
+        for _ in range(path_len):
+            if random.random() < 0.5:
+                cx += spacing * random.choice([-1, 1])
+            else:
+                cy += spacing * random.choice([-1, 1])
+            pts.append((cx, cy))
+        alpha = random.randint(18, 45)
+        odraw.line(pts, fill=accent + (alpha,), width=1)
+        node_r = random.choice([2, 2, 3, 4])
+        for px, py in pts:
+            if random.random() < 0.6:
+                odraw.ellipse([px - node_r, py - node_r, px + node_r, py + node_r],
+                              fill=accent + (min(255, alpha + 40),))
 
-    # --- Диагональные "лучи" ---
-    num_rays = random.randint(5, 10)
-    for _ in range(num_rays):
-        angle_r = random.uniform(0, 6.28)
-        length = random.randint(int(height * 0.3), int(height * 0.9))
-        x1 = cx + int(random.uniform(-60, 60))
-        y1 = cy + int(random.uniform(-40, 40))
-        x2 = x1 + int(length * math.cos(angle_r))
-        y2 = y1 + int(length * math.sin(angle_r))
-        alpha_ray = random.randint(12, 50)
-        odraw.line([(x1, y1), (x2, y2)],
-                   fill=accent + (alpha_ray,),
-                   width=random.randint(1, 3))
 
-    # --- "Звёздная пыль" ---
-    num_stars = random.randint(60, 120)
-    for _ in range(num_stars):
+def _draw_wave_bands(odraw, width, height, accent, accent2, n=9):
+    """Плавные горизонтальные волновые ленты — мягкий, 'эфирный' стиль."""
+    for i in range(n):
+        base_y = height * (0.15 + 0.75 * i / n)
+        amp = random.uniform(18, 55)
+        freq = random.uniform(1.3, 2.6)
+        phase = random.uniform(0, 6.28)
+        col = accent if i % 2 == 0 else accent2
+        alpha = random.randint(14, 34)
+        pts = []
+        step = 14
+        for x in range(0, width + step, step):
+            y = base_y + amp * math.sin((x / width) * freq * 2 * math.pi + phase)
+            pts.append((x, y))
+        odraw.line(pts, fill=col + (alpha,), width=random.randint(2, 4))
+
+
+def _draw_particles_field(odraw, width, height, accent, accent2, n=90):
+    """Плотное поле разноразмерных частиц/боке-огней двух акцентных цветов."""
+    for _ in range(n):
         sx = random.randint(0, width)
         sy = random.randint(0, height)
-        star_r = random.randint(1, 4)
-        star_alpha = random.randint(30, 160)
-        odraw.ellipse(
-            [sx - star_r, sy - star_r, sx + star_r, sy + star_r],
-            fill=accent + (star_alpha,)
-        )
+        col = accent if random.random() < 0.6 else accent2
+        r = random.choice([1, 1, 2, 2, 3, 6, 10])
+        alpha = random.randint(20, 150) if r <= 3 else random.randint(10, 35)
+        odraw.ellipse([sx - r, sy - r, sx + r, sy + r], fill=col + (alpha,))
 
-    # --- Случайные геометрические фигуры ---
-    num_shapes = random.randint(3, 7)
-    for _ in range(num_shapes):
+
+def _draw_geo_shapes(odraw, width, height, accent, accent2, n=6):
+    """Случайные геометрические фигуры (ромбы/треугольники/кресты)."""
+    for _ in range(n):
         sx = random.randint(0, width)
         sy = random.randint(0, height)
         size = random.randint(20, 80)
         alpha_s = random.randint(10, 40)
+        col_s = (accent if random.random() < 0.5 else accent2) + (alpha_s,)
         shape_type = random.choice(['diamond', 'triangle', 'cross'])
-        col_s = accent + (alpha_s,)
         if shape_type == 'diamond':
-            odraw.polygon([
-                (sx, sy - size), (sx + size, sy),
-                (sx, sy + size), (sx - size, sy)
-            ], outline=col_s)
+            odraw.polygon([(sx, sy - size), (sx + size, sy), (sx, sy + size), (sx - size, sy)], outline=col_s)
         elif shape_type == 'triangle':
-            odraw.polygon([
-                (sx, sy - size),
-                (sx + size, sy + size),
-                (sx - size, sy + size)
-            ], outline=col_s)
+            odraw.polygon([(sx, sy - size), (sx + size, sy + size), (sx - size, sy + size)], outline=col_s)
         else:
             odraw.line([(sx - size, sy), (sx + size, sy)], fill=col_s, width=2)
             odraw.line([(sx, sy - size), (sx, sy + size)], fill=col_s, width=2)
 
-    # --- НОВЫЕ ЭФФЕКТЫ (случайный выбор 2-3) ---
-    effects_pool = [
-        lambda: _draw_bokeh(odraw, width, height, accent, count=random.randint(15, 30)),
-        lambda: _draw_wave_lines(odraw, width, height, accent, count=random.randint(5, 10)),
-        lambda: _draw_grid(odraw, width, height, accent, spacing=random.randint(60, 100), alpha=random.randint(10, 20)),
-        lambda: _draw_triangles(odraw, width, height, accent, count=random.randint(10, 20)),
-        lambda: _draw_speed_lines(odraw, width, height, accent, count=random.randint(30, 50)),
-        lambda: _draw_circuit(odraw, width, height, accent, count=random.randint(15, 25)),
-    ]
-    random.shuffle(effects_pool)
-    for effect in effects_pool[:random.randint(2, 3)]:
-        effect()
 
-    # ── 3. Применяем оверлей ─────────────────────────────────────────────
+BG_STYLES = ["nebula", "circuit", "sunburst", "wave", "particles", "aurora"]
+
+
+def generate_background(theme_key, width, height, bg_style=None):
+    """Рисует фон-арт карточки. bg_style выбирает "характер" рисунка —
+    если не задан, выбирается случайно, так что даже карточки одной темы
+    выглядят по-разному от раза к разу."""
+    theme = THEMES.get(theme_key, THEMES["matrix"])
+    accent = theme["accent"]
+    accent2 = get_accent2(accent)
+    style = bg_style if bg_style in BG_STYLES else random.choice(BG_STYLES)
+
+    cx, cy = width // 2, int(height * 0.38)
+    img = _base_gradient(width, height, accent, accent2)
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+
+    if style == "nebula":
+        _draw_glow_circle(odraw, cx, cy, int(min(width, height) * 0.55), accent, max_alpha=55)
+        ox = cx + random.randint(-width // 5, width // 5)
+        oy = cy + random.randint(-height // 8, height // 8)
+        _draw_glow_circle(odraw, ox, oy, int(min(width, height) * 0.25), accent2, max_alpha=75)
+        ring_step = random.randint(70, 110)
+        for ring_r in range(ring_step, max(width, height), ring_step):
+            alpha = max(8, 80 - ring_r // 14)
+            odraw.ellipse([cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r],
+                          outline=accent + (alpha,), width=random.randint(1, 3))
+        for _ in range(random.randint(5, 10)):
+            angle_r = random.uniform(0, 6.28)
+            length = random.randint(int(height * 0.3), int(height * 0.9))
+            x1 = cx + int(random.uniform(-60, 60))
+            y1 = cy + int(random.uniform(-40, 40))
+            x2 = x1 + int(length * math.cos(angle_r))
+            y2 = y1 + int(length * math.sin(angle_r))
+            odraw.line([(x1, y1), (x2, y2)], fill=accent2 + (random.randint(12, 50),), width=random.randint(1, 3))
+        _draw_particles_field(odraw, width, height, accent, accent2, n=random.randint(60, 110))
+        _draw_geo_shapes(odraw, width, height, accent, accent2, n=random.randint(3, 7))
+
+    elif style == "circuit":
+        _draw_glow_circle(odraw, cx, cy, int(min(width, height) * 0.5), accent, max_alpha=40)
+        _draw_circuit_lines(odraw, width, height, accent2, spacing=random.randint(70, 110))
+        _draw_particles_field(odraw, width, height, accent, accent2, n=random.randint(30, 60))
+
+    elif style == "sunburst":
+        origin_x = random.choice([int(width * 0.15), int(width * 0.5), int(width * 0.85)])
+        origin_y = int(height * random.uniform(0.1, 0.3))
+        _draw_sunburst_rays(odraw, width, height, origin_x, origin_y, accent, accent2, n=random.randint(20, 30))
+        _draw_glow_circle(odraw, origin_x, origin_y, int(min(width, height) * 0.35), accent2, max_alpha=90)
+        _draw_particles_field(odraw, width, height, accent, accent2, n=random.randint(40, 70))
+
+    elif style == "wave":
+        _draw_glow_circle(odraw, cx, cy, int(min(width, height) * 0.45), accent, max_alpha=35)
+        _draw_wave_bands(odraw, width, height, accent, accent2, n=random.randint(7, 11))
+        _draw_particles_field(odraw, width, height, accent, accent2, n=random.randint(30, 50))
+
+    elif style == "particles":
+        _draw_glow_circle(odraw, cx, cy, int(min(width, height) * 0.4), accent, max_alpha=45)
+        _draw_particles_field(odraw, width, height, accent, accent2, n=random.randint(110, 170))
+        _draw_geo_shapes(odraw, width, height, accent, accent2, n=random.randint(2, 5))
+
+    elif style == "aurora":
+        for i in range(random.randint(3, 5)):
+            bx = random.randint(-width // 4, width)
+            by = int(height * random.uniform(0.05, 0.6))
+            col = accent if i % 2 == 0 else accent2
+            _draw_glow_circle(odraw, bx, by, int(min(width, height) * random.uniform(0.3, 0.55)),
+                              col, max_alpha=random.randint(35, 60))
+        _draw_wave_bands(odraw, width, height, accent, accent2, n=random.randint(5, 8))
+        _draw_particles_field(odraw, width, height, accent, accent2, n=random.randint(40, 70))
+
     img_rgba = img.convert("RGBA")
     img_rgba.alpha_composite(overlay)
     img = img_rgba.convert("RGB")
 
-    # ── 4. Гексагональная сетка ──────────────────────────────────────────
-    hex_overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    _draw_hex_grid(ImageDraw.Draw(hex_overlay), width, height, accent,
-                   spacing=random.randint(90, 150), alpha=random.randint(12, 25))
-    img_rgba = img.convert("RGBA")
-    img_rgba.alpha_composite(hex_overlay)
-    img = img_rgba.convert("RGB")
+    # ── Гексагональная сетка (почти всегда, лёгким слоем) ──────────────────
+    if random.random() < 0.8:
+        hex_overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        _draw_hex_grid(ImageDraw.Draw(hex_overlay), width, height, accent,
+                       spacing=random.randint(90, 150), alpha=random.randint(10, 22))
+        img_rgba = img.convert("RGBA")
+        img_rgba.alpha_composite(hex_overlay)
+        img = img_rgba.convert("RGB")
 
-    # ── 5. Scanlines ──────────────────────────────────────────────────────
-    img = _draw_scan_lines(img, height, alpha=random.randint(8, 18))
+    img = _draw_vignette(img, strength=random.randint(60, 100))
+    img = _draw_scan_lines(img, height, alpha=random.randint(6, 16))
 
     return img
 
@@ -473,19 +493,6 @@ def _draw_outlined_text(draw, xy, text, font, fill, outline_color=(0, 0, 0), out
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def _draw_glow_text(draw, xy, text, font, fill, glow_color, glow_radius=8):
-    """Текст с мягким glow-эффектом вокруг."""
-    x, y = xy
-    for r in range(glow_radius, 0, -2):
-        alpha = int(80 * (1 - r / glow_radius))
-        gc = tuple(min(255, c + alpha) if i < 3 else 255 for i, c in enumerate(glow_color))
-        for dx in range(-r, r + 1, 2):
-            for dy in range(-r, r + 1, 2):
-                if dx * dx + dy * dy <= r * r:
-                    draw.text((x + dx, y + dy), text, font=font, fill=gc)
-    draw.text((x, y), text, font=font, fill=fill)
-
-
 def _draw_noise(img, amount=8):
     px = img.load()
     w, h = img.size
@@ -497,103 +504,12 @@ def _draw_noise(img, amount=8):
         px[x, y] = (max(0, min(255, r + d)), max(0, min(255, g + d)), max(0, min(255, b + d)))
 
 
-def _draw_corner_decorations(draw, accent, margin=28):
-    arm = 44
-    thick = 3
-    col = accent
-    corners = [
-        (margin, margin,        +1, 0,  0, +1),
-        (W - margin, margin,   -1, 0,  0, +1),
-        (margin, H - margin,   +1, 0,  0, -1),
-        (W - margin, H - margin, -1, 0, 0, -1),
-    ]
-    for x, y, dhx, dhy, dvx, dvy in corners:
-        draw.line([(x, y), (x + dhx * arm, y + dhy * arm)], fill=col, width=thick)
-        draw.line([(x, y), (x + dvx * arm, y + dvy * arm)], fill=col, width=thick)
-        draw.rectangle([x - 4, y - 4, x + 4, y + 4], fill=col)
-
-
-def _draw_neon_line(draw, x1, y1, x2, y2, accent, width=3):
-    r, g, b = accent
-    draw.line([(x1, y1), (x2, y2)],
-              fill=(min(255, r + 60), min(255, g + 60), min(255, b + 60)),
-              width=width + 4)
-    draw.line([(x1, y1), (x2, y2)], fill=(255, 255, 255), width=1)
-
-
-def _draw_stat_badge(draw, label, value, x, y, accent, font_label, font_value):
-    pad_x, pad_y = 14, 10
-    lb = draw.textbbox((0, 0), label, font=font_label)
-    vb = draw.textbbox((0, 0), value, font=font_value)
-    box_w = max(lb[2] - lb[0], vb[2] - vb[0]) + pad_x * 2
-    box_h = (lb[3] - lb[1]) + (vb[3] - vb[1]) + pad_y * 3
-    draw.rectangle([x, y, x + box_w, y + box_h],
-                   fill=(18, 18, 24), outline=accent, width=1)
-    draw.text((x + pad_x, y + pad_y), label, font=font_label, fill=(130, 130, 150))
-    draw.text((x + pad_x, y + pad_y + (lb[3] - lb[1]) + 4), value,
-              font=font_value, fill=(255, 255, 255))
-    return box_w, box_h
-
-
-def _draw_circular_avatar(draw, cx, cy, radius, person, accent, font):
-    """Рисует круг с инициалами дежурного."""
-    initials = ""
-    for part in person.split():
-        if part:
-            initials += part[0].upper()
-    if not initials:
-        initials = "?"
-
-    # Внешнее свечение
-    for r in range(radius + 12, radius, -2):
-        alpha = int(60 * (1 - (r - radius) / 12))
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(*accent, alpha), width=2)
-
-    # Основной круг
-    draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius],
-                 fill=(20, 20, 28), outline=accent, width=3)
-
-    # Инициалы
-    bb = draw.textbbox((0, 0), initials, font=font)
-    tw, th = bb[2] - bb[0], bb[3] - bb[1]
-    draw.text((cx - tw // 2, cy - th // 2), initials, font=font, fill=WHITE)
-
-
-def _draw_gradient_progress_bar(draw, x, y, width, height, progress, accent, bg_color=(22, 22, 30)):
-    """Горизонтальный прогресс-бар с градиентом заполнения."""
-    # Фон
-    draw.rounded_rectangle([x, y, x + width, y + height], radius=height // 2, fill=bg_color, outline=(60, 60, 75), width=1)
-
-    filled_w = int(width * progress)
-    if filled_w > height:
-        # Градиентное заполнение
-        for fx in range(x, x + filled_w):
-            t = (fx - x) / filled_w if filled_w > 0 else 0
-            col = _lerp_color(accent, _lighten(accent, 80), t)
-            draw.line([(fx, y + 2), (fx, y + height - 2)], fill=col)
-        # Скругление края
-        draw.ellipse([x + filled_w - height, y, x + filled_w, y + height], fill=_lighten(accent, 40))
-
-
-def _draw_duty_badge(draw, x, y, duty_type, accent):
-    """Бейдж с иконкой типа наряда."""
-    icon = "📋" if duty_type == "svodki" else "🧹"
-    label = "СВОДКИ" if duty_type == "svodki" else "ПРОЦЕДУРКА"
-    font = load_font(FONT_BOLD_PATH, 22)
-    text = f"{icon}  {label}"
-    bb = draw.textbbox((0, 0), text, font=font)
-    tw, th = bb[2] - bb[0], bb[3] - bb[1]
-    pad = 12
-    draw.rounded_rectangle([x, y, x + tw + pad * 2, y + th + pad * 2], radius=8,
-                           fill=(16, 16, 22), outline=accent, width=2)
-    draw.text((x + pad, y + pad), text, font=font, fill=WHITE)
-    return tw + pad * 2, th + pad * 2
-
-
 # ══════════════════════════════════════════════
-#  ПРОСТАЯ ЗАГЛУШКА
+#  ПРОСТАЯ ЗАГЛУШКА НА СЛУЧАЙ ЛЮБОЙ ОШИБКИ
 # ══════════════════════════════════════════════
 def _save_fallback_card(output_path, person, header_text):
+    """Простая, но гарантированно рабочая заглушка — без anchor и без
+    зависимости от шрифтов, которые могли не загрузиться."""
     img = Image.new("RGB", (W, H), DARK)
     draw = ImageDraw.Draw(img)
     font_big = load_font(FONT_BOLD_PATH, 64)
@@ -618,6 +534,142 @@ def _save_fallback_card(output_path, person, header_text):
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     img.save(output_path, "JPEG", quality=90)
 
+CORNER_STYLES = ["bracket", "dot", "hex", "frame"]
+
+
+def _draw_corner_decorations(draw, accent, margin=28, style=None):
+    """Рисует угловой декор в каждом углу карточки. style задаёт форму —
+    если не передан, выбирается случайно (это делает карточки разнообразнее
+    даже в рамках одной темы)."""
+    style = style if style in CORNER_STYLES else random.choice(CORNER_STYLES)
+    arm = 44
+    thick = 3
+    col = accent
+    corners = [
+        (margin, margin,        +1, 0,  0, +1),
+        (W - margin, margin,   -1, 0,  0, +1),
+        (margin, H - margin,   +1, 0,  0, -1),
+        (W - margin, H - margin, -1, 0, 0, -1),
+    ]
+
+    if style == "bracket":
+        for x, y, dhx, dhy, dvx, dvy in corners:
+            draw.line([(x, y), (x + dhx * arm, y + dhy * arm)], fill=col, width=thick)
+            draw.line([(x, y), (x + dvx * arm, y + dvy * arm)], fill=col, width=thick)
+            draw.rectangle([x - 4, y - 4, x + 4, y + 4], fill=col)
+
+    elif style == "dot":
+        for x, y, dhx, dhy, dvx, dvy in corners:
+            draw.arc([x - arm, y - arm, x + arm, y + arm], 0, 360, fill=col, width=2)
+            draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=col)
+            draw.line([(x + dhx * 8, y + dhy * 8), (x + dhx * arm, y + dhy * arm)], fill=col, width=2)
+            draw.line([(x + dvx * 8, y + dvy * 8), (x + dvx * arm, y + dvy * arm)], fill=col, width=2)
+
+    elif style == "hex":
+        for x, y, dhx, dhy, dvx, dvy in corners:
+            s = 18
+            pts = [
+                (x + dhx * s, y), (x + dhx * s * 1.6, y + dvy * s * 0.9),
+                (x + dhx * s * 1.6, y + dvy * s * 1.8), (x + dhx * s, y + dvy * s * 2.4),
+                (x, y + dvy * s * 1.8), (x, y + dvy * s * 0.9),
+            ]
+            draw.polygon(pts, outline=col, width=2)
+            draw.line([(x + dhx * s * 1.6, y), (x + dhx * arm, y)], fill=col, width=2)
+            draw.line([(x, y + dvy * s * 2.4), (x, y + dvy * arm)], fill=col, width=2)
+
+    elif style == "frame":
+        inset = 14
+        draw.rounded_rectangle(
+            [margin - inset, margin - inset, W - margin + inset, H - margin + inset],
+            radius=22, outline=col, width=1
+        )
+        for x, y, dhx, dhy, dvx, dvy in corners:
+            draw.line([(x, y), (x + dhx * (arm - 10), y + dhy * (arm - 10))], fill=col, width=thick)
+            draw.line([(x, y), (x + dvx * (arm - 10), y + dvy * (arm - 10))], fill=col, width=thick)
+
+
+LINE_STYLES = ["solid", "dashed", "diamond"]
+
+
+def _draw_neon_line(draw, x1, y1, x2, y2, accent, width=3, style=None):
+    """Рисует разделительную линию с эффектом неонового свечения.
+    style: solid (сплошная), dashed (пунктир), diamond (линия из ромбиков)."""
+    style = style if style in LINE_STYLES else random.choice(LINE_STYLES)
+    r, g, b = accent
+    glow = (min(255, r + 60), min(255, g + 60), min(255, b + 60))
+
+    if style == "solid":
+        draw.line([(x1, y1), (x2, y2)], fill=glow, width=width + 4)
+        draw.line([(x1, y1), (x2, y2)], fill=(255, 255, 255), width=1)
+
+    elif style == "dashed":
+        total = math.hypot(x2 - x1, y2 - y1)
+        if total <= 0:
+            return
+        ux, uy = (x2 - x1) / total, (y2 - y1) / total
+        dash, gap = 16, 10
+        pos = 0.0
+        while pos < total:
+            seg_end = min(pos + dash, total)
+            sx1, sy1 = x1 + ux * pos, y1 + uy * pos
+            sx2, sy2 = x1 + ux * seg_end, y1 + uy * seg_end
+            draw.line([(sx1, sy1), (sx2, sy2)], fill=glow, width=width + 3)
+            draw.line([(sx1, sy1), (sx2, sy2)], fill=(255, 255, 255), width=1)
+            pos += dash + gap
+
+    elif style == "diamond":
+        dim = tuple(c // 2 for c in accent)
+        draw.line([(x1, y1), (x2, y2)], fill=dim, width=1)
+        total = math.hypot(x2 - x1, y2 - y1)
+        if total <= 0:
+            return
+        ux, uy = (x2 - x1) / total, (y2 - y1) / total
+        step = 26
+        pos = step / 2
+        s = 4
+        while pos < total:
+            px, py = x1 + ux * pos, y1 + uy * pos
+            draw.polygon([(px, py - s), (px + s, py), (px, py + s), (px - s, py)], fill=glow)
+            pos += step
+
+
+BADGE_SHAPES = ["rect", "pill", "cut"]
+
+
+def _badge_rect(draw, box, accent, shape=None, fill=(16, 16, 22), outline_w=1):
+    """Рисует фон+рамку бейджа заданной формы в прямоугольнике box=(x0,y0,x1,y1).
+    Возвращает использованную форму (текст поверх рисуется вызывающим кодом)."""
+    shape = shape if shape in BADGE_SHAPES else random.choice(BADGE_SHAPES)
+    x0, y0, x1, y1 = box
+    if shape == "rect":
+        draw.rectangle(box, fill=fill, outline=accent, width=outline_w)
+    elif shape == "pill":
+        radius = min(18, (y1 - y0) // 2)
+        draw.rounded_rectangle(box, radius=radius, fill=fill, outline=accent, width=outline_w)
+    elif shape == "cut":
+        c = min(12, (y1 - y0) // 3)
+        pts = [
+            (x0 + c, y0), (x1 - c, y0), (x1, y0 + c),
+            (x1, y1 - c), (x1 - c, y1), (x0 + c, y1),
+            (x0, y1 - c), (x0, y0 + c),
+        ]
+        draw.polygon(pts, fill=fill, outline=accent)
+    return shape
+
+
+def _draw_stat_badge(draw, label, value, x, y, accent, font_label, font_value, shape=None):
+    """Рисует маленький бейдж со статистикой."""
+    pad_x, pad_y = 14, 10
+    lb = draw.textbbox((0, 0), label, font=font_label)
+    vb = draw.textbbox((0, 0), value, font=font_value)
+    box_w = max(lb[2] - lb[0], vb[2] - vb[0]) + pad_x * 2
+    box_h = (lb[3] - lb[1]) + (vb[3] - vb[1]) + pad_y * 3
+    _badge_rect(draw, (x, y, x + box_w, y + box_h), accent, shape=shape)
+    draw.text((x + pad_x, y + pad_y), label, font=font_label, fill=(130, 130, 150))
+    draw.text((x + pad_x, y + pad_y + (lb[3] - lb[1]) + 4), value,
+              font=font_value, fill=(255, 255, 255))
+    return box_w, box_h
+
 
 # ══════════════════════════════════════════════
 #  ГЛАВНАЯ ФУНКЦИЯ
@@ -628,19 +680,28 @@ def make_reminder_card(
     proc_day=1, next_person="", next_days=0, total_duties=0,
     theme_key=None, output_path="/tmp/card.jpg"
 ):
+    """
+    Рисует карточку-напоминание и сохраняет её в output_path (JPEG).
+    Любая внутренняя ошибка перехватывается и вместо падения создаётся
+    простая, но рабочая заглушка — так бот никогда не останется совсем
+    без картинки и не упадёт целиком из-за бага в рисовании.
+    Возвращает использованный theme_key.
+    """
     if theme_key not in THEMES:
         theme_key = random.choice(THEME_KEYS)
 
     try:
         theme = THEMES[theme_key]
         accent = theme["accent"]
+        accent2 = get_accent2(accent)
+        style_key, style = pick_style()
 
         header_text = _clean_for_image(header_text)
         ending_text = _clean_for_image(ending_text)
-        mood_label = _clean_for_image(mood_label)
+        mood_label  = _clean_for_image(mood_label)
 
         # ── 1. Фон-арт ────────────────────────────────────────────────────
-        bg = generate_background(theme_key, W, BG_H)
+        bg = generate_background(theme_key, W, BG_H, bg_style=random.choice(style["bg"]))
         img = Image.new("RGB", (W, H), DARK)
         img.paste(bg, (0, 0))
 
@@ -658,7 +719,7 @@ def make_reminder_card(
         draw = ImageDraw.Draw(img)
 
         # ── 3. Угловые декоры ─────────────────────────────────────────────
-        _draw_corner_decorations(draw, accent, margin=30)
+        _draw_corner_decorations(draw, accent, margin=30, style=style["corner"])
 
         # ── 4. Верхняя строка: бейдж темы + время ────────────────────────
         badge_font = load_font(FONT_BOLD_PATH, 24)
@@ -666,32 +727,22 @@ def make_reminder_card(
         bb = draw.textbbox((0, 0), badge_text, font=badge_font)
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         pad = 10
-        draw.rectangle(
-            [MARGIN - pad, MARGIN - 6, MARGIN + bw + pad, MARGIN + bh + 8],
-            fill=(12, 12, 18), outline=accent, width=1
-        )
+        _badge_rect(draw, (MARGIN - pad, MARGIN - 6, MARGIN + bw + pad, MARGIN + bh + 8),
+                    accent, shape=style["badge"], fill=(12, 12, 18))
         draw.text((MARGIN, MARGIN), badge_text, font=badge_font, fill=accent)
 
         time_font = load_font(FONT_BOLD_PATH, 24)
         tb = draw.textbbox((0, 0), time_label, font=time_font)
         tw = tb[2] - tb[0]
-        draw.rectangle(
-            [W - MARGIN - tw - 2 * pad, MARGIN - 6, W - MARGIN + pad, MARGIN + bh + 8],
-            fill=(12, 12, 18), outline=accent, width=1
-        )
+        _badge_rect(draw, (W - MARGIN - tw - 2 * pad, MARGIN - 6, W - MARGIN + pad, MARGIN + bh + 8),
+                    accent2, shape=style["badge"], fill=(12, 12, 18))
         draw.text((W - MARGIN - tw - pad, MARGIN), time_label, font=time_font, fill=WHITE)
 
         # ── 5. Горизонтальная неоновая линия ─────────────────────────────
         line_y = MARGIN + bh + 18
-        _draw_neon_line(draw, MARGIN, line_y, W - MARGIN, line_y, accent, width=1)
+        _draw_neon_line(draw, MARGIN, line_y, W - MARGIN, line_y, accent, width=1, style=style["line"])
 
-        # ── 6. Круговой аватар + Имя дежурного ───────────────────────────
-        avatar_r = 50
-        avatar_cx = W // 2
-        avatar_cy = BG_H - 220
-        avatar_font = load_font(FONT_BOLD_PATH, 42)
-        _draw_circular_avatar(draw, avatar_cx, avatar_cy, avatar_r, person, accent, avatar_font)
-
+        # ── 6. Имя дежурного (двухцветная обводка: accent2 снаружи, тень внутри) ──
         for name_size in (100, 88, 76, 64, 54):
             name_font = load_font(FONT_BOLD_PATH, name_size)
             nb = draw.textbbox((0, 0), person, font=name_font)
@@ -699,10 +750,10 @@ def make_reminder_card(
                 break
         nw, nh = nb[2] - nb[0], nb[3] - nb[1]
         nx = (W - nw) // 2
-        ny = avatar_cy + avatar_r + 20
-
-        # Glow под именем
-        _draw_glow_text(draw, (nx, ny), person, name_font, fill=WHITE, glow_color=accent, glow_radius=12)
+        ny = BG_H - nh - 160
+        draw.text((nx + 3, ny + 3), person, font=name_font, fill=accent2)
+        _draw_outlined_text(draw, (nx, ny), person, name_font,
+                            fill=WHITE, outline_color=(0, 0, 0), outline_w=4)
 
         # ── 7. Позиция ────────────────────────────────────────────────────
         pos_font = load_font(FONT_REGULAR_PATH, 28)
@@ -726,7 +777,7 @@ def make_reminder_card(
         h = _draw_centered(draw, meta_text, meta_font, text_y, color=(120, 120, 140), shadow=False)
         text_y += h + 14
 
-        _draw_neon_line(draw, 60, text_y, W - 60, text_y, accent, width=2)
+        _draw_neon_line(draw, 60, text_y, W - 60, text_y, accent, width=2, style=style["line"])
         text_y += 16
 
         # ── Заголовок наряда ──────────────────────────────────────────────
@@ -741,47 +792,54 @@ def make_reminder_card(
             text_y += h + 4
         text_y += 8
 
-        # ── Duty badge + прогресс-бар (для процедурки) ────────────────────
+        # ── Duty badge ────────────────────────────────────────────────────
+        duty_font = load_font(FONT_BOLD_PATH, 28)
+        duty_title = "СВОДКИ" if duty_type == "svodki" else "ПРОЦЕДУРКА"
         if duty_type == "proc":
-            progress = proc_day / 2
-            bar_w = W - 240
-            bar_x = 120
-            bar_h = 28
-            _draw_gradient_progress_bar(draw, bar_x, text_y, bar_w, bar_h, progress, accent)
-
-            # Подпись к прогрессу
-            prog_font = load_font(FONT_BOLD_PATH, 18)
-            prog_text = f"ДЕНЬ {proc_day}/2"
-            pb = draw.textbbox((0, 0), prog_text, font=prog_font)
-            pw = pb[2] - pb[0]
-            draw.text(((W - pw) // 2, text_y + bar_h + 8), prog_text, font=prog_font, fill=(160, 160, 180))
-            text_y += bar_h + 38
+            # Настоящая полоса прогресса (вместо символов ▓░) — выглядит
+            # аккуратнее и не зависит от того, как шрифт рисует блоки.
+            label_text = f"{duty_title}  ·  ДЕНЬ {proc_day}/2"
+            lb = draw.textbbox((0, 0), label_text, font=duty_font)
+            lw, lh = lb[2] - lb[0], lb[3] - lb[1]
+            bar_w = min(360, W - 200)
+            bar_h = 22
+            box_w = max(bar_w, lw) + 60
+            box_h = lh + bar_h + 34
+            box_x0 = (W - box_w) // 2
+            _badge_rect(draw, (box_x0, text_y - 6, box_x0 + box_w, text_y - 6 + box_h),
+                        accent, shape=style["badge"], fill=(20, 20, 28), outline_w=2)
+            draw.text(((W - lw) // 2, text_y + 6), label_text, font=duty_font, fill=accent)
+            bar_y = text_y + 6 + lh + 12
+            bar_x = (W - bar_w) // 2
+            draw.rounded_rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h],
+                                   radius=bar_h // 2, fill=(30, 30, 40), outline=accent2, width=1)
+            filled_w = int(bar_w * min(1.0, proc_day / 2))
+            if filled_w > bar_h:
+                draw.rounded_rectangle([bar_x, bar_y, bar_x + filled_w, bar_y + bar_h],
+                                       radius=bar_h // 2, fill=accent)
+            text_y += box_h + 16
         else:
-            duty_font = load_font(FONT_BOLD_PATH, 28)
-            duty_title = "СВОДКИ"
             duty_line = f">>> {duty_title}  /  ДО {time_label} <<<"
             db = draw.textbbox((0, 0), duty_line, font=duty_font)
             dw = db[2] - db[0]
             dx = (W - dw) // 2
-            draw.rectangle(
-                [dx - 18, text_y - 6, dx + dw + 18, text_y + (db[3] - db[1]) + 10],
-                fill=(20, 20, 28), outline=accent, width=2
-            )
+            _badge_rect(draw, (dx - 18, text_y - 6, dx + dw + 18, text_y + (db[3] - db[1]) + 10),
+                        accent, shape=style["badge"], fill=(20, 20, 28), outline_w=2)
             draw.text((dx, text_y), duty_line, font=duty_font, fill=accent)
             text_y += (db[3] - db[1]) + 22
 
         # ── Статистика ────────────────────────────────────────────────────
         stat_label_font = load_font(FONT_REGULAR_PATH, 18)
-        stat_val_font = load_font(FONT_BOLD_PATH, 22)
+        stat_val_font   = load_font(FONT_BOLD_PATH, 22)
         badge_w1, badge_h1 = _draw_stat_badge(
             draw, label="НАРЯДОВ ВСЕГО", value=str(total_duties),
             x=100, y=text_y, accent=accent,
-            font_label=stat_label_font, font_value=stat_val_font
+            font_label=stat_label_font, font_value=stat_val_font, shape=style["badge"]
         )
         badge_w2, badge_h2 = _draw_stat_badge(
             draw, label="СЛЕДУЮЩИЙ", value=f"{next_person} ({next_days}д)",
-            x=100 + badge_w1 + 20, y=text_y, accent=accent,
-            font_label=stat_label_font, font_value=stat_val_font
+            x=100 + badge_w1 + 20, y=text_y, accent=accent2,
+            font_label=stat_label_font, font_value=stat_val_font, shape=style["badge"]
         )
         text_y += max(badge_h1, badge_h2) + 20
 
@@ -808,7 +866,7 @@ def make_reminder_card(
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         img.save(output_path, "JPEG", quality=92)
-        print(f"✅ Карточка сохранена: {output_path} ({theme_key})", flush=True)
+        print(f"✅ Карточка сохранена: {output_path} ({theme_key}, стиль {style_key})", flush=True)
         return theme_key
 
     except Exception as e:
@@ -823,6 +881,7 @@ def make_reminder_card(
 
 
 if __name__ == "__main__":
+    # Быстрый ручной тест: python3 card_generator.py
     out = make_reminder_card(
         duty_type="svodki",
         person="Тест",

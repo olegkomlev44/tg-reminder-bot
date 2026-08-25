@@ -11,7 +11,6 @@ dembel_generator.py — генератор красивых карточек д�
 
 import os
 import random
-import math
 from datetime import datetime, date, timedelta
 from PIL import Image, ImageDraw
 
@@ -19,11 +18,10 @@ from card_generator import (
     W, H, BG_H, MARGIN, WHITE, DARK,
     THEMES, THEME_KEYS,
     FONT_BOLD_PATH, FONT_REGULAR_PATH,
-    load_font, generate_background,
+    load_font, generate_background, get_accent2, pick_style,
     _clean_for_image, _centered_x, _draw_centered, _wrap_text,
     _draw_outlined_text, _draw_noise, _draw_corner_decorations,
-    _draw_neon_line, _draw_stat_badge,
-    _draw_glow_text, _lerp_color, _darken, _lighten,
+    _draw_neon_line, _draw_stat_badge, _badge_rect,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,29 +38,13 @@ DEMBEL_DATES = {
     "Максим":  date(2026, 12, 17),
 }
 
+# День призыва условно фиксируем на 2 года службы назад от даты дембеля —
+# нужен только чтобы посчитать % прогресса службы для прогресс-бара.
 SERVICE_LENGTH_DAYS = 730
 
 
-# ══════════════════════════════════════════════
-#  РАНГИ ПО ПРОГРЕССУ
-# ══════════════════════════════════════════════
-def _get_rank(progress: float) -> tuple[str, str]:
-    """Возвращает (звание, эмодзи) в зависимости от прогресса службы."""
-    if progress >= 1.0:
-        return "ДЕМБЕЛЬ", "🏠"
-    elif progress >= 0.85:
-        return "ВЕТЕРАН", "🎖"
-    elif progress >= 0.65:
-        return "БОЕЦ", "⚔"
-    elif progress >= 0.40:
-        return "СОЛДАТ", "🛡"
-    elif progress >= 0.20:
-        return "РЕКРУТ", "🎒"
-    else:
-        return "НОВИЧОК", "👶"
-
-
 def _time_left(target: date, now: datetime | None = None) -> dict:
+    """Считает, сколько осталось до target: дни/часы/минуты + флаг 'уже дома'."""
     now = now or datetime.now()
     target_dt = datetime.combine(target, datetime.min.time())
     delta = target_dt - now
@@ -85,6 +67,7 @@ def _time_left(target: date, now: datetime | None = None) -> dict:
 
 
 def _progress_ratio(target: date, now: datetime | None = None) -> float:
+    """Грубая оценка % отслуженного времени (для прогресс-бара)."""
     now = now or datetime.now()
     target_dt = datetime.combine(target, datetime.min.time())
     start_dt = target_dt - timedelta(days=SERVICE_LENGTH_DAYS)
@@ -96,6 +79,8 @@ def _progress_ratio(target: date, now: datetime | None = None) -> float:
 
 
 def get_all_timers(now: datetime | None = None) -> list[dict]:
+    """Возвращает список всех людей с посчитанным временем до дембеля,
+    отсортированный по возрастанию (кто раньше — тот первый)."""
     now = now or datetime.now()
     result = []
     for person, target in DEMBEL_DATES.items():
@@ -109,84 +94,12 @@ def get_all_timers(now: datetime | None = None) -> list[dict]:
     return result
 
 
-# ══════════════════════════════════════════════
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЕМБЕЛЯ
-# ══════════════════════════════════════════════
-def _draw_circular_progress(draw, cx, cy, radius, progress, accent, bg_width=8, fg_width=12):
-    """Круговой прогресс-бар вокруг центра."""
-    # Фоновый круг
-    for r in range(radius - bg_width // 2, radius + bg_width // 2 + 1):
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(30, 30, 40), width=1)
-
-    # Заполненная дуга
-    if progress > 0:
-        steps = int(360 * progress)
-        for angle in range(-90, -90 + steps):
-            rad = math.radians(angle)
-            x1 = cx + (radius - fg_width // 2) * math.cos(rad)
-            y1 = cy + (radius - fg_width // 2) * math.sin(rad)
-            x2 = cx + (radius + fg_width // 2) * math.cos(rad)
-            y2 = cy + (radius + fg_width // 2) * math.sin(rad)
-            # Градиент по углу
-            t = (angle + 90) / 360 if steps > 0 else 0
-            col = _lerp_color(accent, _lighten(accent, 60), t)
-            draw.line([(x1, y1), (x2, y2)], fill=col, width=2)
-
-    # Glow-эффект на конце дуги
-    if 0 < progress < 1:
-        end_angle = math.radians(-90 + int(360 * progress))
-        ex = cx + radius * math.cos(end_angle)
-        ey = cy + radius * math.sin(end_angle)
-        for gr in range(10, 0, -2):
-            alpha = int(100 * (1 - gr / 10))
-            draw.ellipse([ex - gr, ey - gr, ex + gr, ey + gr], fill=(*accent, alpha))
-
-
-def _draw_milestone_dots(draw, cx, cy, radius, accent):
-    """Точки-вехи на круговом прогрессе (25%, 50%, 75%)."""
-    for pct in [0.25, 0.50, 0.75]:
-        angle = math.radians(-90 + 360 * pct)
-        x = cx + radius * math.cos(angle)
-        y = cy + radius * math.sin(angle)
-        draw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=accent, outline=WHITE, width=2)
-
-
-def _draw_time_card(draw, x, y, value, label, accent, font_val, font_lbl):
-    """Маленькая карточка для часов/минут."""
-    vb = draw.textbbox((0, 0), value, font=font_val)
-    lb = draw.textbbox((0, 0), label, font=font_lbl)
-    vw, vh = vb[2] - vb[0], vb[3] - vb[1]
-    lw, lh = lb[2] - lb[0], lb[3] - lb[1]
-    w = max(vw, lw) + 24
-    h = vh + lh + 20
-
-    draw.rounded_rectangle([x, y, x + w, y + h], radius=10, fill=(18, 18, 26), outline=accent, width=2)
-    draw.text((x + (w - vw) // 2, y + 6), value, font=font_val, fill=WHITE)
-    draw.text((x + (w - lw) // 2, y + 8 + vh), label, font=font_lbl, fill=(140, 140, 160))
-    return w, h
-
-
-def _draw_rank_badge(draw, cx, cy, rank, emoji, accent):
-    """Бейдж звания под счётчиком."""
-    font = load_font(FONT_BOLD_PATH, 26)
-    text = f"{emoji}  {rank}"
-    bb = draw.textbbox((0, 0), text, font=font)
-    tw, th = bb[2] - bb[0], bb[3] - bb[1]
-    pad = 14
-    w, h = tw + pad * 2, th + pad * 2
-    x, y = cx - w // 2, cy - h // 2
-
-    draw.rounded_rectangle([x, y, x + w, y + h], radius=20, fill=(20, 20, 28), outline=accent, width=2)
-    # Glow
-    for r in range(8, 0, -2):
-        alpha = int(40 * (1 - r / 8))
-        draw.rounded_rectangle([x - r, y - r, x + w + r, y + h + r], radius=20 + r,
-                               outline=(*accent, alpha), width=1)
-    draw.text((x + pad, y + pad), text, font=font, fill=accent)
-    return w, h
-
-
 def make_dembel_card(person: str, output_path: str, theme_key: str | None = None, now: datetime | None = None) -> str:
+    """
+    Рисует карточку дембель-таймера для одного человека и сохраняет в output_path.
+    Возвращает использованную theme_key. При любой внутренней ошибке рисует
+    упрощённую, но рабочую заглушку — карточка не должна ронять бота.
+    """
     if theme_key not in THEMES:
         theme_key = random.choice(THEME_KEYS)
 
@@ -196,15 +109,16 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
 
     tl = _time_left(target, now)
     progress = _progress_ratio(target, now)
-    rank, rank_emoji = _get_rank(progress)
 
     try:
         theme = THEMES[theme_key]
         accent = theme["accent"]
+        accent2 = get_accent2(accent)
+        style_key, style = pick_style()
         person_clean = _clean_for_image(person)
 
         # ── 1. Фон ────────────────────────────────────────────────────────
-        bg = generate_background(theme_key, W, BG_H)
+        bg = generate_background(theme_key, W, BG_H, bg_style=random.choice(style["bg"]))
         img = Image.new("RGB", (W, H), DARK)
         img.paste(bg, (0, 0))
 
@@ -220,7 +134,7 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         img = img.convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        _draw_corner_decorations(draw, accent, margin=30)
+        _draw_corner_decorations(draw, accent, margin=30, style=style["corner"])
 
         # ── 2. Верхний бейдж темы ────────────────────────────────────────
         badge_font = load_font(FONT_BOLD_PATH, 24)
@@ -228,24 +142,20 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         bb = draw.textbbox((0, 0), badge_text, font=badge_font)
         bw, bh = bb[2] - bb[0], bb[3] - bb[1]
         pad = 10
-        draw.rectangle(
-            [MARGIN - pad, MARGIN - 6, MARGIN + bw + pad, MARGIN + bh + 8],
-            fill=(12, 12, 18), outline=accent, width=1
-        )
+        _badge_rect(draw, (MARGIN - pad, MARGIN - 6, MARGIN + bw + pad, MARGIN + bh + 8),
+                    accent, shape=style["badge"], fill=(12, 12, 18))
         draw.text((MARGIN, MARGIN), badge_text, font=badge_font, fill=accent)
 
         status_font = load_font(FONT_BOLD_PATH, 24)
         status_text = "ДОМА" if tl["done"] else "ДМБ"
         sb = draw.textbbox((0, 0), status_text, font=status_font)
         sw = sb[2] - sb[0]
-        draw.rectangle(
-            [W - MARGIN - sw - 2 * pad, MARGIN - 6, W - MARGIN + pad, MARGIN + bh + 8],
-            fill=(12, 12, 18), outline=accent, width=1
-        )
+        _badge_rect(draw, (W - MARGIN - sw - 2 * pad, MARGIN - 6, W - MARGIN + pad, MARGIN + bh + 8),
+                    accent2, shape=style["badge"], fill=(12, 12, 18))
         draw.text((W - MARGIN - sw - pad, MARGIN), status_text, font=status_font, fill=WHITE)
 
         line_y = MARGIN + bh + 18
-        _draw_neon_line(draw, MARGIN, line_y, W - MARGIN, line_y, accent, width=1)
+        _draw_neon_line(draw, MARGIN, line_y, W - MARGIN, line_y, accent, width=1, style=style["line"])
 
         # ── 3. Имя ────────────────────────────────────────────────────────
         for name_size in (110, 96, 84, 72, 60):
@@ -259,20 +169,11 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         _draw_outlined_text(draw, (nx, ny), person_clean, name_font,
                             fill=WHITE, outline_color=(0, 0, 0), outline_w=4)
 
-        # ── 4. Круговой прогресс + Огромный счётчик дней ──────────────────
-        center_x = W // 2
-        center_y = ny + nh + 180
-        circle_r = 160
-
-        if not tl["done"]:
-            _draw_circular_progress(draw, center_x, center_y, circle_r, progress, accent)
-            _draw_milestone_dots(draw, center_x, center_y, circle_r, accent)
-
+        # ── 4. Огромный счётчик дней (главный элемент, двухцветное свечение) ─
         if tl["done"]:
             big_text = "ДОМА"
         else:
             big_text = str(tl["days"])
-
         for big_size in (280, 240, 200, 170, 140):
             big_font = load_font(FONT_BOLD_PATH, big_size)
             gb = draw.textbbox((0, 0), big_text, font=big_font)
@@ -280,21 +181,17 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
                 break
         gw, gh = gb[2] - gb[0], gb[3] - gb[1]
         gx = (W - gw) // 2
-        gy = center_y - gh // 2 - 10
+        gy = ny + nh + 30
+        draw.text((gx + 5, gy + 5), big_text, font=big_font, fill=accent2)
+        _draw_outlined_text(draw, (gx, gy), big_text, big_font,
+                            fill=accent, outline_color=(0, 0, 0), outline_w=6)
 
-        # Glow под счётчик
-        _draw_glow_text(draw, (gx, gy), big_text, big_font, fill=accent, glow_color=accent, glow_radius=16)
-
-        sub_y = gy + gh + 20
+        sub_y = gy + gb[3] + 14
         if not tl["done"]:
             sub_font = load_font(FONT_REGULAR_PATH, 30)
-            d = tl["days"]
-            if d % 10 == 1 and d % 100 != 11:
+            sub_text = "дней осталось" if (tl["days"] % 10 not in (2, 3, 4) or tl["days"] % 100 in (12, 13, 14)) else "дня осталось"
+            if tl["days"] % 10 == 1 and tl["days"] % 100 != 11:
                 sub_text = "день остался"
-            elif d % 10 in (2, 3, 4) and d % 100 not in (12, 13, 14):
-                sub_text = "дня осталось"
-            else:
-                sub_text = "дней осталось"
             _draw_centered(draw, sub_text, sub_font, sub_y, color=(200, 200, 215), shadow=True, so=2)
             sub_y += 40
         else:
@@ -302,25 +199,19 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
             _draw_centered(draw, "уже дома!", sub_font, sub_y, color=(200, 200, 215), shadow=True, so=2)
             sub_y += 40
 
-        # ── 5. Звание (rank badge) ───────────────────────────────────────
-        rank_y = sub_y + 10
-        _draw_rank_badge(draw, center_x, rank_y + 20, rank, rank_emoji, accent)
-        sub_y = rank_y + 50
-
-        # ── 6. Часы / минуты — карточки (только пока не дома) ─────────────
+        # ── 5. Часы / минуты — вторичная строка (только пока не дома) ────
         if not tl["done"]:
-            val_font = load_font(FONT_BOLD_PATH, 36)
-            lbl_font = load_font(FONT_REGULAR_PATH, 18)
-            card_w, card_h = _draw_time_card(draw, 0, 0, f"{tl['hours']:02d}", "часов", accent, val_font, lbl_font)
+            hm_font = load_font(FONT_BOLD_PATH, 34)
+            hm_text = f"{tl['hours']:02d} ч  {tl['minutes']:02d} мин"
+            hx = _centered_x(draw, hm_text, hm_font)
+            hb = draw.textbbox((0, 0), hm_text, font=hm_font)
+            hw = hb[2] - hb[0]
+            _badge_rect(draw, ((W - hw) // 2 - 20, sub_y - 4, (W + hw) // 2 + 20, sub_y + (hb[3] - hb[1]) + 12),
+                        accent, shape=style["badge"], fill=(16, 16, 22))
+            draw.text((hx, sub_y + 2), hm_text, font=hm_font, fill=WHITE)
+            sub_y += (hb[3] - hb[1]) + 20
 
-            total_cards_w = card_w * 2 + 20
-            start_x = (W - total_cards_w) // 2
-
-            _draw_time_card(draw, start_x, sub_y, f"{tl['hours']:02d}", "часов", accent, val_font, lbl_font)
-            _draw_time_card(draw, start_x + card_w + 20, sub_y, f"{tl['minutes']:02d}", "минут", accent, val_font, lbl_font)
-            sub_y += card_h + 24
-
-        # ── 7. Нижняя панель: дата дембеля + прогресс-бар ────────────────
+        # ── 6. Нижняя панель: дата дембеля + прогресс-бар ────────────────
         text_y = BG_H + 30
 
         meta_font = load_font(FONT_REGULAR_PATH, 22)
@@ -329,10 +220,10 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         h = _draw_centered(draw, meta_text, meta_font, text_y, color=(140, 140, 160), shadow=False)
         text_y += h + 18
 
-        _draw_neon_line(draw, 60, text_y, W - 60, text_y, accent, width=2)
+        _draw_neon_line(draw, 60, text_y, W - 60, text_y, accent, width=2, style=style["line"])
         text_y += 26
 
-        # прогресс-бар службы (горизонтальный с градиентом)
+        # прогресс-бар службы
         bar_w = W - 200
         bar_x = 100
         bar_h = 26
@@ -342,13 +233,10 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         )
         filled_w = int(bar_w * progress)
         if filled_w > bar_h:
-            for fx in range(bar_x, bar_x + filled_w):
-                t = (fx - bar_x) / filled_w if filled_w > 0 else 0
-                col = _lerp_color(accent, _lighten(accent, 80), t)
-                draw.line([(fx, text_y + 2), (fx, text_y + bar_h - 2)], fill=col)
-            draw.ellipse([bar_x + filled_w - bar_h, text_y, bar_x + filled_w, text_y + bar_h],
-                         fill=_lighten(accent, 40))
-
+            draw.rounded_rectangle(
+                [bar_x, text_y, bar_x + filled_w, text_y + bar_h],
+                radius=bar_h // 2, fill=accent
+            )
         pct_font = load_font(FONT_BOLD_PATH, 16)
         pct_text = f"{int(progress * 100)}% службы позади"
         pt = draw.textbbox((0, 0), pct_text, font=pct_font)
@@ -356,7 +244,7 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
         draw.text(((W - pw) // 2, text_y + bar_h + 10), pct_text, font=pct_font, fill=(160, 160, 180))
         text_y += bar_h + 46
 
-        # ── 8. Остальные — краткая сводка ────────────────────────────────
+        # ── 7. Остальные — краткая сводка (кто следующий/предыдущий) ────
         all_timers = get_all_timers(now)
         idx = next((i for i, r in enumerate(all_timers) if r["person"] == person), None)
         if idx is not None:
@@ -372,17 +260,17 @@ def make_dembel_card(person: str, output_path: str, theme_key: str | None = None
                 w1, h1 = _draw_stat_badge(
                     draw, label="РАНЬШЕ УХОДИТ", value=f"{prev_r['person']} ({prev_r['days']}д)",
                     x=x_cursor, y=badges_y, accent=accent,
-                    font_label=label_font, font_value=val_font
+                    font_label=label_font, font_value=val_font, shape=style["badge"]
                 )
                 x_cursor += w1 + 20
             if next_r:
                 _draw_stat_badge(
                     draw, label="СЛЕДУЮЩИЙ", value=f"{next_r['person']} ({next_r['days']}д)",
-                    x=x_cursor, y=badges_y, accent=accent,
-                    font_label=label_font, font_value=val_font
+                    x=x_cursor, y=badges_y, accent=accent2,
+                    font_label=label_font, font_value=val_font, shape=style["badge"]
                 )
 
-        # ── 9. Футер ──────────────────────────────────────────────────────
+        # ── 8. Футер ──────────────────────────────────────────────────────
         foot_font = load_font(FONT_BOLD_PATH, 16)
         foot_text = f"◈ ДМБ-ТАЙМЕР  ×  {theme['title']} ◈"
         fx = _centered_x(draw, foot_text, foot_font)
@@ -427,6 +315,7 @@ def _save_fallback(output_path: str, person: str, tl: dict):
 
 
 if __name__ == "__main__":
+    # Быстрый ручной тест: python3 dembel_generator.py
     for p in DEMBEL_DATES:
         out = make_dembel_card(p, output_path=os.path.join(BASE_DIR, "temp", f"dembel_{p}.jpg"),
                                 theme_key=random.choice(THEME_KEYS))
