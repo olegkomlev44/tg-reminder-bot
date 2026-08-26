@@ -1,6 +1,16 @@
 """
 anixart_handler.py — Anixart для Telegram-бота на aiogram 3.x
 
+v5:
+  - Обложка и трейлер теперь в первую очередь берутся с Shikimori (публичные
+    GET-эндпоинты, без OAuth) — обычно чище и стабильнее угадывания полей в
+    ответах Anixart. Всё остальное (поиск, жанры, инфо, эпизоды, избранное,
+    история, подписки, логин) как было, полностью на Anixart. Сопоставление
+    релизов между сервисами — по названию (общего ID нет), при промахе или
+    сбое молча откатывается на прежнее поведение (см. _send_release,
+    _fetch_trailer). SHIKIMORI_CLIENT_ID/SECRET в config.py пока не
+    используются — задел на будущее для синхронизации личного списка.
+
 v4:
   - Общая aiohttp.ClientSession на модуль вместо новой на каждый запрос
   - Ретраи с backoff на сетевые ошибки/5xx/429 (см. _request)
@@ -64,7 +74,7 @@ from aiogram.types import (
     InputTextMessageContent, Message,
 )
 
-from config import ANIXART_CACHE_DB
+from config import ANIXART_CACHE_DB, SHIKIMORI_USER_AGENT
 from db import (
     get_cached_file_id, save_cached_file_id,
     save_anime_fav, remove_anime_fav, is_anime_fav, get_anime_favs,
@@ -636,7 +646,94 @@ async def _make_placeholder_poster() -> bytes:
     return await asyncio.to_thread(_make_placeholder_poster_sync)
 
 
-# ── Трейлер ───────────────────────────────────────────────────────────────────
+# ── Shikimori: только постер и трейлер ─────────────────────────────────────────
+# Всё остальное (поиск, жанры, инфо, эпизоды, избранное, история, подписки,
+# логин) как было — на Anixart. Здесь только два узких хелпера: обложка и
+# трейлер по названию релиза. Публичные GET-эндпоинты Shikimori не требуют
+# OAuth (клиентские id/secret не нужны для чтения — они пригодятся только если
+# позже добавим синхронизацию личного списка от лица юзера).
+#
+# У Anixart и Shikimori нет общего ID — сопоставляем релизы по названию через
+# поиск. Это эвристика: если Shikimori не нашёл совпадение или недоступен,
+# молча откатываемся на постер/трейлер из Anixart (см. _send_release и
+# _fetch_trailer) — юзер никогда не видит ошибку из-за Shikimori, в худшем
+# случае просто не получает улучшение.
+SHIKI_BASE_URL = "https://shikimori.one/api"
+
+def _shiki_headers() -> dict:
+    # Shikimori требует различимый User-Agent на каждый запрос, иначе может
+    # забанить IP — см. SHIKIMORI_USER_AGENT в config.py.
+    return {"User-Agent": SHIKIMORI_USER_AGENT}
+
+async def _shiki_get(path: str, query: dict = None, retries: int = 1):
+    """Отдельный от _request раннер: у Shikimori своя база, свой User-Agent-
+    контракт и 429 у них означает «подожди подольше», а не «повтори мгновенно»."""
+    url = SHIKI_BASE_URL + path
+    for attempt in range(retries + 1):
+        try:
+            session = await _get_session()
+            async with session.get(url, params=query, headers=_shiki_headers(),
+                                    timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 429 and attempt < retries:
+                    await asyncio.sleep(2.0)
+                    continue
+                r.raise_for_status()
+                return await r.json()
+        except Exception as e:
+            if attempt < retries:
+                await asyncio.sleep(1.0)
+                continue
+            logger.warning(f"Shikimori {path}: {e}")
+            return None
+    return None
+
+async def _shiki_find_anime(title: str) -> Optional[dict]:
+    """Ищет тайтл на Shikimori по названию. Кэшируется на сутки — в т.ч.
+    промах (пустой dict), чтобы не долбить API по одному и тому же не найденному
+    названию на каждый показ карточки."""
+    title = (title or "").strip()
+    if not title:
+        return None
+    key = f"shiki_match:{title.lower()}"
+    cached = await _cache_get(key)
+    if cached is not None:
+        return cached or None
+    results = await _shiki_get("/animes", {"search": title, "limit": 1})
+    match = (results[0] if results else {}) or {}
+    await _cache_set(key, match, ttl=86400)
+    return match or None
+
+async def shiki_get_poster_url(title: str) -> Optional[str]:
+    anime = await _shiki_find_anime(title)
+    if not anime:
+        return None
+    image = anime.get("image") or {}
+    path = image.get("original") or image.get("preview") or image.get("x96")
+    if not path:
+        return None
+    return path if path.startswith("http") else f"https://shikimori.one{path}"
+
+async def shiki_get_trailer_url(title: str) -> Optional[str]:
+    anime = await _shiki_find_anime(title)
+    aid = anime.get("id") if anime else None
+    if not aid:
+        return None
+    key = f"shiki_videos:{aid}"
+    cached = await _cache_get(key)
+    videos = cached if cached is not None else (await _shiki_get(f"/animes/{aid}/videos") or [])
+    if cached is None:
+        await _cache_set(key, videos, ttl=86400)
+    if not videos:
+        return None
+    # приоритет — официальный промо-трейлер (kind="pv"), затем прочие клипы
+    for kind in ("pv", "character_trailer", "op_ed_clip"):
+        for v in videos:
+            if v.get("kind") == kind and v.get("url"):
+                return v["url"]
+    return videos[0].get("url") if videos else None
+
+
+
 # У Anixart нет задокументированного поля с трейлером (в разных версиях API
 # видели то "trailer", то вложенный объект с youtube id — и то и другое
 # ненадёжно). Поэтому: сначала пробуем достать прямую ссылку из релиза (если
@@ -658,17 +755,32 @@ def _trailer_url_from_release(rel: dict) -> Optional[str]:
 
 async def _fetch_trailer(rel: dict) -> tuple[Optional[str], dict]:
     """Возвращает (путь_к_файлу, info) как media_downloader._download_media,
-    или (None, {...}) с описанием причины неудачи."""
+    или (None, {...}) с описанием причины неудачи.
+
+    Порядок источников — каждый следующий пробуется, только если предыдущий
+    не дал файл (не просто отсутствует, а именно не скачался): Shikimori
+    (обычно официальный PV) → прямая ссылка из самого релиза Anixart (если
+    есть) → слепой поиск на YouTube по названию. Юзер видит ошибку, только
+    если не сработало вообще ничего."""
     from media_downloader import _download_media  # переиспользуем yt-dlp пайплайн
 
     title = rel.get("title_ru") or rel.get("title_original") or ""
-    direct_url = _trailer_url_from_release(rel)
-    query_url = direct_url or f"ytsearch1:{title} трейлер аниме"
-    try:
-        return await _download_media(query_url, "youtube")
-    except Exception as e:
-        logger.warning(f"Не удалось скачать трейлер для «{title}»: {e}")
-        return None, {"_error": str(e)[:200]}
+    shiki_url = await shiki_get_trailer_url(title)
+    anix_url  = _trailer_url_from_release(rel)
+    candidates = [u for u in (shiki_url, anix_url) if u]
+    candidates.append(f"ytsearch1:{title} трейлер аниме")
+
+    last_err = None
+    for i, url in enumerate(candidates, start=1):
+        try:
+            filepath, info = await _download_media(url, "youtube")
+            if filepath:
+                return filepath, info
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Трейлер «{title}»: источник {i}/{len(candidates)} не сработал: {e}")
+    logger.warning(f"Не удалось скачать трейлер для «{title}» ни из одного источника")
+    return None, {"_error": str(last_err)[:200] if last_err else "нет доступных источников"}
 
 
 # ── Ссылки на конкретные серии ─────────────────────────────────────────────────
@@ -759,8 +871,17 @@ async def _send_release(ctx, rel: dict):
     log_anime_history(user_id, rel)
     asyncio.create_task(_stats_bump_view(rid, title))  # не блокируем отправку картинки
 
-    poster_url  = _extract_poster_url(rel)
-    real_bytes  = await _download_poster(poster_url) if poster_url else None
+    # Обложка: сперва пробуем Shikimori (обычно чище и стабильнее), и только
+    # если там не нашлось совпадения ИЛИ скачивание не удалось — берём постер
+    # из самого релиза Anixart, как раньше. Заглушка — на самый крайний случай.
+    shiki_poster_url = await shiki_get_poster_url(title)
+    anix_poster_url  = _extract_poster_url(rel)
+    poster_url = shiki_poster_url or anix_poster_url
+    real_bytes = await _download_poster(shiki_poster_url) if shiki_poster_url else None
+    if not real_bytes and anix_poster_url and anix_poster_url != shiki_poster_url:
+        real_bytes = await _download_poster(anix_poster_url)
+        if real_bytes:
+            poster_url = anix_poster_url
     used_placeholder = real_bytes is None
     # Раньше без постера карточка уходила голым текстом. Теперь — брендированная
     # заглушка тем же пайплайном, чтобы вид не «ломался» на редких релизах.

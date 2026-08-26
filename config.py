@@ -19,6 +19,16 @@ TEMP_DIR  = os.path.join(BASE_DIR, "temp")
 # через переменную окружения ANIXART_CACHE_DB, не трогая код.
 ANIXART_CACHE_DB = os.getenv("ANIXART_CACHE_DB", os.path.join(BASE_DIR, "anixart_cache.sqlite3"))
 
+# Shikimori подключён только для постера и трейлера (см. anixart_handler.py) —
+# это публичные GET-эндпоинты, OAuth для них не нужен. CLIENT_ID/SECRET пока
+# нигде не используются — задел на будущее, если позже понадобится синхронизация
+# личного списка (потребует полноценного OAuth-флоу, не такого, как для Anixart).
+SHIKIMORI_CLIENT_ID = os.getenv("SHIKIMORI_CLIENT_ID", "")
+SHIKIMORI_CLIENT_SECRET = os.getenv("SHIKIMORI_CLIENT_SECRET", "")
+# Shikimori требует различимый User-Agent на каждый запрос — без него могут
+# забанить IP. По умолчанию — название из формы регистрации OAuth-приложения.
+SHIKIMORI_USER_AGENT = os.getenv("SHIKIMORI_USER_AGENT", "NaryadBot")
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ── Списки дежурных ───────────────────────────────────────────────────────────
