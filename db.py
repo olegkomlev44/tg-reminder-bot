@@ -96,6 +96,17 @@ def init_db():
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS history (user_id TEXT, track_id TEXT, title TEXT, artist TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS cache (track_id TEXT PRIMARY KEY, file_id TEXT)''')
+
+    # Синхронизация позиции воспроизведения между устройствами
+    c.execute('''CREATE TABLE IF NOT EXISTS playback_state (
+        user_id TEXT PRIMARY KEY,
+        device_id TEXT,
+        track_id TEXT,
+        track_json TEXT,
+        position_sec REAL DEFAULT 0,
+        queue_json TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
     
     # Новая таблица: ЧЕРНЫЙ СПИСОК
     c.execute('''CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT, track_id TEXT, UNIQUE(user_id, track_id))''')
@@ -735,6 +746,54 @@ def update_anime_sub_episodes(user_id, release_id, episodes: int):
     conn.execute("UPDATE anime_subscriptions SET last_episodes=? WHERE user_id=? AND release_id=?",
                  (int(episodes), str(user_id), int(release_id)))
     conn.commit(); conn.close()
+
+
+# ── СИНХРОНИЗАЦИЯ ПОЗИЦИИ ВОСПРОИЗВЕДЕНИЯ МЕЖДУ УСТРОЙСТВАМИ ────────────
+# Позволяет продолжить трек с той же секунды на другом устройстве
+# (Telegram Desktop ↔ Mobile) — каждое устройство периодически шлёт своё
+# состояние, при заходе на другом устройстве оно сверяет device_id и
+# updated_at, чтобы понять, есть ли более свежая сессия с другого места.
+def save_playback_state(user_id, device_id: str, track_data: dict, position_sec: float, queue_data: list | None = None):
+    import json as _json
+    conn = _db_connect()
+    try:
+        conn.execute("""
+            INSERT INTO playback_state (user_id, device_id, track_id, track_json, position_sec, queue_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                device_id=excluded.device_id, track_id=excluded.track_id,
+                track_json=excluded.track_json, position_sec=excluded.position_sec,
+                queue_json=excluded.queue_json, updated_at=CURRENT_TIMESTAMP
+        """, (
+            str(user_id), device_id, str(track_data.get("id", "")),
+            _json.dumps(track_data, ensure_ascii=False), float(position_sec),
+            _json.dumps(queue_data, ensure_ascii=False) if queue_data else None,
+        ))
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"save_playback_state error (user={user_id}): {e}")
+    conn.close()
+
+
+def get_playback_state(user_id) -> dict | None:
+    import json as _json
+    conn = _db_connect()
+    c = conn.cursor()
+    c.execute("SELECT device_id, track_id, track_json, position_sec, queue_json, updated_at FROM playback_state WHERE user_id=?",
+              (str(user_id),))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        track = _json.loads(row[2]) if row[2] else None
+        queue = _json.loads(row[4]) if row[4] else None
+    except Exception:
+        track, queue = None, None
+    return {
+        "device_id": row[0], "track_id": row[1], "track": track,
+        "position_sec": row[3], "queue": queue, "updated_at": row[5],
+    }
 
 def save_anixart_token(user_id, token: str, login: str):
     """Сохраняет только токен привязанного аккаунта Anixart. Пароль здесь никогда не хранится."""

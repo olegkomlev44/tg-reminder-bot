@@ -8,6 +8,7 @@ from db import (
                 get_total_listen_seconds, save_playlist_track, get_playlists,
                 rename_playlist, remove_track_from_playlist, delete_playlist_db,
                 remove_music_fav, clear_history, DB_PATH,
+                save_playback_state, get_playback_state,
                 init_db, add_dislike, get_blacklist,
                 collab_create, collab_get_meta, collab_get_tracks,
                 collab_add_track, collab_remove_track, collab_delete,
@@ -39,6 +40,110 @@ if not BOT_TOKEN and not DEV_MODE:
         "BOT_TOKEN не задан! Проверка initData Telegram невозможна — "
         "все запросы будут отклонены с 401. Установите BOT_TOKEN или DEV_MODE=1 для локальной разработки."
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# МЕТРИКИ И /health
+# ═══════════════════════════════════════════════════════════════
+# Лёгкие in-memory метрики без внешних зависимостей (Prometheus и т.п.) —
+# на bothost их некуда собирать снаружи, но /health хотя бы даёт быстрый
+# ответ на вопрос "процесс жив и адекватен?" без ручного захода в контейнер.
+START_TIME = time.monotonic()
+_metrics = {
+    "requests_total": 0,
+    "requests_by_status": defaultdict(int),
+    "errors_total": 0,
+    "requests_by_path": defaultdict(int),
+}
+
+
+@web.middleware
+async def metrics_middleware(request, handler):
+    _metrics["requests_total"] += 1
+    # Группируем по префиксу пути (без id), чтобы не разрастался словарь
+    path_key = request.path.rsplit("/", 1)[0] if request.path.startswith("/api/") else request.path
+    _metrics["requests_by_path"][path_key] += 1
+    try:
+        response = await handler(request)
+        _metrics["requests_by_status"][response.status] += 1
+        return response
+    except web.HTTPException as ex:
+        _metrics["requests_by_status"][ex.status] += 1
+        if ex.status >= 500:
+            _metrics["errors_total"] += 1
+        raise
+    except Exception:
+        _metrics["errors_total"] += 1
+        raise
+
+
+async def api_health(request):
+    """
+    Health-check для мониторинга (UptimeRobot/Better Uptime/ручной curl).
+    Специально не требует авторизации — сторонний монитор не знает и не
+    должен знать initData. Отдаёт 200, только если БД реально отвечает.
+    """
+    checks = {"db": False, "yt_dlp": False, "ffmpeg": False}
+    db_error = None
+    try:
+        from db import _db_connect
+        conn = _db_connect()
+        conn.execute("SELECT 1")
+        conn.close()
+        checks["db"] = True
+    except Exception as e:
+        db_error = str(e)
+
+    try:
+        import yt_dlp as _ydl
+        checks["yt_dlp"] = _ydl is not None
+    except ImportError:
+        checks["yt_dlp"] = False
+
+    yt_status = music_engine.get_yt_status()
+    checks["yt_dlp_circuit"] = "available" if yt_status["available"] else "degraded"
+
+    import shutil as _shutil
+    checks["ffmpeg"] = _shutil.which("ffmpeg") is not None
+
+    healthy = checks["db"]  # yt-dlp/ffmpeg — деградация допустима, БД — нет
+    body = {
+        "status": "ok" if healthy else "degraded",
+        "uptime_sec": round(time.monotonic() - START_TIME, 1),
+        "checks": checks,
+        "requests_total": _metrics["requests_total"],
+        "errors_total": _metrics["errors_total"],
+    }
+    if db_error:
+        body["db_error"] = db_error
+    return web.json_response(body, status=200 if healthy else 503)
+
+
+async def api_metrics(request):
+    """Чуть более подробные метрики — не для публичного доступа, поэтому
+    защищена тем же Telegram-auth, что и остальной API."""
+    user = verify(request.headers.get("Authorization", ""))
+    norm_cache_files = 0
+    norm_cache_bytes = 0
+    try:
+        for fname in os.listdir(NORM_CACHE_DIR):
+            fpath = os.path.join(NORM_CACHE_DIR, fname)
+            if os.path.isfile(fpath):
+                norm_cache_files += 1
+                norm_cache_bytes += os.path.getsize(fpath)
+    except Exception:
+        pass
+    return cors(web.json_response({
+        "uptime_sec": round(time.monotonic() - START_TIME, 1),
+        "requests_total": _metrics["requests_total"],
+        "requests_by_status": dict(_metrics["requests_by_status"]),
+        "requests_by_path": dict(_metrics["requests_by_path"]),
+        "errors_total": _metrics["errors_total"],
+        "norm_cache_files": norm_cache_files,
+        "norm_cache_mb": round(norm_cache_bytes / (1024 * 1024), 1),
+        "rate_limit_active_keys": len(_rate_buckets),
+        "youtube_status": music_engine.get_yt_status(),
+    }))
 
 
 def _check_telegram_auth(init_data: str) -> dict | None:
@@ -108,7 +213,7 @@ def cors(r):
     r.headers.update({
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Headers": "Authorization, Range, Content-Type",
-        "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+        "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges, X-Source-Degraded, X-Audio-Norm",
     })
     return r
 
@@ -142,6 +247,7 @@ RATE_LIMIT_RULES = [
     ("/api/stream/", 60, 60),        # аудиостримы — разрешаем чаще
     ("/api/search", 30, 60),
     ("/api/wave", 20, 60),
+    ("/api/radio", 20, 60),
     ("/api/lyrics", 30, 60),
     ("/api/users/search", 20, 60),
 ]
@@ -202,7 +308,78 @@ async def api_search(request):
     if not q: return cors(web.json_response([]))
     limit = int(request.rel_url.query.get("limit", 120))
     tracks = await music_engine.search_multi(q, limit=limit)
-    return cors(web.json_response(tracks))
+    resp = web.json_response(tracks)
+    # Пустой результат мог получиться не потому что "ничего не нашлось",
+    # а потому что YouTube-источник сейчас в circuit-breaker cooldown —
+    # явно сигнализируем об этом заголовком, а не молчим полным нулём.
+    yt_status = music_engine.get_yt_status()
+    if not tracks and not yt_status["available"]:
+        resp.headers["X-Source-Degraded"] = "youtube"
+    return cors(resp)
+
+async def api_radio(request):
+    """
+    'Радио' — бесконечный автоплей от ОДНОГО трека (в отличие от /api/wave,
+    который строит подборку из всего избранного+истории пользователя).
+    Фронтенд вызывает это при включении радио и затем повторно — с последним
+    треком очереди как новым сидом — чтобы очередь пополнялась сама по себе.
+    """
+    user = verify(request.headers.get("Authorization", ""))
+    uid = user["id"]
+    artist = request.rel_url.query.get("artist", "").strip()
+    title = request.rel_url.query.get("title", "").strip()
+    exclude_id = str(request.rel_url.query.get("exclude_id", ""))
+    try:
+        limit = max(1, min(int(request.rel_url.query.get("limit", 10)), 20))
+    except ValueError:
+        limit = 10
+
+    if not artist:
+        return cors(web.json_response({"error": "artist required"}, status=400))
+
+    bl = get_blacklist(uid)
+    seen = {exclude_id} if exclude_id else set()
+    results = []
+
+    try:
+        similar = await music_engine.get_similar_lastfm(artist, title, limit=limit + 10)
+    except Exception as e:
+        logger.warning(f"api_radio: Last.fm error для '{artist} - {title}': {e}")
+        similar = []
+
+    async def resolve(sugg):
+        try:
+            q = f"{sugg['artist']} {sugg['title']}"
+            res = await music_engine.search_multi(q, limit=1)
+            return res[0] if res else None
+        except Exception:
+            return None
+
+    if similar:
+        resolved = await asyncio.gather(*[resolve(s) for s in similar[:limit + 10]], return_exceptions=True)
+        for t in resolved:
+            if isinstance(t, dict) and t.get("id"):
+                tid = str(t["id"])
+                if tid not in seen and tid not in bl:
+                    seen.add(tid)
+                    results.append(t)
+                    if len(results) >= limit:
+                        break
+
+    # Last.fm недоступен / нет API-ключа / ничего не нашлось — не оставляем
+    # радио молча пустым, подкидываем что-то по духу через чарты.
+    if not results:
+        charts = await music_engine.get_charts(limit=limit + 10)
+        for t in charts:
+            tid = str(t.get("id", ""))
+            if tid and tid not in seen and tid not in bl:
+                seen.add(tid)
+                results.append(t)
+                if len(results) >= limit:
+                    break
+
+    return cors(web.json_response(results))
+
 
 async def api_wave(request):
     limit = int(request.rel_url.query.get("limit", 120))
@@ -398,6 +575,50 @@ async def api_history_clear(request):
     user = verify(request.headers.get("Authorization", ""))
     clear_history(user["id"])
     return cors(web.json_response({"ok": True}))
+
+
+# ── СИНХРОНИЗАЦИЯ ВОСПРОИЗВЕДЕНИЯ МЕЖДУ УСТРОЙСТВАМИ ────────────────────
+async def api_playback_sync(request):
+    """
+    Устройство периодически (раз в ~10-15 сек, на паузе/смене трека) шлёт сюда
+    свою позицию. Хранится последнее состояние на пользователя — если он
+    откроет приложение на другом устройстве, оно увидит: "продолжить с Y:XX?".
+    """
+    user = verify(request.headers.get("Authorization", ""))
+    try:
+        body = await request.json()
+        track_data = body.get("track_data")
+        device_id = str(body.get("device_id", "unknown"))[:64]
+        position_sec = float(body.get("position_sec", 0))
+        queue_data = body.get("queue")  # опционально — чтобы на другом устройстве не терять очередь
+        if not track_data or not track_data.get("id"):
+            return cors(web.json_response({"error": "track_data required"}, status=400))
+        # Не тащим огромную очередь в БД бесконечно — разумный кап
+        if isinstance(queue_data, list) and len(queue_data) > 200:
+            queue_data = queue_data[:200]
+        save_playback_state(user["id"], device_id, track_data, position_sec, queue_data)
+        return cors(web.json_response({"ok": True}))
+    except Exception as e:
+        logger.warning(f"api_playback_sync: {e}")
+        return cors(web.json_response({"error": "bad req"}, status=400))
+
+
+async def api_playback_state(request):
+    """
+    Отдаёт последнее сохранённое состояние воспроизведения пользователя.
+    Клиент передаёт свой device_id — если состояние пришло с ДРУГОГО
+    устройства, показывает предложение продолжить; если это его же
+    устройство (например, после перезагрузки страницы) — можно просто
+    восстановиться молча.
+    """
+    user = verify(request.headers.get("Authorization", ""))
+    device_id = str(request.rel_url.query.get("device_id", ""))
+    state = get_playback_state(user["id"])
+    if not state:
+        return cors(web.json_response({"state": None}))
+    state["is_other_device"] = bool(device_id) and state.get("device_id") != device_id
+    return cors(web.json_response({"state": state}))
+
 
 # --- НОВЫЕ API: ДИЗЛАЙКИ И ТЕКСТЫ ---
 async def api_dislike(request):
@@ -791,18 +1012,23 @@ async def api_notifications_read(request):
 
 
 async def start_web_server():
-    app = web.Application(middlewares=[cors_middleware, rate_limit_middleware])
+    app = web.Application(middlewares=[metrics_middleware, cors_middleware, rate_limit_middleware])
     app.router.add_get("/", handle_index)
+    app.router.add_get("/health", api_health)
+    app.router.add_get("/api/metrics", api_metrics)
     app.router.add_get("/sw.js", handle_sw)
     app.router.add_get("/api/tracks", api_get_tracks)
     app.router.add_get("/api/search", api_search)
     app.router.add_get("/api/wave", api_wave)
+    app.router.add_get("/api/radio", api_radio)
     app.router.add_get("/api/lyrics", api_lyrics)
     app.router.add_post("/api/dislike", api_dislike)
     app.router.add_post("/api/fav", api_fav_add)
     app.router.add_post("/api/fav/remove", api_fav_remove)
     app.router.add_post("/api/history", api_history_add)
     app.router.add_post("/api/history/clear", api_history_clear)
+    app.router.add_post("/api/playback/sync", api_playback_sync)
+    app.router.add_get("/api/playback/state", api_playback_state)
     app.router.add_post("/api/playlist/add", api_pl_add)
     app.router.add_post("/api/playlist/create", api_pl_create)
     app.router.add_post("/api/playlist/rename", api_pl_rename)

@@ -72,6 +72,12 @@ class MusicEngine:
         # Кэш поиска и чартов — снижает нагрузку на SoundCloud API
         self.search_cache = _TTLCache(ttl=300, maxsize=300)   # 5 минут
         self.charts_cache = _TTLCache(ttl=600, maxsize=20)    # 10 минут
+        # Circuit breaker для YouTube: yt-dlp обычно не падает с явной
+        # ошибкой при поломке YouTube-защиты — он просто перестаёт находить
+        # что-либо. После нескольких подряд неудач считаем источник
+        # временно недоступным и явно сигнализируем об этом наружу, вместо
+        # того чтобы бесконечно тихо возвращать пустой список.
+        self.yt_status = {"available": True, "consecutive_failures": 0, "disabled_until": 0.0, "last_error": None}
 
     # ─────────────────────────────────────────────
     #  SoundCloud helpers
@@ -136,10 +142,48 @@ class MusicEngine:
                 logger.error(f"SC Search error: {e}")
         return []
 
+    YT_FAILURE_THRESHOLD = 3      # подряд неудач, после которых считаем источник недоступным
+    YT_COOLDOWN_SEC = 300         # пауза перед следующей пробной попыткой (5 мин)
+
+    def get_yt_status(self) -> dict:
+        """Текущий статус YouTube-источника для фронтенда/health-check."""
+        now = time.monotonic()
+        st = self.yt_status
+        if not st["available"] and now >= st["disabled_until"]:
+            # Период охлаждения истёк — разрешаем один пробный запрос (half-open)
+            return {**st, "available": True, "half_open": True}
+        return {**st, "half_open": False}
+
+    def _record_yt_success(self):
+        self.yt_status["available"] = True
+        self.yt_status["consecutive_failures"] = 0
+        self.yt_status["disabled_until"] = 0.0
+        self.yt_status["last_error"] = None
+
+    def _record_yt_failure(self, error: str):
+        st = self.yt_status
+        st["consecutive_failures"] += 1
+        st["last_error"] = error
+        if st["consecutive_failures"] >= self.YT_FAILURE_THRESHOLD:
+            if st["available"]:  # логируем только переход в состояние "недоступен"
+                logger.warning(
+                    f"⚠️ YouTube Music помечен как временно недоступный после "
+                    f"{st['consecutive_failures']} неудачных попыток подряд "
+                    f"(последняя ошибка: {error}). Проверьте версию yt-dlp."
+                )
+            st["available"] = False
+            st["disabled_until"] = time.monotonic() + self.YT_COOLDOWN_SEC
+
     async def search_yt(self, query: str, limit: int = 5) -> list:
         """Поиск через yt-dlp (YouTube Music)."""
         if not yt_dlp:
             return []
+
+        status = self.get_yt_status()
+        if not status["available"]:
+            logger.debug("search_yt: источник в cooldown, пропускаем запрос")
+            return []
+
         def _search():
             ydl_opts = {
                 'format': 'bestaudio/best', 'noplaylist': True,
@@ -163,9 +207,11 @@ class MusicEngine:
                     "artwork_url": thumb,
                     "source": "YouTube Music"
                 })
+            self._record_yt_success()
             return results
         except Exception as e:
             logger.error(f"YT search error: {e}")
+            self._record_yt_failure(str(e))
         return []
 
     async def search_multi(self, query: str, limit: int = 5, offset: int = 0) -> list:
