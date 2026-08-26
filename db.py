@@ -34,9 +34,29 @@ def _resolve_db_path() -> str:
 
 DB_PATH = _resolve_db_path()
 
+
+def _db_connect() -> sqlite3.Connection:
+    """
+    Открывает соединение с БД с настройками, устойчивыми к конкурентной
+    записи (друзья, коллаб-плейлисты, история, уведомления пишут часто
+    и одновременно). WAL включается один раз на файл БД в init_db(), но
+    busy_timeout нужно проставлять на КАЖДОЕ соединение отдельно — иначе
+    конкурентная запись сразу падает с 'database is locked' вместо того,
+    чтобы подождать и повторить попытку.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA busy_timeout = 10000")
+    return conn
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
+    # WAL — читатели больше не блокируют писателей (и наоборот), что
+    # критично при множестве одновременных запросов на bothost.
+    # synchronous=NORMAL — безопасно вместе с WAL и заметно быстрее FULL.
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
     c.execute('''CREATE TABLE IF NOT EXISTS favorites (user_id TEXT, track_id TEXT, title TEXT, artist TEXT)''')
     # Подписки на артистов
     c.execute('''CREATE TABLE IF NOT EXISTS artist_subscriptions (
@@ -130,7 +150,7 @@ def init_db():
 
 # --- БАЗОВЫЕ ФУНКЦИИ ---
 def get_cached_file_id(track_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT file_id FROM cache WHERE track_id=?", (str(track_id),))
     res = c.fetchone()
@@ -138,7 +158,7 @@ def get_cached_file_id(track_id):
     return res[0] if res else None
 
 def save_cached_file_id(track_id, file_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("REPLACE INTO cache (track_id, file_id) VALUES (?, ?)", (str(track_id), str(file_id)))
     conn.commit()
@@ -146,7 +166,7 @@ def save_cached_file_id(track_id, file_id):
 
 # --- ИЗБРАННОЕ И ИСТОРИЯ ---
 def save_music_fav(user_id, track_info):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT 1 FROM favorites WHERE user_id=? AND track_id=?", (str(user_id), str(track_info['id'])))
     if c.fetchone():
@@ -160,14 +180,14 @@ def save_music_fav(user_id, track_info):
 
 def remove_music_fav(user_id, track_id):
     """Удалить трек из избранного."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("DELETE FROM favorites WHERE user_id=? AND track_id=?", (str(user_id), str(track_id)))
     conn.commit()
     conn.close()
     return True
 
 def get_music_favs(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT track_id, title, artist, artwork_url, source FROM favorites WHERE user_id=?", (str(user_id),))
     rows = c.fetchall()
@@ -175,7 +195,7 @@ def get_music_favs(user_id):
     return [{"id": r[0], "title": r[1], "artist": r[2], "artwork_url": r[3], "source": r[4]} for r in rows]
 
 def log_track_history(user_id, track_info):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     duration_sec = int(track_info.get('duration_sec', 0) or 0)
     c.execute("DELETE FROM history WHERE user_id=? AND track_id=?", (str(user_id), str(track_info['id'])))
@@ -187,13 +207,13 @@ def log_track_history(user_id, track_info):
     
 def clear_history(user_id):
     """Полная очистка истории пользователя."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("DELETE FROM history WHERE user_id=?", (str(user_id),))
     conn.commit()
     conn.close()
 
 def get_user_history(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT track_id, title, artist, artwork_url, source, COALESCE(duration_sec,0) FROM history WHERE user_id=? ORDER BY timestamp DESC", (str(user_id),))
     rows = c.fetchall()
@@ -201,7 +221,7 @@ def get_user_history(user_id):
     return [{"id": r[0], "title": r[1], "artist": r[2], "artwork_url": r[3], "source": r[4], "duration_sec": r[5]} for r in rows]
 
 def get_total_listen_seconds(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT COALESCE(SUM(duration_sec),0) FROM history WHERE user_id=?", (str(user_id),))
     res = c.fetchone()
@@ -210,7 +230,7 @@ def get_total_listen_seconds(user_id):
     
 # --- ПЛЕЙЛИСТЫ ---
 def get_playlists(user_id) -> dict:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     try:
         c.execute("SELECT name, track_id, title, artist, source, artwork_url FROM playlists WHERE user_id=? ORDER BY name, rowid", (str(user_id),))
@@ -223,7 +243,7 @@ def get_playlists(user_id) -> dict:
     return result
 
 def save_playlist_track(user_id, name, track_info):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     ok = True
     try:
@@ -237,21 +257,21 @@ def save_playlist_track(user_id, name, track_info):
     return ok
 
 def rename_playlist(user_id, old_name, new_name):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("UPDATE playlists SET name=? WHERE user_id=? AND name=?", (new_name, str(user_id), old_name))
     conn.commit()
     conn.close()
 
 def remove_track_from_playlist(user_id, playlist_name, track_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("DELETE FROM playlists WHERE user_id=? AND name=? AND track_id=?", (str(user_id), playlist_name, str(track_id)))
     conn.commit()
     conn.close()
 
 def delete_playlist_db(user_id, playlist_name):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("DELETE FROM playlists WHERE user_id=? AND name=?", (str(user_id), playlist_name))
     conn.commit()
@@ -259,7 +279,7 @@ def delete_playlist_db(user_id, playlist_name):
 
 # --- BLACKLIST (НОВОЕ) ---
 def add_dislike(user_id, track_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO blacklist (user_id, track_id) VALUES (?, ?)", (str(user_id), str(track_id)))
     c.execute("DELETE FROM favorites WHERE user_id=? AND track_id=?", (str(user_id), str(track_id)))
@@ -267,7 +287,7 @@ def add_dislike(user_id, track_id):
     conn.close()
 
 def get_blacklist(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT track_id FROM blacklist WHERE user_id=?", (str(user_id),))
     rows = c.fetchall()
@@ -279,7 +299,7 @@ def get_blacklist(user_id):
 # ═══════════════════════════════════════════════════════════════
 
 def upsert_user_profile(user_id: str, display_name: str, username: str, avatar_url: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("""
         INSERT INTO user_profiles (user_id, display_name, username, avatar_url, updated_at)
         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -292,7 +312,7 @@ def upsert_user_profile(user_id: str, display_name: str, username: str, avatar_u
     conn.commit(); conn.close()
 
 def get_user_profile(user_id: str) -> dict | None:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     row = conn.execute(
         "SELECT user_id, display_name, username, avatar_url FROM user_profiles WHERE user_id=?",
         (str(user_id),)
@@ -302,7 +322,7 @@ def get_user_profile(user_id: str) -> dict | None:
     return {"user_id": row[0], "display_name": row[1], "username": row[2], "avatar_url": row[3]}
 
 def search_users(query: str, exclude_user_id: str) -> list:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     q = f"%{query.lower()}%"
     rows = conn.execute("""
         SELECT user_id, display_name, username, avatar_url FROM user_profiles
@@ -317,7 +337,7 @@ def search_users(query: str, exclude_user_id: str) -> list:
 # ═══════════════════════════════════════════════════════════════
 
 def subscribe_artist(user_id: str, artist_name: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     try:
         conn.execute("INSERT OR IGNORE INTO artist_subscriptions (user_id, artist_name) VALUES (?, ?)",
                      (str(user_id), artist_name))
@@ -327,14 +347,14 @@ def subscribe_artist(user_id: str, artist_name: str) -> bool:
         conn.close(); return False
 
 def unsubscribe_artist(user_id: str, artist_name: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("DELETE FROM artist_subscriptions WHERE user_id=? AND artist_name=?",
                  (str(user_id), artist_name))
     conn.commit(); conn.close()
     return True
 
 def get_subscribed_artists(user_id: str) -> list:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     rows = conn.execute(
         "SELECT artist_name FROM artist_subscriptions WHERE user_id=? ORDER BY subscribed_at DESC",
         (str(user_id),)
@@ -343,7 +363,7 @@ def get_subscribed_artists(user_id: str) -> list:
     return [r[0] for r in rows]
 
 def is_subscribed_artist(user_id: str, artist_name: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     row = conn.execute(
         "SELECT 1 FROM artist_subscriptions WHERE user_id=? AND artist_name=?",
         (str(user_id), artist_name)
@@ -353,7 +373,7 @@ def is_subscribed_artist(user_id: str, artist_name: str) -> bool:
 
 def get_artist_subscribers(artist_name: str) -> list:
     """Все user_id кто подписан на артиста (для рассылки уведомлений)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     rows = conn.execute(
         "SELECT user_id FROM artist_subscriptions WHERE artist_name=?", (artist_name,)
     ).fetchall()
@@ -366,7 +386,7 @@ def get_artist_subscribers(artist_name: str) -> list:
 
 def send_friend_request(from_id: str, from_name: str, from_avatar: str, to_id: str) -> str:
     """Отправить запрос в друзья. Возвращает 'sent'|'already'|'accepted' (если уже есть встречный запрос)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     # Проверяем встречный запрос
     row = conn.execute(
         "SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
@@ -396,7 +416,7 @@ def send_friend_request(from_id: str, from_name: str, from_avatar: str, to_id: s
     return 'sent'
 
 def accept_friend_request(from_id: str, to_id: str, to_name: str, to_avatar: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("UPDATE friend_requests SET status='accepted' WHERE from_user_id=? AND to_user_id=?",
                  (str(from_id), str(to_id)))
     # Создаём встречную запись тоже accepted
@@ -408,7 +428,7 @@ def accept_friend_request(from_id: str, to_id: str, to_name: str, to_avatar: str
 
 def get_friends(user_id: str) -> list:
     """Список принятых друзей (пользователей с двусторонним accepted)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     rows = conn.execute("""
         SELECT r.to_user_id, p.display_name, p.username, p.avatar_url
         FROM friend_requests r
@@ -420,7 +440,7 @@ def get_friends(user_id: str) -> list:
 
 def get_friend_requests_incoming(user_id: str) -> list:
     """Входящие запросы в друзья (pending)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     rows = conn.execute("""
         SELECT r.from_user_id, r.from_user_name, r.from_user_avatar, r.created_at
         FROM friend_requests r
@@ -432,7 +452,7 @@ def get_friend_requests_incoming(user_id: str) -> list:
 
 def get_friend_status(user_id: str, other_id: str) -> str:
     """none | pending_sent | pending_received | friends"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     # Проверяем мою запись к другому
     r1 = conn.execute("SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
                       (str(user_id), str(other_id))).fetchone()
@@ -460,7 +480,7 @@ def get_friend_history(friend_id: str) -> list:
 
 def add_notification(user_id: str, ntype: str, title: str, body: str, payload: dict | None = None):
     import json as _json
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("""INSERT INTO notifications (user_id, type, title, body, payload)
                     VALUES (?, ?, ?, ?, ?)""",
                  (str(user_id), ntype, title, body, _json.dumps(payload or {})))
@@ -472,7 +492,7 @@ def add_notification(user_id: str, ntype: str, title: str, body: str, payload: d
 
 def get_notifications(user_id: str, limit: int = 30) -> list:
     import json as _json
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     rows = conn.execute("""
         SELECT id, type, title, body, payload, is_read, created_at
         FROM notifications WHERE user_id=?
@@ -490,12 +510,12 @@ def get_notifications(user_id: str, limit: int = 30) -> list:
     return result
 
 def mark_notifications_read(user_id: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (str(user_id),))
     conn.commit(); conn.close()
 
 def get_unread_notifications_count(user_id: str) -> int:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     row = conn.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0", (str(user_id),)).fetchone()
     conn.close()
     return row[0] if row else 0
@@ -535,7 +555,7 @@ def _init_collab_tables(conn):
 def collab_create(owner_id: str, owner_name: str, owner_avatar: str, name: str) -> str:
     """Создаёт коллаб-плейлист. Возвращает его короткий ID."""
     cid = secrets.token_urlsafe(8)   # 8 байт = ~11 символов, URL-safe
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     _init_collab_tables(conn)
     conn.execute(
         "INSERT INTO collab_meta (id, owner_id, owner_name, owner_avatar, name) VALUES (?,?,?,?,?)",
@@ -545,7 +565,7 @@ def collab_create(owner_id: str, owner_name: str, owner_avatar: str, name: str) 
     return cid
 
 def collab_get_meta(cid: str) -> dict | None:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     _init_collab_tables(conn)
     row = conn.execute(
         "SELECT id, owner_id, owner_name, owner_avatar, name FROM collab_meta WHERE id=?", (cid,)
@@ -555,7 +575,7 @@ def collab_get_meta(cid: str) -> dict | None:
     return {"id": row[0], "owner_id": row[1], "owner_name": row[2], "owner_avatar": row[3], "name": row[4]}
 
 def collab_get_tracks(cid: str) -> list:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     _init_collab_tables(conn)
     rows = conn.execute("""
         SELECT track_id, title, artist, artwork_url, source,
@@ -570,7 +590,7 @@ def collab_get_tracks(cid: str) -> list:
     } for r in rows]
 
 def collab_add_track(cid: str, track: dict, user_id: str, user_name: str, user_avatar: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     _init_collab_tables(conn)
     try:
         conn.execute("""
@@ -589,7 +609,7 @@ def collab_add_track(cid: str, track: dict, user_id: str, user_name: str, user_a
 
 def collab_remove_track(cid: str, track_id: str, user_id: str, owner_id: str) -> bool:
     """Удалить трек может тот, кто добавил, или владелец плейлиста."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     _init_collab_tables(conn)
     conn.execute("""
         DELETE FROM collab_tracks
@@ -600,7 +620,7 @@ def collab_remove_track(cid: str, track_id: str, user_id: str, owner_id: str) ->
     return True
 
 def collab_delete(cid: str, owner_id: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     _init_collab_tables(conn)
     conn.execute("DELETE FROM collab_tracks WHERE collab_id=?", (cid,))
     conn.execute("DELETE FROM collab_meta WHERE id=? AND owner_id=?", (cid, owner_id))
@@ -610,7 +630,7 @@ def collab_delete(cid: str, owner_id: str) -> bool:
 
 # --- АНИМЕ (Anixart): избранное, история, подписки, привязка аккаунта ---
 def save_anime_fav(user_id, release: dict) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT 1 FROM anime_favorites WHERE user_id=? AND release_id=?",
               (str(user_id), int(release["id"])))
@@ -623,14 +643,14 @@ def save_anime_fav(user_id, release: dict) -> bool:
     return True
 
 def remove_anime_fav(user_id, release_id) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("DELETE FROM anime_favorites WHERE user_id=? AND release_id=?",
                  (str(user_id), int(release_id)))
     conn.commit(); conn.close()
     return True
 
 def is_anime_fav(user_id, release_id) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT 1 FROM anime_favorites WHERE user_id=? AND release_id=?",
               (str(user_id), int(release_id)))
@@ -638,7 +658,7 @@ def is_anime_fav(user_id, release_id) -> bool:
     return bool(res)
 
 def get_anime_favs(user_id) -> list:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT release_id, title, poster FROM anime_favorites WHERE user_id=? ORDER BY added_at DESC",
               (str(user_id),))
@@ -646,7 +666,7 @@ def get_anime_favs(user_id) -> list:
     return [{"id": r[0], "title": r[1], "poster": r[2]} for r in rows]
 
 def log_anime_history(user_id, release: dict):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("DELETE FROM anime_history WHERE user_id=? AND release_id=?",
               (str(user_id), int(release["id"])))
@@ -658,7 +678,7 @@ def log_anime_history(user_id, release: dict):
     conn.commit(); conn.close()
 
 def get_anime_history(user_id, limit=20) -> list:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT release_id, title, timestamp FROM anime_history WHERE user_id=? ORDER BY timestamp DESC LIMIT ?",
               (str(user_id), limit))
@@ -666,7 +686,7 @@ def get_anime_history(user_id, limit=20) -> list:
     return [{"id": r[0], "title": r[1], "timestamp": r[2]} for r in rows]
 
 def subscribe_anime(user_id, release: dict) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT 1 FROM anime_subscriptions WHERE user_id=? AND release_id=?",
               (str(user_id), int(release["id"])))
@@ -680,14 +700,14 @@ def subscribe_anime(user_id, release: dict) -> bool:
     return True
 
 def unsubscribe_anime(user_id, release_id) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("DELETE FROM anime_subscriptions WHERE user_id=? AND release_id=?",
                  (str(user_id), int(release_id)))
     conn.commit(); conn.close()
     return True
 
 def is_anime_subscribed(user_id, release_id) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT 1 FROM anime_subscriptions WHERE user_id=? AND release_id=?",
               (str(user_id), int(release_id)))
@@ -695,7 +715,7 @@ def is_anime_subscribed(user_id, release_id) -> bool:
     return bool(res)
 
 def get_anime_subscriptions(user_id) -> list:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT release_id, title, last_episodes FROM anime_subscriptions WHERE user_id=?",
               (str(user_id),))
@@ -704,34 +724,34 @@ def get_anime_subscriptions(user_id) -> list:
 
 def get_all_anime_subscriptions() -> list:
     """Все подписки всех пользователей — используется кроном проверки новых серий."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT user_id, release_id, title, last_episodes FROM anime_subscriptions")
     rows = c.fetchall(); conn.close()
     return [{"user_id": r[0], "id": r[1], "title": r[2], "last_episodes": r[3]} for r in rows]
 
 def update_anime_sub_episodes(user_id, release_id, episodes: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("UPDATE anime_subscriptions SET last_episodes=? WHERE user_id=? AND release_id=?",
                  (int(episodes), str(user_id), int(release_id)))
     conn.commit(); conn.close()
 
 def save_anixart_token(user_id, token: str, login: str):
     """Сохраняет только токен привязанного аккаунта Anixart. Пароль здесь никогда не хранится."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("REPLACE INTO anixart_accounts (user_id, anixart_token, anixart_login) VALUES (?, ?, ?)",
                  (str(user_id), token, login))
     conn.commit(); conn.close()
 
 def get_anixart_token(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT anixart_token, anixart_login FROM anixart_accounts WHERE user_id=?", (str(user_id),))
     res = c.fetchone(); conn.close()
     return {"token": res[0], "login": res[1]} if res else None
 
 def remove_anixart_token(user_id) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = _db_connect()
     conn.execute("DELETE FROM anixart_accounts WHERE user_id=?", (str(user_id),))
     conn.commit(); conn.close()
     return True

@@ -1,13 +1,13 @@
-import os, json, hmac, hashlib, aiohttp, asyncio, random, urllib.parse
+import os, json, hmac, hashlib, aiohttp, asyncio, random, re, urllib.parse
 from urllib.parse import parse_qsl
 from aiohttp import web
-from music_engine import music_engine
+from music_engine import music_engine, check_yt_dlp_freshness
 from db import (
                 init_db, get_cached_file_id, save_cached_file_id,
                 save_music_fav, get_music_favs, log_track_history, get_user_history, 
                 get_total_listen_seconds, save_playlist_track, get_playlists,
                 rename_playlist, remove_track_from_playlist, delete_playlist_db,
-                remove_music_fav, clear_history,
+                remove_music_fav, clear_history, DB_PATH,
                 init_db, add_dislike, get_blacklist,
                 collab_create, collab_get_meta, collab_get_tracks,
                 collab_add_track, collab_remove_track, collab_delete,
@@ -294,12 +294,11 @@ async def api_wave(request):
                 unique_suggestions.append(s)
 
         # ── 2. КОЛЛАБОРАТИВНАЯ ФИЛЬТРАЦИЯ из локальной БД ───────────────────
-        import sqlite3
-        from db import DB_PATH
+        from db import _db_connect
         user_track_ids = {t["id"] for t in base_pool}
         cf_tracks = []
         if len(user_track_ids) >= 1:
-            conn = sqlite3.connect(DB_PATH)
+            conn = _db_connect()
             c = conn.cursor()
             placeholders = ",".join(["?"] * len(user_track_ids))
             try:
@@ -499,16 +498,26 @@ async def api_pl_create(request):
 async def api_stream_track(request):
     tid = request.match_info["track_id"]
     if tid.startswith("yt_"): return cors(web.json_response({"error": "YT not supported"}, status=422))
-    track = await music_engine.get_track_details(tid)
-    if not track or not track.get("stream_url"): return cors(web.Response(status=404, text="Stream not found"))
 
     # ReplayGain / EBU R128 через ffmpeg — только для первичных запросов (без Range)
     normalize = request.rel_url.query.get("norm", "1") != "0"
     rng = request.headers.get("Range", "")
 
+    # Уже нормализовали этот трек раньше — отдаём готовый файл с диска и не
+    # трогаем ffmpeg вообще. web.FileResponse сам умеет Range-запросы, так что
+    # перемотка внутри уже играющего трека тоже пойдёт из кэша, а не с источника.
+    if normalize:
+        cached_path = _normalized_cache_path(tid)
+        if os.path.exists(cached_path):
+            resp = web.FileResponse(cached_path, headers={"X-Audio-Norm": "cached"})
+            return cors(resp)
+
+    track = await music_engine.get_track_details(tid)
+    if not track or not track.get("stream_url"): return cors(web.Response(status=404, text="Stream not found"))
+
     if normalize and not rng:
         try:
-            result = await _stream_normalized(request, track["stream_url"])
+            result = await _stream_normalized(request, track["stream_url"], tid)
             if result is not None:
                 return result
         except Exception as e:
@@ -532,11 +541,66 @@ async def api_stream_track(request):
         return cors(web.Response(status=502, text=str(e)))
 
 
-async def _stream_normalized(request, source_url: str):
-    """Проксирует аудио через ffmpeg loudnorm EBU R128 (-14 LUFS)."""
+# ── Кэш нормализованных (loudnorm) аудиофайлов на диске ────────────────
+# ffmpeg loudnorm — не бесплатная операция; без кэша он перезапускался бы
+# на КАЖДОЕ прослушивание одного и того же трека любым пользователем, что
+# заметно нагружает CPU на слабом bothost-хостинге. Кэшируем результат
+# один раз на track_id и переиспользуем для всех.
+NORM_CACHE_DIR = os.path.join(os.path.dirname(DB_PATH), "norm_cache")
+os.makedirs(NORM_CACHE_DIR, exist_ok=True)
+NORM_CACHE_MAX_BYTES = int(os.getenv("NORM_CACHE_MAX_MB", "500")) * 1024 * 1024
+
+
+def _normalized_cache_path(track_id: str) -> str:
+    safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(track_id))
+    return os.path.join(NORM_CACHE_DIR, f"{safe_id}.mp3")
+
+
+def _prune_norm_cache():
+    """Простая эвикция по размеру: удаляем самые давно использованные файлы,
+    пока суммарный размер кэша не впишется в лимит. Диск на bothost обычно
+    ограничен, поэтому кэш не должен расти бесконечно."""
+    try:
+        entries = []
+        total = 0
+        for fname in os.listdir(NORM_CACHE_DIR):
+            if fname.endswith(".tmp"):
+                continue
+            fpath = os.path.join(NORM_CACHE_DIR, fname)
+            try:
+                st = os.stat(fpath)
+            except OSError:
+                continue
+            entries.append((st.st_atime, st.st_size, fpath))
+            total += st.st_size
+        if total <= NORM_CACHE_MAX_BYTES:
+            return
+        entries.sort(key=lambda e: e[0])  # старые по atime — первыми на удаление
+        for atime, size, fpath in entries:
+            if total <= NORM_CACHE_MAX_BYTES:
+                break
+            try:
+                os.remove(fpath)
+                total -= size
+            except OSError:
+                pass
+    except Exception as e:
+        logger.warning(f"_prune_norm_cache: {e}")
+
+
+async def _stream_normalized(request, source_url: str, track_id: str):
+    """
+    Проксирует аудио через ffmpeg loudnorm EBU R128 (-14 LUFS), одновременно
+    отдавая поток клиенту и записывая его во временный файл на диске.
+    По завершении без ошибок временный файл атомарно переименовывается в
+    постоянный кэш — следующий запрос этого трека уже не тронет ffmpeg.
+    """
     import shutil
     if not shutil.which("ffmpeg"):
         return None  # ffmpeg не установлен — тихий fallback
+
+    cache_path = _normalized_cache_path(track_id)
+    tmp_path = f"{cache_path}.{os.getpid()}.tmp"
 
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -559,16 +623,38 @@ async def _stream_normalized(request, source_url: str):
         "Transfer-Encoding": "chunked",
     })
     await resp.prepare(request)
+    tmp_file = None
+    completed_ok = False
     try:
+        tmp_file = open(tmp_path, "wb")
         while True:
             chunk = await proc.stdout.read(CHUNK)
             if not chunk:
                 break
             await resp.write(chunk)
+            tmp_file.write(chunk)
+        rc = await proc.wait()
+        completed_ok = (rc == 0)
     finally:
-        try: proc.kill()
-        except Exception: pass
-        await proc.wait()
+        if tmp_file:
+            tmp_file.close()
+        if proc.returncode is None:
+            try: proc.kill()
+            except Exception: pass
+            await proc.wait()
+        # Кэшируем, только если ffmpeg реально доработал до конца (rc==0) —
+        # иначе в кэше мог бы осесть оборванный/битый файл.
+        if completed_ok and os.path.exists(tmp_path):
+            try:
+                os.replace(tmp_path, cache_path)
+                _prune_norm_cache()
+            except OSError as e:
+                logger.warning(f"norm_cache rename failed: {e}")
+                try: os.remove(tmp_path)
+                except OSError: pass
+        elif os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except OSError: pass
     return resp
 
 # ═══════════════════════════════════════════════════════════════
@@ -749,6 +835,10 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     await web.TCPSite(runner, "0.0.0.0", port).start()
     logger.info(f"🌐 Web server on :{port}")
+
+    # Не блокирует старт сервера — просто пишет предупреждение в лог,
+    # если установленная версия yt-dlp отстала от актуальной в PyPI.
+    asyncio.create_task(check_yt_dlp_freshness())
 
 # ═══════════════════════════════════════════════════════════
 # КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ — API

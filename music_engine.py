@@ -451,6 +451,50 @@ class MusicEngine:
 music_engine = MusicEngine()
 
 
+async def check_yt_dlp_freshness():
+    """
+    yt-dlp — единственная точка доступа к YouTube в этом проекте, а YouTube
+    регулярно меняет защиту от скрапинга. Устаревшая версия обычно не падает
+    с ошибкой — она просто тихо перестаёт находить/скачивать треки, и
+    пользователи решают, что "YouTube не работает", хотя дело в версии пакета.
+    Логируем предупреждение при старте, чтобы это было видно в логах bothost
+    сразу, а не через жалобы пользователей.
+    Не блокирует запуск: сетевой запрос обёрнут в try/except с коротким таймаутом.
+    """
+    if yt_dlp is None:
+        logger.warning("yt-dlp не установлен — поиск/стрим с YouTube Music недоступен")
+        return
+
+    installed = getattr(yt_dlp, "__version__", None) or getattr(yt_dlp.version, "__version__", "unknown")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://pypi.org/pypi/yt-dlp/json",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(f"Не удалось проверить актуальность yt-dlp: PyPI вернул {resp.status}")
+                    return
+                data = await resp.json()
+                latest = data.get("info", {}).get("version")
+                if not latest:
+                    return
+                if latest != installed:
+                    logger.warning(
+                        f"⚠️ yt-dlp устарел: установлена {installed}, в PyPI доступна {latest}. "
+                        f"YouTube Music может искать/играть нестабильно или вообще не находить треки. "
+                        f"Обновите зависимость: pip install -U yt-dlp"
+                    )
+                else:
+                    logger.info(f"yt-dlp актуален: версия {installed}")
+    except asyncio.TimeoutError:
+        logger.debug("Проверка актуальности yt-dlp: таймаут запроса к PyPI")
+    except Exception as e:
+        # Не критично — например, на bothost может не быть доступа к pypi.org.
+        # Не должно мешать запуску бота, поэтому только debug-уровень.
+        logger.debug(f"Не удалось проверить актуальность yt-dlp: {e}")
+
+
 def add_id3_tags(audio_bytes: bytes, title: str = "", artist: str = "", cover_bytes: bytes | None = None) -> bytes:
     def _sync_safe(n: int) -> bytes:
         r = bytearray(4)
