@@ -2616,11 +2616,12 @@ try { renderOfflineList(); } catch(e) {}
 try { updateProfileUI(); } catch(e) {}
 
 // ── SWIPE LOGIC FOR PAGES ──
-let startX = 0; const pagesEl = document.getElementById('pages'); const tabsOrder = ['wave', 'search', 'playlists', 'history', 'profile'];
-pagesEl.addEventListener('touchstart', e => { startX = e.touches[0].clientX; }, {passive: true});
+let startX = 0, startY = 0; const pagesEl = document.getElementById('pages'); const tabsOrder = ['wave', 'search', 'playlists', 'history', 'profile'];
+pagesEl.addEventListener('touchstart', e => { startX = e.touches[0].clientX; startY = e.touches[0].clientY; }, {passive: true});
 pagesEl.addEventListener('touchend', e => {
   let diff = startX - e.changedTouches[0].clientX;
-  if (Math.abs(diff) > 70) {
+  let diffY = Math.abs(startY - e.changedTouches[0].clientY);
+  if (Math.abs(diff) > 70 && Math.abs(diff) > diffY) {
     let curIdx = tabsOrder.findIndex(t => document.getElementById('page-'+t).classList.contains('on'));
     if (diff > 0 && curIdx < tabsOrder.length - 1) { haptic(); nav(tabsOrder[curIdx + 1]); }
     if (diff < 0 && curIdx > 0) { haptic(); nav(tabsOrder[curIdx - 1]); }
@@ -3542,6 +3543,12 @@ function playWaveFromStart() {
 function playTrack(t, dir = 1) {
   if (!t) return;
 
+  // ── Разблокируем AudioContext синхронно внутри жеста пользователя ──
+  // iOS Safari требует resume() в прямом обработчике жеста — setTimeout
+  // уже выходит за эти рамки и resume() там молча не работает.
+  if (!actx) initAudioCtx();
+  if (actx && actx.state === 'suspended') actx.resume();
+
   // ── Сброс crossfade gain при ручном переключении ──────────────────
   _xfadeActive = false;
   if (gainMain  && actx) { gainMain.gain.cancelScheduledValues(actx.currentTime);  gainMain.gain.setValueAtTime(1.0, actx.currentTime); }
@@ -3585,9 +3592,10 @@ function playTrack(t, dir = 1) {
     if (topTitle) topTitle.innerHTML = (t.source || 'Сейчас играет') + ' <span id="sleep-timer-display">' + (document.getElementById('sleep-timer-display')?.textContent || '') + '</span>';
 
 aud.src = `/api/stream/${encodeURIComponent(t.id)}`;
-aud.load(); 
 
 // Ждем, пока браузер реально начнет воспроизведение
+// Примечание: aud.load() не нужен — установка src уже инициирует загрузку,
+// а явный load() создаёт гонку состояний с play() на iOS Safari.
 aud.play().then(() => {
     // Вызываем обновление шторки ТОЛЬКО когда звук пошел
     updateMediaSession(t);
@@ -3600,11 +3608,7 @@ aud.play().then(() => {
     setPlayState(false);
 });
 
-logHistoryToServer(t);
-    setPlayState(true); logHistoryToServer(t);
-    // Добавляем инициализацию аудио-контекста и запуск пульсации
-    initAudioCtx();
-    if (actx && actx.state === 'suspended') actx.resume();
+    logHistoryToServer(t);
     startWavePulse();
   }, 300);
 }
@@ -6149,7 +6153,11 @@ function renderFriendTracks(tab) {
     });
 }
 
-loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); setInterval(checkNotifBadge, 60000); });
+// Загружаем данные пользователя и волну параллельно — они не зависят друг от друга.
+// loadWave использует isFav() → allData.favs, но в худшем случае возьмёт
+// закэшированный localStorage-вариант, что лучше чем ждать loadData целиком.
+loadWave(true);
+loadData().then(() => { renderQuickGrid(); checkNotifBadge(); setInterval(checkNotifBadge, 60000); });
 </script>
 </body>
 </html>
