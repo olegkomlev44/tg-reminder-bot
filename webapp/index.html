@@ -2655,8 +2655,23 @@ if (!deviceId) {
 }
 let _lastSyncSentAt = 0;
 
+// Лимит треков на одну "порцию" рендера списков (избранное/история/плейлисты) —
+// используется в appendTracksPaged() ниже. Объявлен здесь, ДО renderFavs()/
+// renderHistory()/renderPlaylists(), которые вызываются несколькими строками
+// ниже: appendTracksPaged — это hoisted function declaration и вызвать её
+// можно откуда угодно, а вот LIST_PAGE_SIZE — const, и обращение к нему до
+// этой строки исполнения кидает ReferenceError (temporal dead zone),
+// который в renderFavs() ничем не пойман и обрывает выполнение ВСЕГО
+// остального скрипта — включая свайпы, клики по вкладкам и плеер.
+const LIST_PAGE_SIZE = 40;
+
 // Initial render from Cache
-renderFavs(); renderHistory(); renderPlaylists();
+// Обёрнуто в try/catch как страховка: одна ошибка здесь раньше валила
+// вообще ВЕСЬ остальной скрипт (свайпы, клики по вкладкам, плеер) —
+// теперь максимум сломается сам рендер списка, а не всё приложение.
+try { renderFavs(); } catch(e) { console.error('renderFavs failed', e); }
+try { renderHistory(); } catch(e) { console.error('renderHistory failed', e); }
+try { renderPlaylists(); } catch(e) { console.error('renderPlaylists failed', e); }
 try { renderOfflineList(); } catch(e) {}
 // Build profile from cache immediately
 try { updateProfileUI(); } catch(e) {}
@@ -3040,7 +3055,7 @@ function makeItem(t, ctx) {
 // Рендерим порциями и подгружаем следующую порцию, когда пользователь
 // доскроллил почти до конца списка (через IntersectionObserver на
 // невидимом сентинел-элементе — без пересчёта скролла руками).
-const LIST_PAGE_SIZE = 40;
+// (LIST_PAGE_SIZE объявлен раньше в файле — см. комментарий там)
 
 function appendTracksPaged(tracks, ul, ctx, animBase) {
   let rendered = 0;
