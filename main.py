@@ -63,7 +63,10 @@ from music_handlers import (
     callback_dj_vote, callback_dj_finish,
     MusicStates, process_playlist_name,
 )
-from anixart_handler import register_anixart_handlers, inline_anime, check_anime_episodes
+from anixart_handler import (
+    register_anixart_handlers, inline_anime, check_anime_episodes,
+    anixart_startup_selftest, close_anixart_session,
+)
 from ozon_handler import cmd_ozon
 
 try:
@@ -96,6 +99,7 @@ async def main():
     register_ig_handlers(dp)
     register_feed_handlers(dp)
     register_anixart_handlers(dp)
+    await anixart_startup_selftest()  # пингуем Anixart API и поднимаем sqlite-кэш ещё до polling
 
     # ── Inline ────────────────────────────────────────────────────────────────
     # Telegram присылает боту ровно один inline_query на запрос. Раньше на это
@@ -233,6 +237,7 @@ async def main():
         await dp.start_polling(bot, skip_updates=True)
     finally:
         scheduler.shutdown()
+        await close_anixart_session()
         await bot.session.close()
 
 

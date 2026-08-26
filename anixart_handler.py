@@ -1,6 +1,20 @@
 """
 anixart_handler.py — Anixart для Telegram-бота на aiogram 3.x
 
+v4:
+  - Общая aiohttp.ClientSession на модуль вместо новой на каждый запрос
+  - Ретраи с backoff на сетевые ошибки/5xx/429 (см. _request)
+  - TTL-кэш релизов/жанров теперь двухуровневый: память + sqlite, переживает
+    передеплой на BotHost (см. ANIXART_CACHE_DB в config.py)
+  - Статистика просмотров/лайков в той же sqlite → /anime top
+  - Параллельная загрузка страниц жанрового пула (asyncio.gather)
+  - Инлайн-поиск поддерживает пагинацию через iq.offset ("Load more" в Telegram)
+  - Брендированная Pillow-заглушка вместо пустого текста, если у релиза нет постера
+  - Причины провала логина различаются (неверный пароль / рейт-лимит / 5xx / неизвестно)
+  - Честные ссылки на серии: раньше /episode/{n} был непроверенным угадыванием
+    (см. комментарий у EPISODE_URL_TEMPLATE) — теперь ведём на страницу релиза
+    без ложной точности, пока не появится подтверждённый формат
+
 v3:
   - Избранное, история просмотров, подписка на новые серии (свои таблицы в db.py)
   - Привязка личного аккаунта Anixart (best-effort — см. _anixart_login)
@@ -18,14 +32,21 @@ v3:
   /anime genres     — жанры (+ фильтр по статусу/году)
   /anime favs       — закладки
   /anime history    — недавно просмотренное
+  /anime top        — топ просматриваемых/лайкаемых в группе
   /anime login      — привязать аккаунт Anixart
 Инлайн: @bot a:<запрос> — маршрутизируется в main.py (inline_query_router)
+
+Запуск/остановка (вызывать из main.py):
+  await anixart_startup_selftest()   — при старте бота, до dp.start_polling
+  await close_anixart_session()      — при остановке, вместе с bot.session.close()
 """
 
 import asyncio
 import hashlib
 import io
+import json as _json
 import logging
+import sqlite3
 import time
 from typing import Optional
 
@@ -43,6 +64,7 @@ from aiogram.types import (
     InputTextMessageContent, Message,
 )
 
+from config import ANIXART_CACHE_DB
 from db import (
     get_cached_file_id, save_cached_file_id,
     save_anime_fav, remove_anime_fav, is_anime_fav, get_anime_favs,
@@ -67,54 +89,231 @@ class AnimeStates(StatesGroup):
     waiting_password = State()
 
 
-# ── TTL-кэш ──────────────────────────────────────────────────────────────────
-_cache: dict = {}          # key → (value, expire_ts)
+# ── Персистентный sqlite-слой (кэш + статистика) ──────────────────────────────
+# Раньше TTL-кэш жил только в памяти процесса и обнулялся на каждом передеплое
+# BotHost — жанровые пулы и релизы прогревались заново после каждого рестарта.
+# Теперь под памятью лежит sqlite-файл (ANIXART_CACHE_DB из config.py), который
+# переживает передеплой. Память остаётся быстрым первым слоем (короткий TTL),
+# диск — источником правды на случай рестарта. Заодно тут же живёт таблица
+# статистики просмотров/лайков для /anime top — своя, чтобы не лезть в схему
+# db.py вслепую (её содержимое этому модулю не видно).
+def _db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(ANIXART_CACHE_DB, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+def _cache_db_init_sync():
+    conn = _db_conn()
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS anixart_cache ("
+            " key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS anixart_stats ("
+            " rid INTEGER PRIMARY KEY, title TEXT, views INTEGER NOT NULL DEFAULT 0,"
+            " favs INTEGER NOT NULL DEFAULT 0, last_seen REAL)"
+        )
+        conn.execute("DELETE FROM anixart_cache WHERE expires_at < ?", (time.time(),))
+        conn.commit()
+    finally:
+        conn.close()
+
+def _cache_db_get_sync(key: str):
+    conn = _db_conn()
+    try:
+        row = conn.execute(
+            "SELECT value, expires_at FROM anixart_cache WHERE key = ?", (key,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    value, expires_at = row
+    if time.time() >= expires_at:
+        return None
+    try:
+        return _json.loads(value)
+    except Exception:
+        return None
+
+def _cache_db_set_sync(key: str, value, ttl: int):
+    conn = _db_conn()
+    try:
+        conn.execute(
+            "INSERT INTO anixart_cache (key, value, expires_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
+            (key, _json.dumps(value), time.time() + ttl),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def _stats_bump_view_sync(rid: int, title: str):
+    conn = _db_conn()
+    try:
+        conn.execute(
+            "INSERT INTO anixart_stats (rid, title, views, favs, last_seen) VALUES (?, ?, 1, 0, ?) "
+            "ON CONFLICT(rid) DO UPDATE SET views = views + 1, "
+            "title = COALESCE(NULLIF(excluded.title, ''), title), last_seen = excluded.last_seen",
+            (rid, title, time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def _stats_bump_fav_sync(rid: int, title: str, delta: int):
+    conn = _db_conn()
+    try:
+        conn.execute(
+            "INSERT INTO anixart_stats (rid, title, views, favs, last_seen) VALUES (?, ?, 0, ?, ?) "
+            "ON CONFLICT(rid) DO UPDATE SET favs = MAX(0, favs + ?), "
+            "title = COALESCE(NULLIF(excluded.title, ''), title), last_seen = excluded.last_seen",
+            (rid, title, max(delta, 0), time.time(), delta),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def _stats_top_sync(limit: int = 10) -> list:
+    conn = _db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT rid, title, views, favs FROM anixart_stats "
+            "ORDER BY (views + favs * 3) DESC, views DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [{"id": r[0], "title": r[1], "views": r[2], "favs": r[3]} for r in rows]
+
+
+# ── TTL-кэш (память + диск) ────────────────────────────────────────────────────
+_cache: dict = {}          # key → (value, expire_ts) — быстрый горячий слой
 _cache_lock = asyncio.Lock()
+_MEM_TTL_CAP = 300         # даже для «часовых» ключей память живёт недолго,
+                           # чтобы после рестарта не отдавать протухшее из RAM
 
 async def _cache_get(key: str):
     async with _cache_lock:
         entry = _cache.get(key)
         if entry and time.time() < entry[1]:
             return entry[0]
-        return None
+    value = await asyncio.to_thread(_cache_db_get_sync, key)
+    if value is not None:
+        async with _cache_lock:
+            _cache[key] = (value, time.time() + _MEM_TTL_CAP)
+    return value
 
 async def _cache_set(key: str, value, ttl: int):
     async with _cache_lock:
-        _cache[key] = (value, time.time() + ttl)
+        _cache[key] = (value, time.time() + min(ttl, _MEM_TTL_CAP))
+    await asyncio.to_thread(_cache_db_set_sync, key, value, ttl)
+
+async def _stats_bump_view(rid: int, title: str):
+    try:
+        await asyncio.to_thread(_stats_bump_view_sync, rid, title or "")
+    except Exception as e:
+        logger.warning(f"Не удалось обновить статистику просмотров #{rid}: {e}")
+
+async def _stats_bump_fav(rid: int, title: str, delta: int):
+    try:
+        await asyncio.to_thread(_stats_bump_fav_sync, rid, title or "", delta)
+    except Exception as e:
+        logger.warning(f"Не удалось обновить статистику лайков #{rid}: {e}")
 
 
-# ── HTTP ──────────────────────────────────────────────────────────────────────
+# ── HTTP: общая сессия + ретраи ────────────────────────────────────────────────
+# Раньше каждый _api_get/_api_post/_download_poster открывал свою
+# aiohttp.ClientSession() — ни keep-alive, ни пула соединений, лишние накладные
+# расходы на каждый чих. Теперь одна сессия на модуль (лениво создаётся,
+# закрывается в close_anixart_session() при остановке бота).
+_session: Optional[aiohttp.ClientSession] = None
+_session_lock = asyncio.Lock()
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
+async def _get_session() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        async with _session_lock:
+            if _session is None or _session.closed:
+                _session = aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+                )
+    return _session
+
+async def close_anixart_session():
+    """Вызывать при остановке бота (finally в main.py), рядом с bot.session.close()."""
+    global _session
+    if _session and not _session.closed:
+        await _session.close()
+    _session = None
+
 def _headers(token: Optional[str] = None) -> dict:
     h = {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
     if token: h["token"] = token
     return h
 
-async def _api_get(path: str, query: dict = None, token: str = None) -> dict:
+async def _request(method: str, path: str, *, query: dict = None, body: dict = None,
+                    token: str = None, retries: int = 2, timeout: int = 15) -> dict:
+    """Общий раннер GET/POST к Anixart с ретраями (backoff 0.5s → 1s → 2s...)
+    на сетевые ошибки/таймауты и на 429/5xx. Прочие 4xx — не ретраятся: это не
+    временная проблема, а неверный запрос (используется для различения причин
+    провала логина — см. _anixart_login)."""
     url = BASE_URL + path
-    async with aiohttp.ClientSession() as s:
-        async with s.get(url, params=query, headers=_headers(token),
-                         timeout=aiohttp.ClientTimeout(total=15)) as r:
-            r.raise_for_status()
-            return await r.json()
+    last_exc = None
+    for attempt in range(retries + 1):
+        session = await _get_session()
+        try:
+            if method == "GET":
+                ctx = session.get(url, params=query, headers=_headers(token),
+                                   timeout=aiohttp.ClientTimeout(total=timeout))
+            else:
+                ctx = session.post(url, json=body or {}, headers=_headers(token),
+                                    timeout=aiohttp.ClientTimeout(total=timeout))
+            async with ctx as r:
+                r.raise_for_status()
+                return await r.json()
+        except aiohttp.ClientResponseError as e:
+            last_exc = e
+            if e.status in _RETRYABLE_STATUSES and attempt < retries:
+                await asyncio.sleep(0.5 * (2 ** attempt))
+                continue
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            last_exc = e
+            if attempt < retries:
+                await asyncio.sleep(0.5 * (2 ** attempt))
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("unreachable")  # для линтера — цикл всегда либо return, либо raise
 
-async def _api_post(path: str, body: dict = None, token: str = None) -> dict:
-    url = BASE_URL + path
-    async with aiohttp.ClientSession() as s:
-        async with s.post(url, json=body or {}, headers=_headers(token),
-                          timeout=aiohttp.ClientTimeout(total=15)) as r:
-            r.raise_for_status()
-            return await r.json()
+async def _api_get(path: str, query: dict = None, token: str = None, retries: int = 2) -> dict:
+    return await _request("GET", path, query=query, token=token, retries=retries)
+
+async def _api_post(path: str, body: dict = None, token: str = None, retries: int = 2) -> dict:
+    return await _request("POST", path, body=body, token=token, retries=retries)
 
 async def _download_poster(url: str) -> Optional[bytes]:
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers={"User-Agent": USER_AGENT},
-                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+    for attempt in range(2):
+        try:
+            session = await _get_session()
+            async with session.get(url, headers={"User-Agent": USER_AGENT},
+                                    timeout=aiohttp.ClientTimeout(total=10)) as r:
                 if r.status == 200:
                     return await r.read()
+                if r.status in _RETRYABLE_STATUSES and attempt == 0:
+                    await asyncio.sleep(0.5)
+                    continue
                 logger.warning(f"Постер {url} вернул статус {r.status}")
-    except Exception as e:
-        logger.warning(f"Не удалось скачать постер {url}: {e}")
+                return None
+        except Exception as e:
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+                continue
+            logger.warning(f"Не удалось скачать постер {url}: {e}")
     return None
 
 def _img_url(raw: str) -> str:
@@ -158,25 +357,61 @@ def _extract_poster_url(rel: dict) -> str:
 # пробуем пару правдоподобных вариантов и логируем сырой ответ при неудаче.
 # Если ни один не сработает — смотри лог BotHost на "Anixart login" и пришли мне
 # то, что там появится, поправлю за один шаг.
-async def _anixart_login(login: str, password: str) -> Optional[dict]:
+LOGIN_FAIL_MESSAGES = {
+    "invalid_credentials": (
+        "❌ Неверный логин или пароль (или Anixart попросил капчу/2FA — "
+        "бот их пройти не может)."
+    ),
+    "rate_limited": "❌ Anixart временно ограничил вход — слишком много попыток. Попробуй через пару минут.",
+    "server_error": "❌ Anixart API сейчас недоступен (ошибка на их стороне). Попробуй позже.",
+    "unknown": (
+        "❌ Не получилось войти. Формат запроса — предположение по открытым "
+        "обёрткам Anixart API (официальной документации нет). Если логин и "
+        "пароль точно верные, глянь в логах BotHost строку «Anixart login» "
+        "и пришли её мне — поправлю запрос за один шаг."
+    ),
+}
+
+async def _anixart_login(login: str, password: str) -> dict:
+    """Возвращает {"token": str} при успехе, иначе {"token": None, "reason": "..."}
+    с одной из причин LOGIN_FAIL_MESSAGES — раньше любой провал показывал юзеру
+    одно и то же общее сообщение, теперь по коду ответа видно, стоит ли вообще
+    пробовать снова или это временный сбой на стороне Anixart."""
     attempts = [
         ("/user/login", {"login": login, "password": password}),
         ("/auth/login", {"login": login, "password": password}),
     ]
+    reason = "unknown"
     for path, body in attempts:
         try:
-            data  = await _api_post(path, body)
-            token = (
-                data.get("token")
-                or (data.get("profile") or {}).get("token")
-                or (data.get("profileToken") or {}).get("token")
-            )
-            if token:
-                return {"token": token}
-            logger.warning(f"Anixart login {path}: ответ без поля token: {data}")
+            data = await _api_post(path, body, retries=1)
+        except aiohttp.ClientResponseError as e:
+            if e.status in (401, 403):
+                return {"token": None, "reason": "invalid_credentials"}
+            if e.status == 429:
+                return {"token": None, "reason": "rate_limited"}
+            if e.status >= 500:
+                reason = "server_error"
+                logger.warning(f"Anixart login {path}: HTTP {e.status} (сервер)")
+            else:
+                logger.warning(f"Anixart login {path}: HTTP {e.status}")
+            continue
         except Exception as e:
             logger.warning(f"Anixart login через {path} не сработал: {e}")
-    return None
+            continue
+
+        token = (
+            data.get("token")
+            or (data.get("profile") or {}).get("token")
+            or (data.get("profileToken") or {}).get("token")
+        )
+        if token:
+            return {"token": token}
+        # 200 без токена — чаще всего неверный пароль или капча, которую
+        # реверс-инжинирнутый запрос не проходит
+        logger.warning(f"Anixart login {path}: ответ без поля token: {data}")
+        reason = "invalid_credentials"
+    return {"token": None, "reason": reason}
 
 
 # ── Текстовые виджеты: звёзды и прогресс-бар ──────────────────────────────────
@@ -369,6 +604,38 @@ async def _render_anime_card(poster_bytes: bytes, rel: dict) -> Optional[bytes]:
         return None
 
 
+# ── Заглушка постера ──────────────────────────────────────────────────────────
+# Раньше при отсутствии постера (не нашли URL или скачивание упало) карточка
+# уходила вообще без картинки — просто текст. Теперь генерируем брендированную
+# заглушку тем же стилем (градиент + крупный "?" ), чтобы карточка всегда
+# выглядела единообразно и проходила через тот же _render_anime_card_sync.
+def _make_placeholder_poster_sync(w: int = 1000, h: int = 1000) -> bytes:
+    top, bottom = (42, 42, 56), (22, 22, 30)
+    img = Image.new("RGB", (w, h), top)
+    for y in range(h):
+        t = y / h
+        color = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
+        img.paste(Image.new("RGB", (w, 1), color), (0, y))
+    draw = ImageDraw.Draw(img)
+
+    icon_font = _font(220, bold=True)
+    label = "?"
+    lw = draw.textlength(label, font=icon_font)
+    draw.text(((w - lw) / 2, h * 0.30), label, font=icon_font, fill=(95, 95, 112))
+
+    sub_font = _font(34)
+    sub = "постер недоступен"
+    sw = draw.textlength(sub, font=sub_font)
+    draw.text(((w - sw) / 2, h * 0.62), sub, font=sub_font, fill=(150, 150, 165))
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+async def _make_placeholder_poster() -> bytes:
+    return await asyncio.to_thread(_make_placeholder_poster_sync)
+
+
 # ── Трейлер ───────────────────────────────────────────────────────────────────
 # У Anixart нет задокументированного поля с трейлером (в разных версиях API
 # видели то "trailer", то вложенный объект с youtube id — и то и другое
@@ -405,17 +672,24 @@ async def _fetch_trailer(rel: dict) -> tuple[Optional[str], dict]:
 
 
 # ── Ссылки на конкретные серии ─────────────────────────────────────────────────
-# У anixart.tv нет задокументированного deep-link'а на конкретную серию — сайт
-# сам решает, как открыть плеер после клика по номеру серии в приложении.
-# Ниже — самый распространённый шаблон среди подобных сайтов (release/{id}/episode/{n}).
-# Если у тебя он не сработает (просто откроет страницу релиза без конкретной
-# серии) — пришли мне реальную ссылку на серию, скопированную из браузера или
-# из "Поделиться" в приложении, и я поправлю константу за один шаг, без
-# переписывания остальной логики.
-EPISODE_URL_TEMPLATE = "https://anixart.tv/release/{rid}/episode/{ep}"
+# Проверено (поиск 26.08.2026): у Anixart нет публично задокументированного
+# deep-link'а на конкретную серию — просмотр в приложении завязан на выбор
+# озвучки/источника внутри самого клиента, а не на параметр в URL. Старый
+# шаблон "release/{id}/episode/{n}" был непроверенной догадкой (сам код это
+# признавал) и на практике тихо открывал страницу релиза целиком, создавая
+# иллюзию точности, которой не было.
+#
+# Сейчас — честный вариант: кнопки серий по-прежнему показывают номера (это
+# полезно как список того, что уже вышло), но ведут на страницу релиза, где
+# серию нужно выбрать вручную. Если пришлёшь мне реальную ссылку на конкретную
+# серию (через "Поделиться" в приложении или скопированную из браузера) — сюда,
+# в EPISODE_URL_TEMPLATE, ставится точный шаблон одной строкой.
+EPISODE_URL_TEMPLATE: Optional[str] = None  # формат не подтверждён — см. комментарий выше
 
 def _episode_url(rid: int, ep: int) -> str:
-    return EPISODE_URL_TEMPLATE.format(rid=rid, ep=ep)
+    if EPISODE_URL_TEMPLATE:
+        return EPISODE_URL_TEMPLATE.format(rid=rid, ep=ep)
+    return f"https://anixart.tv/release/{rid}"
 
 _EP_PAGE_SIZE = 30
 
@@ -475,6 +749,7 @@ def _help_keyboard() -> InlineKeyboardMarkup:
 
 async def _send_release(ctx, rel: dict):
     rid     = rel.get("id", 0)
+    title   = rel.get("title_ru") or rel.get("title_original") or ""
     user_id = ctx.from_user.id
     caption = _fmt_release(rel)
     kb      = _release_keyboard(rel, user_id)
@@ -482,24 +757,30 @@ async def _send_release(ctx, rel: dict):
     bot     = ctx.bot
 
     log_anime_history(user_id, rel)
+    asyncio.create_task(_stats_bump_view(rid, title))  # не блокируем отправку картинки
 
-    poster_url = _extract_poster_url(rel)
-    if poster_url:
-        data = await _download_poster(poster_url)
-        if data:
-            card_bytes = await _render_anime_card(data, rel)
-            fname = f"anix_{hashlib.md5(poster_url.encode()).hexdigest()[:8]}.jpg"
-            try:
-                sent = await bot.send_photo(
-                    chat_id, BufferedInputFile(card_bytes or data, fname),
-                    caption=caption, parse_mode="HTML", reply_markup=kb
-                )
-                # прогреваем кэш file_id для инлайна (переиспользует таблицу cache)
-                if sent.photo:
-                    save_cached_file_id(f"anix_poster_{rid}", sent.photo[-1].file_id)
-                return
-            except Exception as e:
-                logger.warning(f"Не удалось отправить фото: {e}")
+    poster_url  = _extract_poster_url(rel)
+    real_bytes  = await _download_poster(poster_url) if poster_url else None
+    used_placeholder = real_bytes is None
+    # Раньше без постера карточка уходила голым текстом. Теперь — брендированная
+    # заглушка тем же пайплайном, чтобы вид не «ломался» на редких релизах.
+    poster_bytes = real_bytes if real_bytes else await _make_placeholder_poster()
+
+    card_bytes = await _render_anime_card(poster_bytes, rel)
+    cache_seed = poster_url if not used_placeholder else f"placeholder_{rid}"
+    fname = f"anix_{hashlib.md5(cache_seed.encode()).hexdigest()[:8]}.jpg"
+    try:
+        sent = await bot.send_photo(
+            chat_id, BufferedInputFile(card_bytes or poster_bytes, fname),
+            caption=caption, parse_mode="HTML", reply_markup=kb
+        )
+        # прогреваем кэш file_id для инлайна — но только для настоящих постеров,
+        # иначе заглушка приклеится к релизу навсегда под его ключом кэша
+        if sent.photo and not used_placeholder:
+            save_cached_file_id(f"anix_poster_{rid}", sent.photo[-1].file_id)
+        return
+    except Exception as e:
+        logger.warning(f"Не удалось отправить фото: {e}")
     await bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=kb)
 
 
@@ -543,18 +824,31 @@ async def _fetch_genre_pool(gid: int) -> list:
     cached = await _cache_get(key)
     if cached is not None:
         return cached
-    pool = []
-    for offset in (0, 10, 20, 30):
+
+    # Раньше страницы 0/10/20/30 тянулись последовательно (await в цикле) —
+    # 4 круговых поездки подряд. Теперь запускаем их параллельно одним
+    # gather'ом и склеиваем по порядку, сохраняя старую логику "останавливаемся
+    # на первой неполной странице" (chunk короче 10 → дальше не доверяем
+    # последовательности, даже если следующие offset'ы что-то вернули).
+    offsets = (0, 10, 20, 30)
+
+    async def _fetch_page(off: int):
         try:
-            data  = await _api_get(f"/genre/{gid}/releases/{offset}")
-            chunk = data.get("content") or []
-        except Exception:
-            break
-        if not chunk:
+            data = await _api_get(f"/genre/{gid}/releases/{off}")
+            return data.get("content") or []
+        except Exception as e:
+            logger.warning(f"Жанр {gid}, offset {off}: {e}")
+            return None  # None = сетевая ошибка, отличаем от пустой страницы
+
+    pages = await asyncio.gather(*[_fetch_page(o) for o in offsets])
+    pool = []
+    for chunk in pages:
+        if chunk is None:
             break
         pool.extend(chunk)
         if len(chunk) < 10:
             break
+
     await _cache_set(key, pool, ttl=600)
     return pool
 
@@ -646,6 +940,7 @@ HELP_TEXT = (
     "<code>/anime genres</code> — жанры (+ фильтр по статусу/году)\n"
     "<code>/anime favs</code> — твои закладки\n"
     "<code>/anime history</code> — недавно смотрел(а)\n"
+    "<code>/anime top</code> — топ просматриваемых/лайкаемых в группе\n"
     "<code>/anime login</code> — привязать аккаунт Anixart\n\n"
     "<i>Инлайн:</i> @botname <code>a:&lt;запрос&gt;</code> — или кнопка ниже 👇"
 )
@@ -664,6 +959,7 @@ async def cmd_anime(msg: Message, state: FSMContext):
     elif sub == "genres":            await _do_genres(msg)
     elif sub in ("favs", "favorites", "избранное", "закладки"):  await _do_favs(msg)
     elif sub in ("history", "история"):                          await _do_history(msg)
+    elif sub in ("top", "топ", "популярное"):                    await _do_top(msg)
     elif sub in ("login", "аккаунт", "account"):                 await _start_anime_login(msg, state)
     else:                            await _do_search(msg, query, offset=0)
 
@@ -779,6 +1075,27 @@ async def _do_history(ctx):
                     InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
+async def _do_top(ctx):
+    """Топ по группе — считается по своей sqlite-статистике (anixart_stats),
+    отдельной от db.py: просмотры + лайки (избранное) со всех пользователей
+    бота, вес лайка выше просмотра (favs * 3), см. _stats_top_sync."""
+    top = await asyncio.to_thread(_stats_top_sync, 10)
+    if not top:
+        await _reply(ctx, "📊 Пока не набралось статистики — смотрите аниме, и топ появится!"); return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["<b>🔥 Топ аниме в группе:</b>", ""]
+    buttons = []
+    for i, t in enumerate(top):
+        title_display = t["title"] or f"#{t['id']}"
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        lines.append(f"{medal} {title_display} — 👀{t['views']} ❤️{t['favs']}")
+        buttons.append([InlineKeyboardButton(text=title_display[:40], callback_data=f"anix:info:{t['id']}")])
+    buttons.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="anix:close")])
+
+    await _reply_kb(ctx, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
 # ── Привязка аккаунта Anixart ──────────────────────────────────────────────────
 async def _start_anime_login(ctx, state: FSMContext):
     existing = get_anixart_token(ctx.from_user.id)
@@ -826,16 +1143,12 @@ async def process_anime_password(message: Message, state: FSMContext):
     wait = await message.answer("🔐 Пробую войти…")
     result = await _anixart_login(login, password)
     password = None  # дальше не используется и никуда не сохраняется
-    if result and result.get("token"):
+    if result.get("token"):
         save_anixart_token(user_id, result["token"], login)
         await wait.edit_text(f"✅ Аккаунт <b>{login}</b> привязан.", parse_mode="HTML")
     else:
-        await wait.edit_text(
-            "❌ Не получилось войти. Формат запроса — предположение по открытым "
-            "обёрткам Anixart API (официальной документации нет). Если логин и "
-            "пароль точно верные, глянь в логах BotHost строку «Anixart login» "
-            "и пришли её мне — поправлю запрос за один шаг."
-        )
+        reason = result.get("reason", "unknown")
+        await wait.edit_text(LOGIN_FAIL_MESSAGES.get(reason, LOGIN_FAIL_MESSAGES["unknown"]))
 
 @router.message(Command("anime_unlink"))
 async def cmd_anime_unlink(message: Message):
@@ -885,10 +1198,15 @@ async def cb_fav_toggle(cq: CallbackQuery):
     if is_anime_fav(user_id, rid):
         remove_anime_fav(user_id, rid)
         await cq.answer("💔 Убрано из закладок")
+        title_for_stats = ""
+        delta = -1
     else:
         rel = await _get_release(rid) or {"id": rid, "title": ""}
         save_anime_fav(user_id, rel)
         await cq.answer("❤️ В закладках!")
+        title_for_stats = rel.get("title_ru") or rel.get("title_original") or ""
+        delta = 1
+    asyncio.create_task(_stats_bump_fav(rid, title_for_stats, delta))
     rel = await _get_release(rid) or {"id": rid}
     try:
         await cq.message.edit_reply_markup(reply_markup=_release_keyboard(rel, user_id))
@@ -1018,7 +1336,8 @@ async def cb_episodes(cq: CallbackQuery):
 
     title = rel.get("title_ru") or rel.get("title_original") or "?"
     kb = _episode_keyboard(rid, ep_total, offset)
-    text = f"▶️ <b>{title}</b>\nВыбери серию ({ep_total} доступно):"
+    link_note = "" if EPISODE_URL_TEMPLATE else "\n<i>кнопка открывает релиз — серию выбери там вручную</i>"
+    text = f"▶️ <b>{title}</b>\nВышло серий: {ep_total}{link_note}"
 
     # Если это уже клавиатура серий — редактируем (листание), иначе шлём новым сообщением
     if cq.message.text and cq.message.text.startswith("▶️"):
@@ -1044,6 +1363,15 @@ async def inline_anime(iq: InlineQuery):
     raw   = (iq.query or "").strip()
     query = raw[2:].strip() if raw.startswith("a:") else raw.strip()
 
+    # Раньше offset игнорировался — Telegram всегда получал первую страницу и
+    # "долистать" инлайн-результаты было нельзя. Теперь iq.offset (строка,
+    # пустая на первом запросе) прокидывается в тот же постраничный эндпоинт,
+    # что уже использует /anime <запрос>.
+    try:
+        offset = int(iq.offset) if iq.offset else 0
+    except ValueError:
+        offset = 0
+
     if not query or len(query) < 2:
         await iq.answer(
             [], cache_time=5,
@@ -1054,9 +1382,9 @@ async def inline_anime(iq: InlineQuery):
 
     try:
         try:
-            data = await _api_post("/search/releases/0", {"query": query, "searchBy": 0})
+            data = await _api_post(f"/search/releases/{offset}", {"query": query, "searchBy": 0})
         except Exception:
-            data = await _api_get("/search/releases/0", {"q": query, "query": query})
+            data = await _api_get(f"/search/releases/{offset}", {"q": query, "query": query})
         content = data.get("releases") or data.get("content", [])
     except Exception:
         content = []
@@ -1111,38 +1439,55 @@ async def inline_anime(iq: InlineQuery):
                 input_message_content=InputTextMessageContent(message_text=text, parse_mode="HTML"),
             ))
 
+    next_offset = str(offset + 10) if len(content) >= 10 else ""
     await iq.answer(
-        results, cache_time=60,
+        results, cache_time=60, next_offset=next_offset,
         switch_pm_text="Поиск: a:<название>",
         switch_pm_parameter="anime"
     )
 
 
 # ── Крон: новые серии по подпискам ────────────────────────────────────────────
+_EPISODE_CHECK_CONCURRENCY = 5
+
 async def check_anime_episodes(bot):
     """Раз в несколько часов (регистрируется в main.py через scheduler) проверяет
-    подписки всех пользователей и пишет тем, у кого вышла новая серия."""
+    подписки всех пользователей и пишет тем, у кого вышла новая серия.
+
+    Раньше подписки обрабатывались строго последовательно (await в цикле) —
+    при росте числа подписок это растягивало крон и долбило Anixart API и
+    Telegram одну подписку за другой. Теперь до 5 подписок обрабатываются
+    параллельно через Semaphore; повторные rid попадают в кэш _get_release,
+    так что реальных запросов к Anixart обычно меньше, чем подписок."""
     subs = get_all_anime_subscriptions()
-    for sub in subs:
-        rid = sub["id"]
-        rel = await _get_release(rid)
-        if not rel:
-            continue
-        new_ep = rel.get("episodes_released", 0) or 0
-        if new_ep > (sub["last_episodes"] or 0):
-            title = rel.get("title_ru") or sub["title"] or "?"
-            try:
-                await bot.send_message(
-                    sub["user_id"],
-                    f"🔔 <b>{title}</b>\nВышла новая серия! Теперь доступно: {new_ep} эп.",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                        InlineKeyboardButton(text="👀 Открыть", url=f"https://anixart.tv/release/{rid}")
-                    ]])
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось уведомить {sub['user_id']} о «{title}»: {e}")
-        update_anime_sub_episodes(sub["user_id"], rid, new_ep)
+    if not subs:
+        return
+
+    sem = asyncio.Semaphore(_EPISODE_CHECK_CONCURRENCY)
+
+    async def _process(sub):
+        async with sem:
+            rid = sub["id"]
+            rel = await _get_release(rid)
+            if not rel:
+                return
+            new_ep = rel.get("episodes_released", 0) or 0
+            if new_ep > (sub["last_episodes"] or 0):
+                title = rel.get("title_ru") or sub["title"] or "?"
+                try:
+                    await bot.send_message(
+                        sub["user_id"],
+                        f"🔔 <b>{title}</b>\nВышла новая серия! Теперь доступно: {new_ep} эп.",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                            InlineKeyboardButton(text="👀 Открыть", url=f"https://anixart.tv/release/{rid}")
+                        ]])
+                    )
+                except Exception as e:
+                    logger.warning(f"Не удалось уведомить {sub['user_id']} о «{title}»: {e}")
+            update_anime_sub_episodes(sub["user_id"], rid, new_ep)
+
+    await asyncio.gather(*[_process(sub) for sub in subs])
 
 
 # ── Утилиты ───────────────────────────────────────────────────────────────────
@@ -1159,4 +1504,33 @@ async def _reply_kb(ctx, text: str, kb: InlineKeyboardMarkup) -> Message:
 
 def register_anixart_handlers(dp):
     dp.include_router(router)
-    logger.info("🎬 anixart_handler зарегистрирован (v3: закладки, история, подписки, AI, карточки)")
+    logger.info("🎬 anixart_handler зарегистрирован (v4: сессия+ретраи, персистентный кэш, топ, честные ссылки)")
+
+
+async def anixart_startup_selftest():
+    """Вызывать из main.py при старте бота (до dp.start_polling), например:
+
+        from anixart_handler import anixart_startup_selftest
+        await anixart_startup_selftest()
+
+    Инициализирует sqlite-кэш/статистику и делает один пробный запрос к
+    Anixart API. Ничего не блокирует и не бросает исключение наружу — если
+    API недоступен или сменил формат ответа, об этом будет явное WARNING в
+    логах BotHost ещё до того, как об этом напишут в чат пользователи."""
+    try:
+        await asyncio.to_thread(_cache_db_init_sync)
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось инициализировать sqlite-кэш anixart ({ANIXART_CACHE_DB}): {e}")
+
+    try:
+        data = await _api_get("/release/random", {"extended_mode": "true"}, retries=1)
+        rel = data.get("release")
+        if rel and rel.get("id"):
+            logger.info(f"✅ Anixart API отвечает (тестовый релиз #{rel['id']})")
+        else:
+            logger.warning(f"⚠️ Anixart API на самотесте вернул неожиданный формат: {str(data)[:300]}")
+    except Exception as e:
+        logger.warning(
+            f"⚠️ Anixart API недоступен на старте ({e}). Бот всё равно запустится — "
+            "если /anime не будет работать, смотри эту строку в логах BotHost первой."
+        )

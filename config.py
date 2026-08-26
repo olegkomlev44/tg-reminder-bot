@@ -13,6 +13,12 @@ DATA_FILE = os.path.join(BASE_DIR, "duty_data.json")
 TIMEZONE  = pytz.timezone("Europe/Moscow")
 TEMP_DIR  = os.path.join(BASE_DIR, "temp")
 
+# Персистентный (переживает передеплой) кэш и статистика anixart_handler —
+# TTL-кэш релизов/жанров и счётчики просмотров/лайков для /anime top.
+# Если на BotHost подключён отдельный volume для данных, можно переопределить
+# через переменную окружения ANIXART_CACHE_DB, не трогая код.
+ANIXART_CACHE_DB = os.getenv("ANIXART_CACHE_DB", os.path.join(BASE_DIR, "anixart_cache.sqlite3"))
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # ── Списки дежурных ───────────────────────────────────────────────────────────
