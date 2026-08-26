@@ -5,7 +5,8 @@
 const VERSION   = 'v1.0.0';
 const SHELL     = `shell-${VERSION}`;   // App Shell — статика
 const API_CACHE = `api-${VERSION}`;     // API-ответы (поиск, треки, волна)
-const AUD_CACHE = `audio-${VERSION}`;   // Аудиопотоки
+const AUD_CACHE = `audio-${VERSION}`;   // Аудиопотоки (авто-кэш при прослушивании, LRU)
+const OFFLINE_CACHE = `offline-${VERSION}`; // Явно сохранённые пользователем треки — не вытесняются автоматической LRU-очисткой AUD_CACHE
 
 // App Shell — файлы, которые кэшируются при установке
 const SHELL_FILES = [
@@ -17,6 +18,7 @@ const SHELL_FILES = [
 const API_MAX   = 60;    // максимум API-записей
 const AUD_MAX   = 15;    // максимум аудиофайлов (~15 × ~5MB = ~75MB)
 const AUD_TTL   = 7 * 24 * 3600 * 1000;  // 7 дней
+const OFFLINE_MAX = 40;  // явных офлайн-сохранений (~40 × ~5MB = ~200MB) — при превышении новое сохранение отклоняется, а не тихо вытесняет старое
 
 // ── INSTALL ──────────────────────────────────────────────────────────
 self.addEventListener('install', event => {
@@ -31,7 +33,7 @@ self.addEventListener('activate', event => {
     event.waitUntil(
         caches.keys().then(keys =>
             Promise.all(
-                keys.filter(k => ![SHELL, API_CACHE, AUD_CACHE].includes(k))
+                keys.filter(k => ![SHELL, API_CACHE, AUD_CACHE, OFFLINE_CACHE].includes(k))
                     .map(k => caches.delete(k))
             )
         ).then(() => self.clients.claim())
@@ -74,8 +76,14 @@ self.addEventListener('fetch', event => {
 //  СТРАТЕГИИ
 // ════════════════════════════════════════════════════════════════════
 
-// ── Audio: Cache-First с TTL, фолбек на сеть ─────────────────────────
+// ── Audio: сперва постоянный офлайн-кэш, потом Cache-First с TTL, фолбек на сеть ──
 async function audioStrategy(request) {
+    // Явно сохранённый пользователем офлайн-трек — отдаём всегда, без TTL
+    // и без похода в сеть (это и есть смысл офлайн-режима).
+    const offlineCache = await caches.open(OFFLINE_CACHE);
+    const offlineHit = await offlineCache.match(request);
+    if (offlineHit) return offlineHit;
+
     const cache = await caches.open(AUD_CACHE);
     const cached = await cache.match(request);
 
@@ -216,10 +224,65 @@ self.addEventListener('message', event => {
         });
     }
 
-    // Сброс кэша
+    // Сброс кэша (НЕ трогает OFFLINE_CACHE — это явные сохранения
+    // пользователя, "очистить кэш" не должно тихо удалять офлайн-музыку)
     if (type === 'CLEAR_CACHE') {
-        caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))))
-            .then(() => event.source?.postMessage({ type: 'CACHE_CLEARED' }));
+        caches.keys().then(keys => Promise.all(
+            keys.filter(k => k !== OFFLINE_CACHE).map(k => caches.delete(k))
+        )).then(() => event.source?.postMessage({ type: 'CACHE_CLEARED' }));
+    }
+
+    // ── Явное офлайн-сохранение трека (кнопка "Сохранить офлайн") ──────
+    // В отличие от PRECACHE_AUDIO (временный кэш с LRU-вытеснением),
+    // здесь трек кладётся в отдельный OFFLINE_CACHE, который не чистится
+    // автоматически — только явным удалением или сверх лимита OFFLINE_MAX.
+    if (type === 'SAVE_OFFLINE') {
+        const { trackId } = payload || {};
+        if (!trackId) return;
+        const url = `/api/stream/${encodeURIComponent(trackId)}`;
+        (async () => {
+            try {
+                const cache = await caches.open(OFFLINE_CACHE);
+                const existing = await cache.match(url);
+                if (existing) {
+                    event.source?.postMessage({ type: 'OFFLINE_SAVED', trackId });
+                    return;
+                }
+                const keys = await cache.keys();
+                if (keys.length >= OFFLINE_MAX) {
+                    event.source?.postMessage({ type: 'OFFLINE_SAVE_FAILED', trackId, reason: 'limit' });
+                    return;
+                }
+                const resp = await fetch(url);
+                if (!resp.ok || resp.status !== 200) {
+                    event.source?.postMessage({ type: 'OFFLINE_SAVE_FAILED', trackId, reason: 'network' });
+                    return;
+                }
+                const body = await resp.arrayBuffer();
+                await cache.put(url, new Response(body, { status: 200, headers: resp.headers }));
+                event.source?.postMessage({ type: 'OFFLINE_SAVED', trackId });
+            } catch (_) {
+                event.source?.postMessage({ type: 'OFFLINE_SAVE_FAILED', trackId, reason: 'error' });
+            }
+        })();
+    }
+
+    // Удалить трек из офлайн-кэша
+    if (type === 'REMOVE_OFFLINE') {
+        const { trackId } = payload || {};
+        if (!trackId) return;
+        const url = `/api/stream/${encodeURIComponent(trackId)}`;
+        caches.open(OFFLINE_CACHE)
+            .then(cache => cache.delete(url))
+            .then(() => event.source?.postMessage({ type: 'OFFLINE_REMOVED', trackId }));
+    }
+
+    // Список id треков, реально сохранённых офлайн (для сверки со списком на клиенте)
+    if (type === 'LIST_OFFLINE') {
+        caches.open(OFFLINE_CACHE)
+            .then(cache => cache.keys())
+            .then(requests => requests.map(r => decodeURIComponent(r.url.split('/api/stream/')[1] || '')))
+            .then(ids => event.source?.postMessage({ type: 'OFFLINE_LIST_RESULT', ids }));
     }
 
     // Запрос статуса кэша
@@ -228,8 +291,9 @@ self.addEventListener('message', event => {
             caches.open(SHELL).then(c => c.keys()).then(k => k.length),
             caches.open(API_CACHE).then(c => c.keys()).then(k => k.length),
             caches.open(AUD_CACHE).then(c => c.keys()).then(k => k.length),
-        ]).then(([shell, api, audio]) => {
-            event.source?.postMessage({ type: 'CACHE_STATUS_RESULT', shell, api, audio });
+            caches.open(OFFLINE_CACHE).then(c => c.keys()).then(k => k.length),
+        ]).then(([shell, api, audio, offline]) => {
+            event.source?.postMessage({ type: 'CACHE_STATUS_RESULT', shell, api, audio, offline });
         });
     }
 });

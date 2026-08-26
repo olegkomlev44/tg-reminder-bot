@@ -2207,6 +2207,12 @@ audio {
     <!-- Favs list -->
     <div class="prof-section">Мне нравится</div>
     <ul id="favs-list"></ul>
+
+    <!-- Offline downloads -->
+    <div class="prof-section" id="offline-title" style="display:none;">
+      Сохранено офлайн <span id="offline-size-hint" style="font-weight:400;font-size:12px;color:var(--text-sec);"></span>
+    </div>
+    <ul id="offline-list"></ul>
   </div>
 
 <div class="tabs" id="tabs">
@@ -2346,6 +2352,10 @@ audio {
   <button class="more-menu-btn" onclick="haptic();closeModals();openPlaylistModal()">
     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 13h2v-2H3zm0 4h2v-2H3zm0-8h2V7H3zm4 4h14v-2H7zm0 4h14v-2H7zm0-10v2h14V7z"/></svg>
     Добавить в плейлист
+  </button>
+  <button class="more-menu-btn" id="more-offline-btn" onclick="haptic();closeModals();toggleOfflineCurrentTrack()">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" id="more-offline-icon"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+    <span id="more-offline-label">Сохранить офлайн</span>
   </button>
 </div>
 
@@ -2593,8 +2603,15 @@ let histSortDesc = true;
 let recentSearches = JSON.parse(localStorage.getItem('recent_searches') || '[]');
 let searchT = null;
 
+// Метаданные явно сохранённых офлайн-треков (сами аудио-байты лежат в SW-кэше).
+// Объявляем рано, т.к. renderOfflineList() дергается уже в начальном рендере ниже.
+let offlineMeta = {};
+try { offlineMeta = JSON.parse(localStorage.getItem('offline_tracks_meta') || '{}'); } catch (e) { offlineMeta = {}; }
+const offlinePending = new Set(); // id треков, которые сейчас сохраняются (чтобы не дублировать запросы)
+
 // Initial render from Cache
 renderFavs(); renderHistory(); renderPlaylists();
+try { renderOfflineList(); } catch(e) {}
 // Build profile from cache immediately
 try { updateProfileUI(); } catch(e) {}
 
@@ -2954,6 +2971,8 @@ function makeItem(t, ctx) {
 
   let rightBtn = ctx === 'playlist' 
     ? `<button class="del-btn" onclick="haptic();event.stopPropagation();removeFromPlaylist('${esc(currentPl)}', '${esc(String(t.id))}')"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg></button>`
+    : ctx === 'offline'
+    ? `<button class="del-btn" onclick="haptic();event.stopPropagation();removeTrackOffline('${esc(String(t.id))}')"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg></button>`
     : `<button class="fav-btn ${loved ? 'loved' : ''}" onclick="haptic();event.stopPropagation();favToggle(this, '${trackJson}')"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></button>`;
 
   li.innerHTML = `<div class="cover">${cover}</div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><div class="tright">${durationHtml}${rightBtn}</div>`;
@@ -2963,12 +2982,56 @@ function makeItem(t, ctx) {
     else if (ctx === 'fav') { queue = [...allData.favs]; }
     else if (ctx === 'history') { queue = [...allData.history]; }
     else if (ctx === 'playlist') { queue = [...(allData.playlists[currentPl] || [])]; }
+    else if (ctx === 'offline') { queue = Object.values(offlineMeta); }
     qIdx = queue.findIndex(x => String(x.id) === String(t.id)); haptic(); playTrack(t, 1);
   });
   return li;
 }
 
-function appendTracks(tracks, ul, ctx) { tracks.forEach(t => ul.appendChild(makeItem(t, ctx))); }
+// ── ПАГИНИРОВАННЫЙ РЕНДЕР СПИСКОВ ──────────────────────────────────
+// Рендерить сотни треков разом (избранное, история, большие плейлисты)
+// тяжело для DOM на слабых Android-устройствах в Telegram WebView.
+// Рендерим порциями и подгружаем следующую порцию, когда пользователь
+// доскроллил почти до конца списка (через IntersectionObserver на
+// невидимом сентинел-элементе — без пересчёта скролла руками).
+const LIST_PAGE_SIZE = 40;
+
+function appendTracksPaged(tracks, ul, ctx, animBase) {
+  let rendered = 0;
+  let sentinel = null;
+  let observer = null;
+
+  const renderNext = () => {
+    const slice = tracks.slice(rendered, rendered + LIST_PAGE_SIZE);
+    slice.forEach((t, i) => {
+      const li = makeItem(t, ctx);
+      if (animBase !== undefined) {
+        li.classList.add('hist-anim');
+        li.style.animationDelay = Math.min(animBase + i * 0.02, 0.3) + 's';
+      }
+      ul.insertBefore(li, sentinel);
+    });
+    rendered += slice.length;
+    if (rendered >= tracks.length) {
+      if (sentinel) { sentinel.remove(); sentinel = null; }
+      if (observer) { observer.disconnect(); observer = null; }
+    }
+  };
+
+  if (tracks.length > LIST_PAGE_SIZE) {
+    sentinel = document.createElement('li');
+    sentinel.className = 'track-list-sentinel';
+    sentinel.style.cssText = 'height:1px;list-style:none;';
+    ul.appendChild(sentinel);
+    observer = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) renderNext();
+    }, { root: null, rootMargin: '800px' });
+    observer.observe(sentinel);
+  }
+  renderNext();
+}
+
+function appendTracks(tracks, ul, ctx) { appendTracksPaged(tracks, ul, ctx); }
 function renderList(tracks, ulId, ctx, emptyText, emptyIcon) {
   const ul = document.getElementById(ulId); ul.innerHTML = '';
   if (!tracks || !tracks.length) { ul.innerHTML = `<div class="empty"><div class="empty-ico">${emptyIcon}</div><p>${emptyText}</p></div>`; return; }
@@ -3025,12 +3088,7 @@ function renderHistory() {
     const ul = document.createElement('ul');
     ul.className = 'hist-group-ul';
     ul.style.listStyle = 'none';
-    g.tracks.forEach((t, i) => {
-      const li = makeItem(t, 'history');
-      li.classList.add('hist-anim');
-      li.style.animationDelay = Math.min(gi * 0.04 + i * 0.02, 0.3) + 's';
-      ul.appendChild(li);
-    });
+    appendTracksPaged(g.tracks, ul, 'history', gi * 0.04);
     sec.appendChild(ul);
     container.appendChild(sec);
   });
@@ -3761,6 +3819,7 @@ function openMoreMenu() {
   const hint = document.getElementById('more-timer-hint');
   const disp = document.getElementById('sleep-timer-display');
   hint.textContent = disp ? disp.textContent : '';
+  updateOfflineMenuState();
   document.getElementById('more-modal').classList.add('vis');
   document.getElementById('overlay').classList.add('vis');
 }
@@ -4008,8 +4067,12 @@ function drawVisualizer() {
                 const { type, trackId } = e.data || {};
                 if (type === 'AUDIO_CACHED') {
                     console.log('[SW] audio cached:', trackId);
+                } else {
+                    handleOfflineSWMessage(e.data || {});
                 }
             });
+            // Сверяем список офлайн-треков в SW с локальными метаданными
+            navigator.serviceWorker.ready.then(() => refreshOfflineList());
         })
         .catch(e => console.warn('[SW] registration failed:', e));
 })();
@@ -4021,6 +4084,104 @@ function swPrecacheAudio(trackId) {
         type: 'PRECACHE_AUDIO',
         payload: { trackId: String(trackId) },
     });
+}
+
+// ── ОФЛАЙН-СОХРАНЕНИЕ ТРЕКОВ ────────────────────────────────────────
+// Кэш SW (audioStrategy) хранит только байты аудио, поэтому названия/
+// обложки для списка "Сохранено офлайн" держим отдельно в localStorage
+// (объявлено выше, до начального рендера), а сам факт "аудио реально
+// лежит на диске" — источник истины SW, с которым сверяемся через
+// LIST_OFFLINE при каждом запуске.
+
+function isOfflineSaved(id) { return !!offlineMeta[String(id)]; }
+
+function saveOfflineMeta() {
+    try { localStorage.setItem('offline_tracks_meta', JSON.stringify(offlineMeta)); } catch (e) {}
+}
+
+function saveTrackOffline(t) {
+    if (!t || !t.id) return;
+    const id = String(t.id);
+    if (isOfflineSaved(id) || offlinePending.has(id)) return;
+    if (!navigator.serviceWorker?.controller) { toast('Офлайн-режим недоступен'); return; }
+    offlinePending.add(id);
+    toast('📥 Сохраняю офлайн...');
+    navigator.serviceWorker.controller.postMessage({ type: 'SAVE_OFFLINE', payload: { trackId: id } });
+    // Метаданные сохраняем сразу оптимистично — если сохранение аудио
+    // провалится, handleOfflineSWMessage откатит эту запись обратно.
+    offlineMeta[id] = { id: t.id, title: t.title, artist: t.artist, artwork_url: t.artwork_url, duration: t.duration, source: t.source };
+    saveOfflineMeta();
+    updateOfflineMenuState();
+}
+
+function removeTrackOffline(id) {
+    id = String(id);
+    if (!isOfflineSaved(id)) return;
+    navigator.serviceWorker?.controller?.postMessage({ type: 'REMOVE_OFFLINE', payload: { trackId: id } });
+    delete offlineMeta[id];
+    saveOfflineMeta();
+    renderOfflineList();
+    updateOfflineMenuState();
+}
+
+function toggleOfflineCurrentTrack() {
+    if (qIdx < 0 || !queue[qIdx]) return;
+    const t = queue[qIdx];
+    if (isOfflineSaved(t.id)) removeTrackOffline(t.id);
+    else saveTrackOffline(t);
+}
+
+function updateOfflineMenuState() {
+    const label = document.getElementById('more-offline-label');
+    if (!label) return;
+    const saved = qIdx >= 0 && queue[qIdx] && isOfflineSaved(queue[qIdx].id);
+    label.textContent = saved ? 'Удалить из офлайна' : 'Сохранить офлайн';
+}
+
+function handleOfflineSWMessage(data) {
+    const { type, trackId, reason } = data;
+    if (type === 'OFFLINE_SAVED') {
+        offlinePending.delete(String(trackId));
+        toast('✅ Сохранено офлайн');
+        renderOfflineList();
+        updateOfflineMenuState();
+    } else if (type === 'OFFLINE_SAVE_FAILED') {
+        offlinePending.delete(String(trackId));
+        delete offlineMeta[String(trackId)]; // откатываем оптимистичную запись
+        saveOfflineMeta();
+        toast(reason === 'limit' ? '⚠️ Достигнут лимит офлайн-треков' : '⚠️ Не удалось сохранить офлайн');
+        updateOfflineMenuState();
+    } else if (type === 'OFFLINE_REMOVED') {
+        renderOfflineList();
+    } else if (type === 'OFFLINE_LIST_RESULT') {
+        // Убираем из метаданных записи, для которых аудио реально не лежит в SW
+        // (например, после переустановки SW или ручной чистки браузером)
+        const realIds = new Set((data.ids || []).map(String));
+        let changed = false;
+        Object.keys(offlineMeta).forEach(id => {
+            if (!realIds.has(id)) { delete offlineMeta[id]; changed = true; }
+        });
+        if (changed) saveOfflineMeta();
+        renderOfflineList();
+    }
+}
+
+function refreshOfflineList() {
+    navigator.serviceWorker?.controller?.postMessage({ type: 'LIST_OFFLINE' });
+    renderOfflineList(); // рендерим сразу из локальных метаданных, не дожидаясь ответа SW
+}
+
+function renderOfflineList() {
+    const titleEl = document.getElementById('offline-title');
+    const sizeHint = document.getElementById('offline-size-hint');
+    const ul = document.getElementById('offline-list');
+    if (!ul) return;
+    const tracks = Object.values(offlineMeta);
+    if (titleEl) titleEl.style.display = tracks.length ? '' : 'none';
+    if (sizeHint) sizeHint.textContent = tracks.length ? `· ${tracks.length}` : '';
+    ul.innerHTML = '';
+    if (!tracks.length) return;
+    appendTracksPaged(tracks, ul, 'offline');
 }
 
 // ── EQ + CROSSFADE Audio Graph ────────────────────────────────────────
