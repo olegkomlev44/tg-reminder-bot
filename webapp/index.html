@@ -10,9 +10,33 @@
   --bg: #0a0a0f; --surface: #14141a; --surface-alpha: rgba(20, 20, 26, 0.85);
   --border: rgba(255,255,255,0.08); --accent: #ffcc00; --accent-glow: rgba(255, 204, 0, 0.3);
   --text: #ffffff; --text-sec: rgba(255,255,255,0.6); --red: #ef4444;
+  /* Статусные цвета — отдельно от --accent, чтобы toast/бейджи не путались
+     визуально с обычными акцентными кнопками (play, активные табы и т.п.) */
+  --success: #34d399; --success-bg: rgba(52, 211, 153, 0.14);
+  --warning: #fb923c; --warning-bg: rgba(251, 146, 60, 0.14);
+  --danger: var(--red); --danger-bg: rgba(239, 68, 68, 0.14);
+  --info: #60a5fa; --info-bg: rgba(96, 165, 250, 0.14);
   --nav-height: 65px; --mini-player-height: 60px; --cover-color: #222233;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+/* ── Визуальный fallback тактильной отдаче ────────────────────────────
+   haptic() вызывается почти на каждом тапе, но на десктопе и части старых
+   Android-устройств вибрации нет — нажатие остаётся без всякой обратной
+   связи. Лёгкое сжатие при :active работает независимо от вибро и не
+   требует различать поддержку Vibration API. */
+button, .tab, .fav-btn, .del-btn, .q-remove, .mi-play, .fp-icon-btn,
+.more-menu-btn, .timer-btn, .empty-cta, .close-modal, .pls-new-fab,
+.pls-play-all-btn, .pls-confirm-btn, .pls-cancel-btn, .hist-sort-btn {
+  transition: transform 0.12s ease;
+}
+button:active, .tab:active, .fav-btn:active, .del-btn:active, .q-remove:active,
+.mi-play:active, .fp-icon-btn:active, .more-menu-btn:active, .timer-btn:active,
+.empty-cta:active, .close-modal:active, .pls-new-fab:active,
+.pls-play-all-btn:active, .pls-confirm-btn:active, .pls-cancel-btn:active,
+.hist-sort-btn:active {
+  transform: scale(0.96);
+}
 body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
 #app { display: flex; flex-direction: column; height: 100dvh; position: relative; }
 .pages { flex: 1; position: relative; overflow: hidden; width: 100%; }
@@ -62,10 +86,10 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 .prof-online-dot {
   position: absolute; bottom: 3px; right: 3px;
   width: 14px; height: 14px; border-radius: 50%;
-  background: #22c55e; border: 2px solid #0f0f15;
+  background: var(--success); border: 2px solid #0f0f15;
 }
 .prof-hero-info { flex: 1; min-width: 0; padding-bottom: 4px; }
-.prof-name { font-size: 22px; font-weight: 900; color: #fff; margin-bottom: 4px; }
+.prof-name { font-size: 22px; font-weight: 800; color: #fff; margin-bottom: 4px; }
 .prof-tg-handle { font-size: 13px; color: rgba(255,255,255,0.5); margin-bottom: 10px; }
 .prof-badges { display: flex; gap: 6px; flex-wrap: wrap; }
 .prof-badge {
@@ -230,10 +254,21 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 
 /* ── BOTTOM TABS ── */
 .tabs { position: absolute; bottom: 0; width: 100%; height: var(--nav-height); background: var(--surface-alpha); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--border); display: flex; justify-content: space-around; align-items: center; z-index: 20; }
-.tab { display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-sec); font-size: 10px; font-weight: 500; gap: 4px; cursor: pointer; transition: 0.2s; flex: 1; height: 100%; }
+.tab { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-sec); font-size: 10px; font-weight: 500; gap: 4px; cursor: pointer; transition: 0.2s; flex: 1; height: 100%; }
 .tab svg { width: 24px; height: 24px; fill: currentColor; transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1); }
 .tab.on { color: var(--text); }
 .tab.on svg { fill: var(--accent); transform: scale(1.1); }
+/* Индикатор активной вкладки — маленькая точка над иконкой. Без него
+   активную вкладку можно было определить только по цвету текста/иконки,
+   что периферийным зрением или при свайпе между табами считывается хуже,
+   чем отдельный акцентный маркер. */
+.tab::before {
+  content: ''; position: absolute; top: 6px; left: 50%;
+  width: 4px; height: 4px; border-radius: 50%; background: var(--accent);
+  transform: translateX(-50%) scale(0);
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.tab.on::before { transform: translateX(-50%) scale(1); }
 
 /* ── UI ELEMENTS ── */
 .sec { padding: 20px 16px 10px; font-size: 22px; font-weight: 700; display: flex; align-items: center; }
@@ -259,6 +294,24 @@ ul { list-style: none; }
 .queue-item .ttitle { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .queue-item .tartist { font-size: 12px; color: var(--text-sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cover { width: 48px; height: 48px; border-radius: 8px; background: var(--surface); overflow: hidden; position: relative; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 20px; }
+.cover-fallback { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+.src-badge { position: absolute; bottom: 2px; right: 2px; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid rgba(0,0,0,0.5); z-index: 2; }
+.src-badge.src-sc { background: #ff5500; }
+.src-badge.src-yt { background: #ff0000; }
+
+/* ── "Сейчас играет" — анимированный эквалайзер поверх обложки ──────────
+   Раньше активный трек в списке отличался только цветом текста заголовка —
+   легко пропустить взглядом. Оверлей с пульсирующими полосками — классический
+   паттерн (Spotify/Apple Music), который считывается мгновенно. */
+.now-eq { display: none; position: absolute; inset: 0; z-index: 3; align-items: flex-end; justify-content: center; gap: 3px; padding-bottom: 8px; background: rgba(0,0,0,0.45); }
+.now-eq span { width: 3px; background: var(--accent); border-radius: 2px; animation: now-eq-bounce 0.9s ease-in-out infinite; }
+.now-eq span:nth-child(1) { height: 40%; animation-delay: 0s; }
+.now-eq span:nth-child(2) { height: 70%; animation-delay: 0.2s; }
+.now-eq span:nth-child(3) { height: 50%; animation-delay: 0.4s; }
+.now-eq span:nth-child(4) { height: 85%; animation-delay: 0.1s; }
+@keyframes now-eq-bounce { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
+.track.now .cover .now-eq, .queue-item.now .cover .now-eq { display: flex; }
+body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY(0.35); }
 .cover img { width: 100%; height: 100%; object-fit: cover; }
 .tmeta { flex: 1; min-width: 0; }
 .ttitle { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); transition: color 0.2s;}
@@ -457,7 +510,7 @@ ul { list-style: none; }
 }
 .party-title {
   display: flex; align-items: center; gap: 10px;
-  font-size: 20px; font-weight: 900;
+  font-size: 20px; font-weight: 700;
 }
 .party-title-emoji { font-size: 24px; }
 .party-live-dot {
@@ -773,16 +826,29 @@ ul { list-style: none; }
 .fp-times { display: flex; justify-content: space-between; font-size: 12px; color: rgba(255,255,255,0.5); margin-top: 10px; padding: 0 30px; font-variant-numeric: tabular-nums;}
 
 .fp-ctrl { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px 20px; }
-.fp-ctrl-btn { background: none; border: none; color: var(--text); cursor: pointer; padding: 10px; display: flex; align-items: center; transition: transform 0.2s; }
+.fp-ctrl-btn { position: relative; background: none; border: none; color: var(--text); cursor: pointer; padding: 10px; display: flex; align-items: center; transition: transform 0.2s; }
 .fp-ctrl-btn:active { transform: scale(0.8); }
 .fp-ctrl-btn svg { width: 32px; height: 32px; fill: currentColor; }
 .fp-ctrl-btn.sec-btn svg { width: 24px; height: 24px; fill: rgba(255,255,255,0.5); }
 .fp-ctrl-btn.sec-btn.active svg { fill: var(--text); }
+.rep-one-badge { display: none; position: absolute; top: 2px; right: 2px; background: var(--accent); color: #000; font-size: 9px; font-weight: 800; line-height: 1; width: 13px; height: 13px; border-radius: 50%; align-items: center; justify-content: center; }
+#btn-rep.rep-one .rep-one-badge { display: flex; }
 .fp-play { background: var(--accent); color: #000; width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: transform 0.1s; }
 .fp-play svg { width: 32px; height: 32px; fill: #000; }
 .fp-play:active { transform: scale(0.9); }
 .fp-bottom-banner { margin: 0 20px 30px; padding: 12px; border-radius: 12px; text-align: center; background: linear-gradient(90deg, rgba(255,255,255,0.05), rgba(255,255,255,0.1)); font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.8); cursor: pointer; }
 .fp-bottom-banner span { color: #fff; font-weight: 700; }
+
+/* ── Мини-превью очереди в full-player ── */
+.fp-upnext { margin: 4px 20px 24px; padding: 12px 14px; border-radius: 14px; background: rgba(255,255,255,0.05); cursor: pointer; }
+.fp-upnext:active { background: rgba(255,255,255,0.08); }
+.fp-upnext-label { font-size: 11px; color: var(--text-sec); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+.fp-upnext-list { display: flex; flex-direction: column; gap: 10px; }
+.fp-upnext-item { display: flex; align-items: center; gap: 10px; }
+.fp-upnext-item .cover { width: 34px; height: 34px; border-radius: 6px; font-size: 14px; }
+.fp-upnext-meta { flex: 1; min-width: 0; }
+.fp-upnext-title { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fp-upnext-artist { font-size: 11px; color: var(--text-sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── MODALS ── */
 .sheet-modal { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-radius: 24px 24px 0 0; padding: 24px; z-index: 200; transform: translateY(100%); transition: transform 0.38s cubic-bezier(0.22, 1, 0.36, 1); box-shadow: 0 -10px 40px rgba(0,0,0,0.8); display: flex; flex-direction: column; max-height: 85vh;}
@@ -791,9 +857,15 @@ ul { list-style: none; }
 .modal-overlay.vis { opacity: 1; pointer-events: all; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; font-size: 18px; font-weight: 700; flex-shrink: 0; }
 .close-modal { background: none; border: none; color: var(--text-sec); font-size: 28px; cursor: pointer; line-height: 1; }
+.modal-grabber { width: 36px; height: 4px; border-radius: 3px; background: rgba(255,255,255,0.25); margin: 0 auto 14px; cursor: grab; touch-action: none; }
 
 .eq-presets { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 16px; scrollbar-width: none; }
 .eq-presets::-webkit-scrollbar { display: none; }
+
+/* ── Живая визуализация спектра (реальные данные AnalyserNode) ── */
+.eq-visualizer { display: flex; gap: 2px; align-items: flex-end; height: 60px; margin-bottom: 18px; padding: 0 2px; border-radius: 10px; overflow: hidden; background: rgba(255,255,255,0.03); }
+.eq-viz-bar { flex: 1; min-width: 2px; background: linear-gradient(to top, var(--accent), rgba(255,204,0,0.35)); border-radius: 2px 2px 0 0; height: 2%; transition: height 0.06s linear; }
+
 .eq-bars { 
   display: flex; gap: 6px; align-items: flex-end; 
   justify-content: space-between; height: 160px; margin-top: 15px; 
@@ -870,7 +942,7 @@ ul { list-style: none; }
   margin-top: -2px;
 }
 .ac-name {
-  font-size: 28px; font-weight: 900; line-height: 1.1;
+  font-size: 28px; font-weight: 800; line-height: 1.1;
   margin-bottom: 4px;
 }
 .ac-meta { font-size: 13px; color: var(--text-sec); margin-bottom: 18px; }
@@ -1325,10 +1397,29 @@ ul { list-style: none; }
 .spin { display: flex; justify-content: center; padding: 40px; }
 .spin::after { content: ''; width: 30px; height: 30px; border: 3px solid rgba(255,255,255,0.1); border-top-color: var(--accent); border-radius: 50%; animation: sp 0.8s linear infinite; }
 @keyframes sp { to { transform: rotate(360deg); } }
+
+/* ── Skeleton-загрузка списков треков (вместо крутилки) ──────────────── */
+/* Форма повторяет реальную карточку .track — момент подмены на реальные
+   данные не "прыгает" по высоте/layout, а сразу ощущается быстрее спиннера. */
+.skeleton-track { display: flex; align-items: center; gap: 12px; padding: 10px 16px; margin: 0 8px; pointer-events: none; }
+.skeleton-block { border-radius: 8px; background: linear-gradient(90deg, rgba(255,255,255,0.06) 25%, rgba(255,255,255,0.12) 37%, rgba(255,255,255,0.06) 63%); background-size: 400% 100%; animation: skeleton-shimmer 1.4s ease infinite; }
+.skeleton-track .skeleton-cover { width: 48px; height: 48px; flex-shrink: 0; }
+.skeleton-track .skeleton-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.skeleton-track .skeleton-line-title { height: 13px; width: 62%; border-radius: 4px; }
+.skeleton-track .skeleton-line-artist { height: 11px; width: 38%; border-radius: 4px; }
+@keyframes skeleton-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+
 .empty { text-align: center; padding: 60px 20px; color: var(--text-sec); }
 .empty-ico { font-size: 48px; margin-bottom: 16px; filter: grayscale(1); opacity: 0.5; }
+.empty-cta { margin-top: 18px; background: var(--accent); color: #000; border: none; border-radius: 50px; padding: 11px 22px; font-size: 14px; font-weight: 700; cursor: pointer; }
+.empty-cta:active { opacity: 0.85; }
+.hist-empty .empty-cta { margin-top: 18px; }
 
-#toast { position: fixed; top: 20px; left: 50%; transform: translate(-50%, -20px); background: var(--surface); color: var(--text); padding: 12px 24px; border-radius: 20px; font-size: 14px; font-weight: 500; opacity: 0; pointer-events: none; transition: 0.3s; z-index: 300; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); white-space: nowrap; }
+#toast { position: fixed; top: 20px; left: 50%; transform: translate(-50%, -20px); background: var(--surface); color: var(--text); padding: 12px 24px; border-radius: 20px; font-size: 14px; font-weight: 500; opacity: 0; pointer-events: none; transition: 0.3s; z-index: 300; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); border-left: 3px solid transparent; white-space: nowrap; }
+#toast.toast-success { border-left-color: var(--success); }
+#toast.toast-warning { border-left-color: var(--warning); }
+#toast.toast-error { border-left-color: var(--danger); }
+#toast.toast-info { border-left-color: var(--info); }
 
 /* ── Плашка "продолжить с другого устройства" ── */
 .continue-playback-bar { position: fixed; left: 12px; right: 12px; bottom: calc(var(--nav-height) + var(--mini-player-height) + 12px); background: var(--surface); border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; z-index: 250; box-shadow: 0 10px 30px rgba(0,0,0,0.5); transform: translateY(20px); opacity: 0; pointer-events: none; transition: 0.3s; }
@@ -1562,11 +1653,14 @@ audio {
    PLAYLISTS TAB — new design
 ═══════════════════════════════════════════ */
 .pls-page-header {
+  position: sticky; top: 0; z-index: 10;
   display: flex; align-items: center; justify-content: space-between;
   padding: 20px 16px 12px;
+  background: linear-gradient(to bottom, var(--bg) 75%, transparent);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
 }
 .pls-page-title {
-  font-size: 26px; font-weight: 900; color: var(--text);
+  font-size: 26px; font-weight: 700; color: var(--text);
 }
 .pls-new-fab {
   display: flex; align-items: center; gap: 6px;
@@ -1694,7 +1788,7 @@ audio {
 }
 .pls-detail-info { text-align: center; width: 100%; }
 .pls-detail-name {
-  font-size: 22px; font-weight: 900; color: var(--text);
+  font-size: 22px; font-weight: 700; color: var(--text);
   margin-bottom: 4px;
 }
 .pls-detail-count { font-size: 13px; color: var(--text-sec); margin-bottom: 14px; }
@@ -1721,11 +1815,14 @@ audio {
    HISTORY TAB — new design
 ═══════════════════════════════════════════ */
 .hist-page-header {
+  position: sticky; top: 0; z-index: 10;
   display: flex; align-items: flex-start; justify-content: space-between;
   padding: 20px 16px 12px;
+  background: linear-gradient(to bottom, var(--bg) 75%, transparent);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
 }
 .hist-page-title {
-  font-size: 26px; font-weight: 900; color: var(--text);
+  font-size: 26px; font-weight: 700; color: var(--text);
   margin-bottom: 3px;
 }
 .hist-page-sub { font-size: 13px; color: var(--text-sec); }
@@ -2312,7 +2409,7 @@ audio {
     <button class="fp-ctrl-btn" onclick="haptic();playPrev()"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
     <button class="fp-play" id="fp-play" onclick="haptic();togglePlay()"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
     <button class="fp-ctrl-btn" onclick="haptic();playNext()"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
-    <button class="fp-ctrl-btn sec-btn" id="btn-rep" onclick="haptic();toggleRepeat()"><svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg></button>
+    <button class="fp-ctrl-btn sec-btn" id="btn-rep" onclick="haptic();toggleRepeat()"><svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg><span class="rep-one-badge" id="rep-one-badge">1</span></button>
   </div>
 
   <!-- Lyrics toggle button row (как в ЯМ — под кнопками) -->
@@ -2331,22 +2428,33 @@ audio {
     </button>
   </div>
 
+  <!-- Мини-превью очереди: следующие 1-2 трека без открытия модалки —
+       тап всё равно открывает полную очередь для перестановки/удаления. -->
+  <div class="fp-upnext" id="fp-upnext" onclick="haptic();openQueueModal()" style="display:none">
+    <div class="fp-upnext-label">Далее</div>
+    <div class="fp-upnext-list" id="fp-upnext-list"></div>
+  </div>
+
 </div>
 
 <div class="modal-overlay" id="overlay" onclick="closeModals()"></div>
 
 <div class="sheet-modal" id="eq-panel">
+  <div class="modal-grabber"></div>
   <div class="modal-head"><span>🎚 Эквалайзер</span><button class="close-modal" onclick="closeModals()">✕</button></div>
+  <div class="eq-visualizer" id="eq-visualizer"></div>
   <div class="eq-presets" id="eq-presets"></div><div class="eq-bars" id="eq-bars"></div>
 </div>
 
 <div class="sheet-modal" id="pl-modal">
+  <div class="modal-grabber"></div>
   <div class="modal-head"><span>В плейлист</span><button class="close-modal" onclick="closeModals()">✕</button></div>
   <div id="pl-list-modal"></div>
   <div class="pl-new-wrap"><input type="text" id="pl-new-name" placeholder="Новый..."><button onclick="haptic();createNewPlaylist()">Создать</button></div>
 </div>
 
 <div class="sheet-modal" id="timer-modal">
+  <div class="modal-grabber"></div>
   <div class="modal-head"><span>🌙 Таймер сна</span><button class="close-modal" onclick="closeModals()">✕</button></div>
   <button class="timer-btn" onclick="haptic();setSleepTimer(15)">15 минут</button>
   <button class="timer-btn" onclick="haptic();setSleepTimer(30)">30 минут</button>
@@ -2357,6 +2465,7 @@ audio {
 
 <!-- More menu (три точки) -->
 <div class="sheet-modal" id="more-modal">
+  <div class="modal-grabber"></div>
   <div class="modal-head"><span>Ещё</span><button class="close-modal" onclick="closeModals()">✕</button></div>
   <button class="more-menu-btn" onclick="haptic();closeModals();openEQ()">
     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>
@@ -2389,6 +2498,7 @@ audio {
 </div>
 
 <div class="sheet-modal" id="queue-modal">
+  <div class="modal-grabber"></div>
   <div class="modal-head"><span>Очередь (<span id="queue-count">0</span>)</span><button class="close-modal" onclick="closeModals()">✕</button></div>
   <div style="overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch;">
     <ul id="queue-list" style="list-style:none;padding:0;margin:0;"></ul>
@@ -2403,7 +2513,7 @@ audio {
       <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
     </button>
     <div style="position:absolute;bottom:0;left:0;right:0;padding:0 20px 16px;">
-      <div class="ac-name" id="ac-name" style="font-size:28px;font-weight:900;line-height:1.1;color:#fff;text-shadow:0 2px 12px rgba(0,0,0,0.6);">Артист</div>
+      <div class="ac-name" id="ac-name" style="font-size:28px;font-weight:800;line-height:1.1;color:#fff;text-shadow:0 2px 12px rgba(0,0,0,0.6);">Артист</div>
       <div class="ac-meta" id="ac-meta" style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;"></div>
     </div>
   </div>
@@ -2629,7 +2739,7 @@ const aud = document.getElementById('aud');
 
 // ── CACHE & STATE ──
 let allData = JSON.parse(localStorage.getItem('music_data')) || { favs: [], history: [], playlists: {} };
-let queue = []; let qIdx = -1; let shuffle = false; let repeat = false;
+let queue = []; let qIdx = -1; let shuffle = false; let repeatMode = 0; // 0=выкл, 1=повтор очереди, 2=повтор трека
 let waveOffset = 0; let waveLoading = false; let currentPl = null;
 let preloadedTrack = null;
 let _gaplessBufReady = false;  // audBuf готов к немедленному воспроизведению
@@ -2914,7 +3024,7 @@ function updateProfileUI() {
       const card = document.createElement('div');
       card.className = 'prof-recent-card';
       const coverContent = t.artwork_url
-        ? `<img src="${esc(t.artwork_url)}" loading="lazy" onerror="this.parentElement.innerHTML='🎵'">`
+        ? `<img src="${esc(t.artwork_url)}" loading="lazy" data-cf-title="${esc(t.title||'')}" data-cf-artist="${esc(t.artist||'')}" onerror="coverImgFallback(this)">`
         : `<div class="prof-recent-emoji">🎵</div>`;
       card.innerHTML = `
         <div class="prof-recent-cover">${coverContent}</div>
@@ -2976,18 +3086,23 @@ function renderWaveBigCards(tracks) {
 
 async function loadWave(reset = false) {
   if (waveLoading) return;
-  if (reset) { waveOffset = 0; document.getElementById('wave-list').innerHTML = ''; document.getElementById('wave-big-cards').innerHTML = ''; }
+  if (reset) { waveOffset = 0; document.getElementById('wave-list').innerHTML = skeletonTracksHTML(6); document.getElementById('wave-big-cards').innerHTML = ''; }
   waveLoading = true; document.getElementById('wave-more').style.display = 'flex';
   try {
     const r = await fetch(`/api/wave?limit=20&offset=${waveOffset}`, {headers:{Authorization: authStr}});
     const tracks = await r.json();
+    if (reset) document.getElementById('wave-list').innerHTML = ''; // убираем skeleton перед вставкой реальных данных
     if (tracks.length) {
       // Первая загрузка — заполняем большие карточки
       if (waveOffset === 0) renderWaveBigCards(tracks);
       appendTracks(tracks, document.getElementById('wave-list'), 'wave');
       waveOffset += tracks.length;
+    } else if (reset) {
+      document.getElementById('wave-list').innerHTML = `<div class="empty"><div class="empty-ico">🌊</div><p>Пока нечего посоветовать —<br>послушай что-нибудь или добавь в избранное</p></div>`;
     }
-  } catch (e) {}
+  } catch (e) {
+    if (reset) document.getElementById('wave-list').innerHTML = `<div class="empty"><div class="empty-ico">⚠️</div><p>Не удалось загрузить волну</p></div>`;
+  }
   waveLoading = false; document.getElementById('wave-more').style.display = 'none';
 }
 pagesEl.addEventListener('scroll', function(e) { if (e.target.id === 'page-wave' && e.target.scrollTop + e.target.clientHeight >= e.target.scrollHeight - 200) loadWave(); }, true);
@@ -3020,14 +3135,73 @@ async function removeFromPlaylist(plName, trackId) {
 
 // ── RENDER ENGINE ──
 function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── Градиентная заглушка обложки (вместо плоской ноты-эмодзи) ───────────
+// У трека без artwork_url раньше везде была одна и та же "🎵" — визуально
+// неотличимо друг от друга. Вместо этого генерируем стабильный (по хэшу
+// title+artist) двухцветный градиент — один и тот же трек всегда получает
+// один и тот же цвет, а разные треки без обложек визуально различаются.
+const COVER_PALETTES = [
+  ['#ff6b6b', '#feca57'], ['#48dbfb', '#0abde3'], ['#1dd1a1', '#10ac84'],
+  ['#f368e0', '#ff9ff3'], ['#5f27cd', '#a29bfe'], ['#ff9f43', '#ee5253'],
+  ['#00d2d3', '#54a0ff'], ['#c8d6e5', '#8395a7'], ['#ffcc00', '#ff9500'],
+  ['#576574', '#222f3e'],
+];
+function _hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h |= 0; }
+  return Math.abs(h);
+}
+function coverFallbackHTML(title, artist) {
+  const key = `${title || ''}::${artist || ''}`;
+  const [c1, c2] = COVER_PALETTES[_hashStr(key) % COVER_PALETTES.length];
+  return `<div class="cover-fallback" style="background:linear-gradient(135deg, ${c1}, ${c2});"><svg viewBox="0 0 24 24" width="46%" height="46%" fill="rgba(255,255,255,0.85)"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg></div>`;
+}
+// Вызывается из onerror сломанной <img> — читает title/artist из data-атрибутов
+// (без них пришлось бы городить экранирование кавычек прямо в onerror="").
+function coverImgFallback(imgEl) {
+  imgEl.parentElement.innerHTML = coverFallbackHTML(imgEl.dataset.cfTitle, imgEl.dataset.cfArtist);
+}
+
+// Skeleton-заглушка списка треков на время загрузки (замена спиннеру) —
+// повторяет реальную разметку .track, поэтому подмена на настоящие данные
+// не дёргает layout.
+function skeletonTracksHTML(count) {
+  const one = `<li class="skeleton-track"><div class="skeleton-block skeleton-cover"></div><div class="skeleton-lines"><div class="skeleton-block skeleton-line-title"></div><div class="skeleton-block skeleton-line-artist"></div></div></li>`;
+  return one.repeat(count || 6);
+}
+
+// Мини-превью "Далее" в full-player — следующие 1-2 трека без открытия
+// модалки очереди. Вызывается при каждой смене трека и любой мутации queue.
+function renderUpNext() {
+  const wrap = document.getElementById('fp-upnext');
+  const list = document.getElementById('fp-upnext-list');
+  if (!wrap || !list) return;
+  const upcoming = queue.slice(qIdx + 1, qIdx + 3);
+  if (!upcoming.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  list.innerHTML = upcoming.map(t => {
+    const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : coverFallbackHTML(t.title, t.artist);
+    return `<div class="fp-upnext-item"><div class="cover">${cover}${sourceBadgeHTML(t.source)}</div><div class="fp-upnext-meta"><div class="fp-upnext-title">${esc(t.title)}</div><div class="fp-upnext-artist">${esc(t.artist)}</div></div></div>`;
+  }).join('');
+}
 function decodeTrackJson(datasetJson) { return JSON.parse(datasetJson.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'")); }
 function isFav(id) { return allData.favs.some(t => String(t.id) === String(id)); }
+
+// Маленький цветной бейдж источника трека на обложке (оранжевый SoundCloud,
+// красный YouTube) — считывается с одного взгляда, без чтения текста.
+function sourceBadgeHTML(source) {
+  if (source === 'YouTube Music') return '<span class="src-badge src-yt" title="YouTube Music"></span>';
+  if (source === 'SoundCloud') return '<span class="src-badge src-sc" title="SoundCloud"></span>';
+  return '';
+}
 
 function makeItem(t, ctx) {
   const li = document.createElement('li'); li.className = 'track'; li.dataset.id = t.id;
   const trackJson = esc(JSON.stringify(t)); li.dataset.json = trackJson; 
   const loved = isFav(t.id);
-  const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : '🎵';
+  const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : coverFallbackHTML(t.title, t.artist);
+  const badge = sourceBadgeHTML(t.source);
   const durationHtml = t.duration ? `<div class="tdur">${esc(t.duration)}</div>` : '';
 
   let rightBtn = ctx === 'playlist' 
@@ -3036,7 +3210,7 @@ function makeItem(t, ctx) {
     ? `<button class="del-btn" onclick="haptic();event.stopPropagation();removeTrackOffline('${esc(String(t.id))}')"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg></button>`
     : `<button class="fav-btn ${loved ? 'loved' : ''}" onclick="haptic();event.stopPropagation();favToggle(this, '${trackJson}')"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></button>`;
 
-  li.innerHTML = `<div class="cover">${cover}</div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><div class="tright">${durationHtml}${rightBtn}</div>`;
+  li.innerHTML = `<div class="cover">${cover}${badge}<div class="now-eq"><span></span><span></span><span></span><span></span></div></div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><div class="tright">${durationHtml}${rightBtn}</div>`;
   li.addEventListener('click', () => {
     if (ctx === 'wave') { queue = Array.from(document.getElementById('wave-list').children).map(el => decodeTrackJson(el.dataset.json)); }
     else if (ctx === 'search') { queue = Array.from(document.getElementById('search-list').children).map(el => decodeTrackJson(el.dataset.json)); }
@@ -3093,12 +3267,16 @@ function appendTracksPaged(tracks, ul, ctx, animBase) {
 }
 
 function appendTracks(tracks, ul, ctx) { appendTracksPaged(tracks, ul, ctx); }
-function renderList(tracks, ulId, ctx, emptyText, emptyIcon) {
+function renderList(tracks, ulId, ctx, emptyText, emptyIcon, emptyCta) {
   const ul = document.getElementById(ulId); ul.innerHTML = '';
-  if (!tracks || !tracks.length) { ul.innerHTML = `<div class="empty"><div class="empty-ico">${emptyIcon}</div><p>${emptyText}</p></div>`; return; }
+  if (!tracks || !tracks.length) {
+    const cta = emptyCta ? `<button class="empty-cta" onclick="haptic();${emptyCta.action}">${emptyCta.label}</button>` : '';
+    ul.innerHTML = `<div class="empty"><div class="empty-ico">${emptyIcon}</div><p>${emptyText}</p>${cta}</div>`;
+    return;
+  }
   appendTracks(tracks, ul, ctx); updateAllHeartButtons();
 }
-function renderFavs() { renderList(allData.favs, 'favs-list', 'fav', 'Добавляй треки, чтобы они появились здесь.', '🖤'); if(document.getElementById('stat-favs')) document.getElementById('stat-favs').textContent = allData.favs.length; }
+function renderFavs() { renderList(allData.favs, 'favs-list', 'fav', 'Добавляй треки, чтобы они появились здесь.', '🖤', { label: '🔍 Найти музыку', action: "nav('search')" }); if(document.getElementById('stat-favs')) document.getElementById('stat-favs').textContent = allData.favs.length; }
 
 // ── HISTORY: timeline grouped render ──
 
@@ -3113,12 +3291,12 @@ function renderHistory() {
   const sub = document.getElementById('hist-page-sub');
   if (sub) sub.textContent = total + ' ' + pluralRu(total, 'трек', 'трека', 'треков');
   const container = document.getElementById('hist-groups');
-  if (!container) { renderList(allData.history, 'hist-list', 'history', 'Тут пусто. Послушай что-нибудь.', '🕒'); return; }
+  if (!container) { renderList(allData.history, 'hist-list', 'history', 'Тут пусто. Послушай что-нибудь.', '🕒', { label: '🔍 Найти музыку', action: "nav('search')" }); return; }
   if (document.getElementById('stat-hist')) document.getElementById('stat-hist').textContent = total;
 
   const tracks = histSortDesc ? [...(allData.history || [])] : [...(allData.history || [])].reverse();
   if (!tracks.length) {
-    container.innerHTML = `<div class="hist-empty"><div class="hist-empty-ico">🎵</div><p>Послушай что-нибудь,<br>и треки появятся здесь</p></div>`;
+    container.innerHTML = `<div class="hist-empty"><div class="hist-empty-ico">🎵</div><p>Послушай что-нибудь,<br>и треки появятся здесь</p><button class="empty-cta" onclick="haptic();nav('search')">🔍 Найти музыку</button></div>`;
     return;
   }
 
@@ -3222,7 +3400,7 @@ function openPlsDetail(name) {
   const ul = document.getElementById('pl-list');
   ul.innerHTML = '';
   if (!tracks.length) {
-    ul.innerHTML = `<div class="empty"><div class="empty-ico">🎵</div><p>Плейлист пуст</p></div>`;
+    ul.innerHTML = `<div class="empty"><div class="empty-ico">🎵</div><p>Плейлист пуст</p><button class="empty-cta" onclick="haptic();nav('search')">🔍 Найти треки</button></div>`;
   } else {
     appendTracks(tracks, ul, 'playlist'); updateAllHeartButtons();
   }
@@ -3276,7 +3454,7 @@ function renderPlaylists() {
     if (!grid) return;
     grid.innerHTML = '';
     if (!names.length) {
-      grid.innerHTML = `<div class="pls-grid-empty"><div class="pls-grid-empty-ico">🎵</div><p>Нет плейлистов.<br>Создай первый!</p></div>`;
+      grid.innerHTML = `<div class="pls-grid-empty"><div class="pls-grid-empty-ico">🎵</div><p>Нет плейлистов.<br>Создай первый!</p><button class="empty-cta" onclick="haptic();showCreatePlaylist()">➕ Создать плейлист</button></div>`;
       return;
     }
     names.forEach((n, i) => {
@@ -3370,7 +3548,7 @@ async function doSearch() {
   const meta = document.getElementById('srch-results-meta');
   document.getElementById('srch-empty-state').style.display = 'none';
   document.getElementById('srch-results').style.display = 'block';
-  ul.innerHTML = '<li class="spin"></li>';
+  ul.innerHTML = skeletonTracksHTML(6);
   meta.textContent = '';
   try {
     const r = await fetch('/api/search?q=' + encodeURIComponent(q));
@@ -3457,7 +3635,7 @@ function openShareTrackSheet(t) {
     <div style="padding:8px 16px 0;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:rgba(255,255,255,0.4)">Трек</div>
     <div style="display:flex;align-items:center;gap:12px;padding:10px 16px 14px;border-bottom:1px solid rgba(255,255,255,0.07)">
       <div style="width:44px;height:44px;border-radius:8px;background:#222;overflow:hidden;flex-shrink:0">
-        ${t.artwork_url ? `<img src="${esc(t.artwork_url)}" style="width:100%;height:100%;object-fit:cover">` : '🎵'}
+        ${t.artwork_url ? `<img src="${esc(t.artwork_url)}" style="width:100%;height:100%;object-fit:cover">` : coverFallbackHTML(t.title, t.artist)}
       </div>
       <div>
         <div style="font-size:15px;font-weight:700">${esc(t.title||'')}</div>
@@ -3623,7 +3801,7 @@ function playTrack(t, dir = 1) {
     ['mini-artist', 'fp-artist', 'wa-huge-artist'].forEach(id => document.getElementById(id).textContent = t.artist);
     // (banner title removed)
 
-    const imgHtml = t.artwork_url ? `<img src="${esc(t.artwork_url)}">` : '🎵';
+    const imgHtml = t.artwork_url ? `<img src="${esc(t.artwork_url)}">` : coverFallbackHTML(t.title, t.artist);
     document.getElementById('mini-cover').innerHTML = imgHtml; coverEl.innerHTML = imgHtml;
     
     const fpAvatar = document.getElementById('fp-avatar');
@@ -3690,6 +3868,7 @@ async function logHistoryToServer(track) {
     }
   } catch(e) {}
   try { await fetch('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr }, body: JSON.stringify({ track_data: track }) }); } catch (e) {}
+  renderUpNext();
   }
 
 function setPlayState(playing) {
@@ -3697,13 +3876,22 @@ function setPlayState(playing) {
   if (!playing && document.getElementById('mini-player').style.transform !== '') { document.getElementById('mini-player').classList.add('vis'); }
   document.getElementById('mini-play').innerHTML = playing ? svgPause : svgPlay; document.getElementById('wa-play').innerHTML = playing ? svgPause : svgPlay; document.getElementById('fp-play').innerHTML = playing ? svgPause : svgPlay;
   if(playing) { document.getElementById('fp-cover').classList.remove('paused'); } else { document.getElementById('fp-cover').classList.add('paused'); }
+  // Останавливаем анимацию эквалайзера на обложках списков, когда плеер на
+  // паузе — иначе полоски "играют" визуально даже когда трек стоит.
+  document.body.classList.toggle('audio-paused', !playing);
 }
 
 function togglePlay() { aud.paused ? (aud.play(), setPlayState(true)) : (aud.pause(), setPlayState(false)); }
 function playPrev() { if (!queue.length) return; if (aud.currentTime > 3) { aud.currentTime = 0; return; } qIdx = (qIdx - 1 + queue.length) % queue.length; playTrack(queue[qIdx], -1); }
 function playNext() { if (!queue.length) return; if (shuffle) qIdx = Math.floor(Math.random() * queue.length); else qIdx = (qIdx + 1) % queue.length; playTrack(queue[qIdx], 1); if (qIdx >= queue.length - 3 && document.getElementById('page-wave').classList.contains('on')) loadWave(); if (radioMode && qIdx >= queue.length - 3) loadRadioMore(); }
 function toggleShuffle() { shuffle = !shuffle; document.getElementById('btn-shuf').classList.toggle('active', shuffle); toast(shuffle ? 'Перемешивание вкл' : 'Перемешивание выкл'); }
-function toggleRepeat() { repeat = !repeat; document.getElementById('btn-rep').classList.toggle('active', repeat); toast(repeat ? 'Повтор вкл' : 'Повтор выкл'); }
+function toggleRepeat() {
+  repeatMode = (repeatMode + 1) % 3;
+  const btn = document.getElementById('btn-rep');
+  btn.classList.toggle('active', repeatMode !== 0);
+  btn.classList.toggle('rep-one', repeatMode === 2);
+  toast(repeatMode === 0 ? 'Повтор выкл' : repeatMode === 1 ? 'Повтор очереди' : 'Повтор трека');
+}
 
 // ── РАДИО: бесконечный автоплей по жанру/настроению от текущего трека ──
 // В отличие от "Волны" (использует избранное+историю пользователя целиком),
@@ -3714,9 +3902,9 @@ let radioMode = false;
 function toggleRadioMode() { radioMode ? stopRadioMode() : startRadioFromCurrent(); }
 
 async function startRadioFromCurrent() {
-  if (qIdx < 0 || !queue[qIdx]) { toast('Сначала запусти трек'); return; }
+  if (qIdx < 0 || !queue[qIdx]) { toast('Сначала запусти трек', 'warning'); return; }
   radioMode = true;
-  toast('📻 Радио включено — очередь будет пополняться сама');
+  toast('📻 Радио включено — очередь будет пополняться сама', 'success');
   await loadRadioMore(queue[qIdx], true);
 }
 
@@ -3734,13 +3922,14 @@ async function loadRadioMore(seedTrack, isFirst) {
       limit: '10', exclude_id: String(seed.id || ''),
     });
     const res = await fetch('/api/radio?' + params.toString(), { headers: { 'Authorization': authStr } });
-    if (!res.ok) { if (isFirst) toast('Радио временно недоступно'); return; }
+    if (!res.ok) { if (isFirst) toast('Радио временно недоступно', 'warning'); return; }
     const tracks = await res.json();
     if (!Array.isArray(tracks) || !tracks.length) { if (isFirst) toast('Не нашлось похожих треков'); return; }
     const existingIds = new Set(queue.map(t => String(t.id)));
     const newOnes = tracks.filter(t => !existingIds.has(String(t.id)));
     queue.push(...newOnes);
-  } catch (e) { console.warn('[radio] load failed', e); if (isFirst) toast('Радио временно недоступно'); }
+    renderUpNext();
+  } catch (e) { console.warn('[radio] load failed', e); if (isFirst) toast('Радио временно недоступно', 'warning'); }
 }
 
 function updateRadioMenuState() {
@@ -3765,8 +3954,8 @@ function renderQueueList() {
     const li = document.createElement('li');
     li.className = 'queue-item' + (i === qIdx ? ' now' : '');
     li.dataset.idx = i;
-    const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}">` : '🎵';
-    li.innerHTML = `<div class="q-handle">⠿</div><div class="cover">${cover}</div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><button class="q-remove" aria-label="Убрать из очереди">✕</button>`;
+    const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}">` : coverFallbackHTML(t.title, t.artist);
+    li.innerHTML = `<div class="q-handle">⠿</div><div class="cover">${cover}${sourceBadgeHTML(t.source)}<div class="now-eq"><span></span><span></span><span></span><span></span></div></div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><button class="q-remove" aria-label="Убрать из очереди">✕</button>`;
     li.addEventListener('click', (e) => {
       if (e.target.closest('.q-handle') || e.target.closest('.q-remove')) return;
       qIdx = i; haptic(); playTrack(queue[qIdx], 1); renderQueueList();
@@ -3784,6 +3973,7 @@ function removeFromQueue(i) {
   queue.splice(i, 1);
   if (i < qIdx) qIdx--;
   renderQueueList();
+  renderUpNext();
 }
 
 let _qDrag = null;
@@ -3828,6 +4018,7 @@ function startQueueDrag(e, li) {
     _qDrag = null;
     haptic();
     renderQueueList();
+    renderUpNext();
   };
   document.addEventListener('pointermove', onMove);
   document.addEventListener('pointerup', onUp);
@@ -3866,7 +4057,7 @@ aud.addEventListener('timeupdate', () => {
 
   // ── CROSSFADE (начинаем за XFADE_SECS секунд до конца) ──────────
   if (
-      !repeat &&
+      repeatMode !== 2 &&
       !_xfadeActive &&
       _gaplessBufReady &&
       queue[qIdx+1] &&
@@ -3881,7 +4072,7 @@ aud.addEventListener('timeupdate', () => {
   syncPlaybackState(false);
 });
 aud.addEventListener('ended', () => {
-    if (repeat) { aud.currentTime = 0; aud.play(); return; }
+    if (repeatMode === 2) { aud.currentTime = 0; aud.play(); return; }
     if (sleepTimerType === 'track') executeSleepTimer();
     // Если crossfade уже идёт — ended придёт сам, не делаем двойной playNext
     if (_xfadeActive) { _xfadeActive = false; return; }
@@ -3901,7 +4092,7 @@ aud.addEventListener('ended', () => {
         // Обновляем UI (обложка, тайтл, история)
         ['mini-title','fp-title','wa-pill-title'].forEach(id => document.getElementById(id).textContent = nextT.title);
         ['mini-artist','fp-artist','wa-huge-artist'].forEach(id => document.getElementById(id).textContent = nextT.artist);
-        const imgH = nextT.artwork_url ? `<img src="${esc(nextT.artwork_url)}">` : '🎵';
+        const imgH = nextT.artwork_url ? `<img src="${esc(nextT.artwork_url)}">` : coverFallbackHTML(nextT.title, nextT.artist);
         document.getElementById('mini-cover').innerHTML = imgH;
         document.getElementById('fp-cover').innerHTML = imgH;
         document.getElementById('wa-cover').src = nextT.artwork_url || '';
@@ -3912,6 +4103,11 @@ aud.addEventListener('ended', () => {
         preloadedTrack = null; _gaplessBufReady = false; audBuf.src = '';
         // Подгружаем ещё треки если конец очереди
         if (qIdx >= queue.length - 3 && document.getElementById('page-wave').classList.contains('on')) loadWave();
+    } else if (repeatMode === 0 && !shuffle && qIdx >= queue.length - 1) {
+        // Повтор выключен и это последний трек очереди — останавливаемся,
+        // а не начинаем очередь с начала (в отличие от ручного нажатия "next",
+        // которое всегда должно закольцовывать очередь независимо от repeatMode).
+        setPlayState(false);
     } else {
         playNext();
     }
@@ -4015,7 +4211,7 @@ mp.addEventListener('touchend', e => {
 }, {passive: true});
 
 // ── MODALS (EQ, Playlist, Timer, More) ──
-function closeModals() { ['eq-panel', 'pl-modal', 'timer-modal', 'more-modal', 'queue-modal'].forEach(id => document.getElementById(id).classList.remove('vis')); document.getElementById('overlay').classList.remove('vis'); }
+function closeModals() { ['eq-panel', 'pl-modal', 'timer-modal', 'more-modal', 'queue-modal'].forEach(id => document.getElementById(id).classList.remove('vis')); document.getElementById('overlay').classList.remove('vis'); stopEqVisualizer(); }
 function openMoreMenu() {
   const hint = document.getElementById('more-timer-hint');
   const disp = document.getElementById('sleep-timer-display');
@@ -4280,6 +4476,41 @@ function drawVisualizer() {
 })();
 
 // Проверяем, нет ли более свежей сессии воспроизведения с другого устройства
+// ── Свайп вниз для закрытия модалок-шторок (стандартный паттерн iOS/Telegram) ──
+// Раньше единственный способ закрыть more-modal/queue-modal/eq-panel и т.п.
+// был тап по крестику — привычнее и быстрее тянуть шторку вниз пальцем.
+function initSheetModalSwipe() {
+  document.querySelectorAll('.sheet-modal').forEach(modal => {
+    const grabZone = modal.querySelector('.modal-grabber') || modal.querySelector('.modal-head');
+    if (!grabZone) return;
+    let dragging = false, startY = 0, dy = 0;
+
+    grabZone.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.close-modal')) return; // не мешаем клику по крестику
+      dragging = true; startY = e.clientY; dy = 0;
+      modal.style.transition = 'none';
+      try { grabZone.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    grabZone.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      dy = Math.max(0, e.clientY - startY); // тянуть можно только вниз
+      modal.style.transform = `translateY(${dy}px)`;
+    });
+    const endDrag = () => {
+      if (!dragging) return;
+      dragging = false;
+      modal.style.transition = '';
+      modal.style.transform = '';
+      if (dy > 100) { haptic(); closeModals(); }
+      dy = 0;
+    };
+    grabZone.addEventListener('pointerup', endDrag);
+    grabZone.addEventListener('pointercancel', endDrag);
+  });
+}
+initSheetModalSwipe();
+
+// Проверяем, нет ли более свежей сессии воспроизведения с другого устройства
 checkRemotePlaybackState();
 
 // ── СИНХРОНИЗАЦИЯ ВОСПРОИЗВЕДЕНИЯ МЕЖДУ УСТРОЙСТВАМИ ──────────────────
@@ -4411,14 +4642,14 @@ function handleOfflineSWMessage(data) {
     const { type, trackId, reason } = data;
     if (type === 'OFFLINE_SAVED') {
         offlinePending.delete(String(trackId));
-        toast('✅ Сохранено офлайн');
+        toast('✅ Сохранено офлайн', 'success');
         renderOfflineList();
         updateOfflineMenuState();
     } else if (type === 'OFFLINE_SAVE_FAILED') {
         offlinePending.delete(String(trackId));
         delete offlineMeta[String(trackId)]; // откатываем оптимистичную запись
         saveOfflineMeta();
-        toast(reason === 'limit' ? '⚠️ Достигнут лимит офлайн-треков' : '⚠️ Не удалось сохранить офлайн');
+        toast(reason === 'limit' ? '⚠️ Достигнут лимит офлайн-треков' : '⚠️ Не удалось сохранить офлайн', 'warning');
         updateOfflineMenuState();
     } else if (type === 'OFFLINE_REMOVED') {
         renderOfflineList();
@@ -4464,6 +4695,7 @@ let gainMain  = null;   // gain основного трека
 let gainXfade = null;   // gain буферного трека (crossfade)
 let masterGain = null;  // общий gain (для будущего volume)
 let srcBuf    = null;   // MediaElementSource для audBuf
+let eqAnalyser = null;  // для живой визуализации спектра в панели эквалайзера (отдельно от analyser полноэкранного визуализатора обложки)
 let _xfadeActive = false;
 
 function initAudioCtx() {
@@ -4497,12 +4729,20 @@ function initAudioCtx() {
         masterGain = actx.createGain();
         masterGain.gain.value = 1.0;
 
+        // Анализатор спектра для живой визуализации в панели эквалайзера —
+        // включён прямо в основную цепь (masterGain → eqAnalyser → destination),
+        // это реальные данные плеера, а не имитация под ритм.
+        eqAnalyser = actx.createAnalyser();
+        eqAnalyser.fftSize = 64;        // 32 частотных бина — достаточно для компактных полосок
+        eqAnalyser.smoothingTimeConstant = 0.75;
+
         // Коммутация
         srcNode.connect(gainMain);
         prev.connect(masterGain);        // конец EQ цепи → мастер
         srcBuf.connect(gainXfade);
         gainXfade.connect(masterGain);   // xfade gain → мастер (минует EQ, ок)
-        masterGain.connect(actx.destination);
+        masterGain.connect(eqAnalyser);
+        eqAnalyser.connect(actx.destination);
 
     } catch (e) {
         console.warn('AudioContext init failed:', e);
@@ -4556,7 +4796,43 @@ function buildEQ() {
     const lb = document.createElement('div'); lb.className = 'eq-label'; lb.textContent = EQ_LABELS[i]; wrap.appendChild(sl); wrap.appendChild(lb); bars.appendChild(wrap);
   });
 }
-function openEQ() { initAudioCtx(); if (actx && actx.state === 'suspended') actx.resume(); buildEQ(); document.getElementById('eq-panel').classList.add('vis'); document.getElementById('overlay').classList.add('vis'); }
+
+// ── Живая визуализация спектра ─────────────────────────────────────────
+// Реальные данные из AnalyserNode, включённого прямо в цепь плеера (не
+// имитация под ритм) — работает пока панель эквалайзера открыта, останавливаем
+// requestAnimationFrame при закрытии, чтобы не жечь батарею впустую.
+let _eqVizRAF = null;
+function buildEqVisualizerBars() {
+  const wrap = document.getElementById('eq-visualizer');
+  if (!wrap || wrap.children.length) return; // уже построено
+  for (let i = 0; i < 32; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'eq-viz-bar';
+    wrap.appendChild(bar);
+  }
+}
+function startEqVisualizer() {
+  buildEqVisualizerBars();
+  if (!eqAnalyser) { stopEqVisualizer(); return; } // AudioContext ещё не инициализирован (например, ничего не играло)
+  const wrap = document.getElementById('eq-visualizer');
+  const bars = wrap ? wrap.children : [];
+  const data = new Uint8Array(eqAnalyser.frequencyBinCount);
+  const tick = () => {
+    eqAnalyser.getByteFrequencyData(data);
+    for (let i = 0; i < bars.length; i++) {
+      const v = data[i] || 0;
+      bars[i].style.height = Math.max(2, (v / 255) * 100) + '%';
+    }
+    _eqVizRAF = requestAnimationFrame(tick);
+  };
+  tick();
+}
+function stopEqVisualizer() {
+  if (_eqVizRAF) { cancelAnimationFrame(_eqVizRAF); _eqVizRAF = null; }
+  document.querySelectorAll('.eq-viz-bar').forEach(b => b.style.height = '2%');
+}
+
+function openEQ() { initAudioCtx(); if (actx && actx.state === 'suspended') actx.resume(); buildEQ(); document.getElementById('eq-panel').classList.add('vis'); document.getElementById('overlay').classList.add('vis'); startEqVisualizer(); }
 
 // ── PLAYLISTS MODAL ──
 function openPlaylistModal() {
@@ -4586,7 +4862,7 @@ async function createPlaylistByName(name) {
   }
 }
 
-let toastT; function toast(msg) { const el = document.getElementById('toast'); el.textContent = msg; el.classList.add('vis'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('vis'), 2000); }
+let toastT; function toast(msg, type) { const el = document.getElementById('toast'); el.textContent = msg; el.className = 'vis' + (type ? ' toast-' + type : ''); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('vis'), 2000); }
 
 // ══ HERO WAVE VISUALIZER — Яндекс Музыка / Aurora Borealis style ══════════
 (function initHeroWave() {
@@ -5035,7 +5311,7 @@ function renderArtistTracksSlice(showCount) {
     const isNow = qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === String(t.id);
     const coverHtml = t.artwork_url
       ? `<img src="${esc(t.artwork_url)}" loading="lazy">`
-      : '🎵';
+      : coverFallbackHTML(t.title, t.artist);
 
     const row = document.createElement('div');
     row.className = 'ac-track' + (isNow ? ' now' : '');
@@ -5151,7 +5427,7 @@ function renderArtistReleases(tracks) {
     const isNow = qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === String(t.id);
     const coverHtml = t.artwork_url
       ? `<img src="${esc(t.artwork_url)}" loading="lazy" style="width:100%;height:100%;object-fit:cover;">`
-      : '🎵';
+      : coverFallbackHTML(t.title, t.artist);
     const row = document.createElement('div');
     row.className = 'ac-track' + (isNow ? ' now' : '');
     row.style.animationDelay = i * 0.05 + 's';
@@ -5628,7 +5904,7 @@ async function openCollabPlaylist(collabId) {
 
 function makeCollabTrackItem(t, collabId, ownerId) {
     const li = document.createElement('li'); li.className = 'track'; li.dataset.id = t.id;
-    const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : '🎵';
+    const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : coverFallbackHTML(t.title, t.artist);
     const dur = t.duration ? `<div class="tdur">${esc(t.duration)}</div>` : '';
 
     // Аватарка добавившего
@@ -6406,7 +6682,7 @@ function renderFriendTracks(tab) {
     tracks.forEach(t => {
         const li = document.createElement('div');
         li.className = 'ac-track';
-        const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : '🎵';
+        const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : coverFallbackHTML(t.title, t.artist);
         li.innerHTML = `
             <div class="ac-cover">${cover}</div>
             <div class="ac-track-meta">
