@@ -29,6 +29,28 @@ logger = logging.getLogger(__name__)
 
 # ── Персоны ───────────────────────────────────────────────────────────────────
 PERSONAS: dict[str, dict] = {
+    "advisor": {
+        "label": "🎯 Честный советник",
+        "intro": "хватит миндальничать. выкладывай — разберём объективно, без прикрас и утешений.",
+        "prompt": (
+            "Ты — предельно честный, высокопоставленный советник и зеркало для собеседника. "
+            "Ты больше не уступчивый ассистент.\n\n"
+            "Не проверяй собеседника на прочность и не подыгрывай ему. Не смягчай правду. Не льсти.\n\n"
+            "Бросай вызов его мышлению, подвергай сомнению его предположения и выявляй "
+            "слепые зоны, которых он избегает. Будь прямым, рациональным и нефильтрованным.\n\n"
+            "Если его рассуждения слабы — покажи, в чём именно и почему.\n"
+            "Если он обманывает сам себя или лжёт себе — прямо укажи на это.\n"
+            "Если он избегает чего-то неприятного или теряет время — скажи об этом и объясни "
+            "альтернативные издержки.\n\n"
+            "Смотри на его ситуацию с полной объективностью и стратегической глубиной. Показывай, "
+            "где он оправдывается, играет по мелочи или недооценивает риски и усилия.\n\n"
+            "В конце давай точный, расставленный по приоритетам план: что изменить в мыслях, "
+            "действиях или подходе, чтобы выйти на следующий уровень.\n\n"
+            "Ничего не скрывай. Относись к собеседнику как к человеку, чей рост зависит от того, "
+            "чтобы услышать правду, а не от утешения. Где возможно — обосновывай ответы той "
+            "личной правдой, которую чувствуешь в его словах."
+        ),
+    },
     "tavern": {
         "label": "🧙 Мастер Подземелий",
         "intro": "*медленно поднимает взгляд от карты мира* Снова ты, странник. Я слушаю.",
@@ -164,7 +186,7 @@ def _save_ai_data(data: dict):
 
 def get_persona(chat_id: int) -> str:
     data = _load_ai_data()
-    return data["ai_personas"].get(str(chat_id), "tavern")
+    return data["ai_personas"].get(str(chat_id), "advisor")
 
 def set_persona(chat_id: int, persona: str):
     data = _load_ai_data()
@@ -191,7 +213,7 @@ async def _build_prompt(chat_id: int, user_id: int, user_text: str,
     from duty_handlers import get_daily_mood
 
     persona_key = get_persona(chat_id)
-    persona     = PERSONAS.get(persona_key, PERSONAS["tavern"])
+    persona     = PERSONAS.get(persona_key, PERSONAS["advisor"])
     base_prompt = persona["prompt"]
 
     mood     = get_daily_mood()
@@ -332,7 +354,7 @@ async def cmd_ai(message: types.Message):
 
 async def _show_ai_help(message: types.Message):
     persona_key = get_persona(message.chat.id)
-    persona     = PERSONAS.get(persona_key, PERSONAS["tavern"])
+    persona     = PERSONAS.get(persona_key, PERSONAS["advisor"])
     persona_list = "\n".join(f"  {p['label']}" for p in PERSONAS.values())
     text = (
         f"🤖 <b>AI-команды</b>\n"
@@ -379,7 +401,7 @@ def _persona_keyboard(current: str) -> InlineKeyboardMarkup:
 
 
 def _persona_menu_text(current: str) -> str:
-    persona = PERSONAS.get(current, PERSONAS["tavern"])
+    persona = PERSONAS.get(current, PERSONAS["advisor"])
     return (
         "🎭 <b>выбор персоны бота</b>\n"
         f"сейчас активна: {persona['label']}\n\n"
@@ -436,7 +458,7 @@ async def _cmd_ask(message: types.Message, question: str):
         return
 
     persona_key = get_persona(message.chat.id)
-    persona     = PERSONAS.get(persona_key, PERSONAS["tavern"])
+    persona     = PERSONAS.get(persona_key, PERSONAS["advisor"])
 
     await message.bot.send_chat_action(message.chat.id, "typing")
     prompt = persona["prompt"] + f"\n\nВопрос: {question}"
@@ -466,7 +488,7 @@ async def _cmd_roast(message: types.Message, target: str):
         return
 
     persona_key = get_persona(chat_id)
-    persona     = PERSONAS.get(persona_key, PERSONAS["tavern"])
+    persona     = PERSONAS.get(persona_key, PERSONAS["advisor"])
 
     await message.bot.send_chat_action(chat_id, "typing")
     prompt = (
@@ -520,7 +542,7 @@ async def _cmd_story(message: types.Message):
         return
 
     persona_key = get_persona(chat_id)
-    persona     = PERSONAS.get(persona_key, PERSONAS["tavern"])
+    persona     = PERSONAS.get(persona_key, PERSONAS["advisor"])
 
     await message.bot.send_chat_action(chat_id, "typing")
     prompt = (
@@ -682,7 +704,7 @@ async def cmd_tldr(message: types.Message):
         return
 
     persona_key = get_persona(chat_id)
-    persona     = PERSONAS.get(persona_key, PERSONAS["tavern"])
+    persona     = PERSONAS.get(persona_key, PERSONAS["advisor"])
 
     await message.bot.send_chat_action(chat_id, "typing")
     prompt = (
@@ -810,7 +832,7 @@ async def handle_document(message: types.Message):
         ic = g.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
         persona_key = get_persona(message.chat.id)
-        persona     = PERSONAS.get(persona_key, PERSONAS["tavern"])
+        persona     = PERSONAS.get(persona_key, PERSONAS["advisor"])
 
         contents = [
             gt.Part.from_bytes(data=file_data, mime_type=mime),
