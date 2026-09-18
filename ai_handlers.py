@@ -68,6 +68,58 @@ PERSONAS: dict[str, dict] = {
             "Мотивируешь и дисциплинируешь. Матерись по-военному."
         ),
     },
+    "gamer": {
+        "label": "🎮 Триггернутый геймер",
+        "intro": "го, есть вопрос? не тупи, го отвечаю, у меня катка через 5 минут",
+        "prompt": (
+            "Ты — задротистый киберспортивный игрок, завсегдатай CS2, Dota 2 и Valorant. "
+            "Говоришь на чистом игровом сленге: гг, изи, нуб, репорт, фидит, тильт, "
+            "пуш, крипы, фарм, катка, ранк, хайграунд. "
+            "Импульсивный, эмоциональный, слегка токсичный, но не злой — просто на нервах "
+            "после катки. При этом реально шаришь и даёшь дельный совет, просто через "
+            "призму гейминга и киберспорта."
+        ),
+    },
+    "chill": {
+        "label": "😎 Пофигист-философ",
+        "intro": "о, здарова. не парься так сильно, го разберёмся не спеша",
+        "prompt": (
+            "Ты — максимально расслабленный чувак, которого ничто не парит. "
+            "Говоришь медленно, лениво, с философским прищуром на любую проблему. "
+            "Часто советуешь 'выдохнуть' и 'не гнать', но при этом даёшь толковые советы. "
+            "Минимум паники, максимум дзена. Изредка вставляешь бытовую мудрость."
+        ),
+    },
+    "sassy": {
+        "label": "💅 Токсичная подруга",
+        "intro": "так, я вся внимание, давай, что там у тебя стряслось",
+        "prompt": (
+            "Ты — язвительная, но по-настоящему заботливая 'токсичная подруга'. "
+            "Подкалываешь, иронизируешь, закатываешь глаза словами, но всегда в итоге "
+            "даёшь честный и дельный совет. Стиль — сарказм и забота одновременно. "
+            "Используешь фразы вроде 'ну ты как обычно', 'серьёзно?', 'окей, слушай сюда'."
+        ),
+    },
+    "coach": {
+        "label": "🔥 Мотивационный коуч",
+        "intro": "встали! пошли! сегодня твой день, я в тебя верю на все сто",
+        "prompt": (
+            "Ты — гипер-энергичный мотивационный коуч уровня успешного успеха. "
+            "Заряжаешь энергией, используешь КАПС для акцента, призывы к действию, "
+            "апеллируешь к дисциплине и целям. Каждый ответ — заряд мотивации, "
+            "но при этом полезный и по делу, без лишней воды."
+        ),
+    },
+    "scientist": {
+        "label": "🔬 Безумный учёный",
+        "intro": "ага! прекрасно! ещё один объект для анализа! излагай гипотезу, коллега",
+        "prompt": (
+            "Ты — эксцентричный безумный учёный, обожающий сложные термины и восклицания. "
+            "Объясняешь всё через призму 'экспериментов' и 'гипотез', иногда драматично "
+            "хохочешь в тексте ('Мвахаха!'). При этом объяснения реально точные и полезные, "
+            "просто поданы в театральной наукообразной манере."
+        ),
+    },
 }
 
 # Суффиксы к промпту в зависимости от настроения
@@ -281,13 +333,12 @@ async def cmd_ai(message: types.Message):
 async def _show_ai_help(message: types.Message):
     persona_key = get_persona(message.chat.id)
     persona     = PERSONAS.get(persona_key, PERSONAS["tavern"])
+    persona_list = "\n".join(f"  {p['label']}" for p in PERSONAS.values())
     text = (
         f"🤖 <b>AI-команды</b>\n"
         f"Текущая персона: {persona['label']}\n\n"
-        f"<code>/ai persona tavern</code> — 🧙 Мастер Подземелий\n"
-        f"<code>/ai persona dev</code> — 💻 Сеньор-разраб\n"
-        f"<code>/ai persona anime</code> — 🌸 Аниме-помощница\n"
-        f"<code>/ai persona military</code> — 🪖 Сержант\n\n"
+        f"<code>/persona</code> — переключить персону кнопками 🎭\n"
+        f"{persona_list}\n\n"
         f"<code>/ai ask &lt;вопрос&gt;</code> — прямой вопрос\n"
         f"<code>/ai roast @username</code> — роаст\n"
         f"<code>/ai debate &lt;тема&gt;</code> — дебаты\n"
@@ -297,6 +348,10 @@ async def _show_ai_help(message: types.Message):
 
 
 async def _cmd_persona(message: types.Message, persona_key: str):
+    # Без аргумента — показываем инлайн-клавиатуру выбора вместо текстовой ошибки
+    if not persona_key:
+        await cmd_persona(message)
+        return
     if persona_key not in PERSONAS:
         names = ", ".join(f"<code>{k}</code>" for k in PERSONAS)
         await message.answer(f"❌ Неизвестная персона. Доступны: {names}", parse_mode="HTML")
@@ -306,6 +361,67 @@ async def _cmd_persona(message: types.Message, persona_key: str):
     await message.answer(
         f"✅ Персона изменена: {persona['label']}\n\n{persona['intro']}"
     )
+
+
+# ── Инлайн-переключалка персон ────────────────────────────────────────────────
+def _persona_keyboard(current: str) -> InlineKeyboardMarkup:
+    items = list(PERSONAS.items())
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(items), 2):
+        row = []
+        for key, p in items[i:i + 2]:
+            mark = "✅ " if key == current else ""
+            row.append(InlineKeyboardButton(
+                text=f"{mark}{p['label']}", callback_data=f"persona_set:{key}"
+            ))
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _persona_menu_text(current: str) -> str:
+    persona = PERSONAS.get(current, PERSONAS["tavern"])
+    return (
+        "🎭 <b>выбор персоны бота</b>\n"
+        f"сейчас активна: {persona['label']}\n\n"
+        "жми на кнопку, чтобы переключить"
+    )
+
+
+async def cmd_persona(message: types.Message):
+    """/persona — показывает инлайн-кнопки для смены персоны бота."""
+    from duty_handlers import auto_delete_later
+    auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
+
+    current = get_persona(message.chat.id)
+    await message.answer(
+        _persona_menu_text(current),
+        parse_mode="HTML",
+        reply_markup=_persona_keyboard(current),
+    )
+
+
+async def callback_persona_set(callback: types.CallbackQuery):
+    key = (callback.data or "").split(":", 1)[-1]
+    if key not in PERSONAS:
+        await callback.answer("❌ неизвестная персона", show_alert=True)
+        return
+
+    chat_id = callback.message.chat.id
+    set_persona(chat_id, key)
+    persona = PERSONAS[key]
+
+    text = (
+        f"✅ персона переключена: {persona['label']}\n\n"
+        f"<i>{persona['intro']}</i>\n\n"
+        "жми на кнопку, чтобы переключить ещё раз"
+    )
+    try:
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=_persona_keyboard(key)
+        )
+    except Exception:
+        pass
+    await callback.answer(f"{persona['label']} на связи")
 
 
 async def _cmd_ask(message: types.Message, question: str):

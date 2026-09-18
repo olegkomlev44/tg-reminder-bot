@@ -47,6 +47,7 @@ from duty_handlers import (
 from ai_handlers import (
     cmd_weather, cmd_meme, cmd_tldr, cmd_pollinations, cmd_imagen,
     handle_photo, handle_ai_chat,
+    cmd_persona, callback_persona_set,
 )
 from music_handlers import (
     cmd_music_find, cmd_charts, cmd_music_dashboard, cmd_my_music,
@@ -137,6 +138,7 @@ async def main():
     dp.message.register(cmd_wrapped,      Command("wrapped"))
     dp.message.register(cmd_weather,      Command("pogoda"))
     dp.message.register(cmd_dembel,       Command("dembel"))
+    dp.message.register(cmd_persona,      Command("persona"))
 
     # ── Кнопки клавиатуры ─────────────────────────────────────────────────────
     dp.message.register(cmd_today,      F.text == "📋 Наряд сегодня")
@@ -168,6 +170,7 @@ async def main():
     dp.callback_query.register(callback_back_settings,    F.data == "back_settings")
     dp.callback_query.register(callback_back_main,        F.data == "back_main")
     dp.callback_query.register(callback_dembel_card,      F.data.startswith("dembel_card:"))
+    dp.callback_query.register(callback_persona_set,      F.data.startswith("persona_set:"))
 
     # ── Callbacks — музыка ────────────────────────────────────────────────────
     dp.callback_query.register(callback_download_music,  F.data.startswith("dl_sc:"))
