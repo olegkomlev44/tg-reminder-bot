@@ -94,6 +94,7 @@ async def main():
 
     bot = Bot(token=TOKEN)
     _set_bot_ref(bot)
+    await bot.delete_webhook(drop_pending_updates=True)  # снимаем вебхук, если он был выставлен ранее
     dp  = Dispatcher(storage=MemoryStorage())
 
     # ── Сторонние роутеры ─────────────────────────────────────────────────────
