@@ -86,6 +86,28 @@ logger = logging.getLogger(__name__)
 logger.info("🟡 main.py запускается...")
 
 
+async def _webhook_janitor(bot: Bot, interval: int = 90) -> None:
+    """
+    Иногда вебхук боту выставляют уже во время работы (например, сам хостинг —
+    некоторые платформы так «усыпляют» простаивающий процесс). Long polling в
+    этом случае виснет в вечном TelegramConflictError, пока процесс не
+    перезапустят руками. Эта задача каждые `interval` секунд сама проверяет и
+    снимает вебхук, если он появился, — тогда getUpdates восстанавливается
+    без ручного вмешательства.
+    """
+    while True:
+        try:
+            info = await bot.get_webhook_info()
+            if info.url:
+                logger.warning(
+                    f"⚠️ Обнаружен активный вебхук ({info.url}) — снимаю, чтобы polling не залипал."
+                )
+                await bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"Webhook janitor error: {e}")
+        await asyncio.sleep(interval)
+
+
 async def main():
     logger.info("🟡 инициализация бота...")
     _startup_selftest()
@@ -227,6 +249,7 @@ async def main():
 
     asyncio.create_task(ig_checker_task(bot))
     asyncio.create_task(ig_session_health_task(bot))
+    asyncio.create_task(_webhook_janitor(bot))
 
     # ── Глобальный обработчик ошибок ─────────────────────────────────────────
     @dp.errors()

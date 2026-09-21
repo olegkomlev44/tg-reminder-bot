@@ -154,6 +154,13 @@ MOOD_PROMPT_SUFFIX: dict[str, str] = {
     "gamer":         " Используй геймерский сленг: gg, ez, пуш, фарм, respawn, meta.",
 }
 
+# Суффикс про краткость — добавляется ко ВСЕМ персонам, чтобы ответы не разрастались
+LENGTH_SUFFIX = (
+    "\n\nВАЖНО про длину ответа: отвечай коротко и по делу, 2-5 предложений на обычное "
+    "сообщение, без длинных вступлений, повторов и воды. Разворачивайся подробнее и по "
+    "пунктам только если пользователь явно просит детальный разбор, план или инструкцию."
+)
+
 
 # ── Gemini клиент ─────────────────────────────────────────────────────────────
 _gemini_client = None
@@ -218,7 +225,7 @@ async def _build_prompt(chat_id: int, user_id: int, user_text: str,
 
     mood     = get_daily_mood()
     suffix   = MOOD_PROMPT_SUFFIX.get(mood, "")
-    prompt   = base_prompt + suffix
+    prompt   = base_prompt + suffix + LENGTH_SUFFIX
 
     # Факты о пользователе
     facts = get_user_facts(user_id)
