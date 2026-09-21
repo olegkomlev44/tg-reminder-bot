@@ -47,7 +47,7 @@ from duty_handlers import (
 from ai_handlers import (
     cmd_weather, cmd_meme, cmd_tldr, cmd_pollinations, cmd_imagen,
     handle_photo, handle_ai_chat,
-    cmd_persona, callback_persona_set,
+    cmd_persona, callback_persona_set, cmd_ai,
 )
 from music_handlers import (
     cmd_music_find, cmd_charts, cmd_music_dashboard, cmd_my_music,
@@ -108,6 +108,29 @@ async def _webhook_janitor(bot: Bot, interval: int = 90) -> None:
         await asyncio.sleep(interval)
 
 
+async def cmd_help(message: types.Message) -> None:
+    """/help — краткая справка по командам бота."""
+    text = (
+        "🤖 <b>команды бота</b>\n\n"
+        "📋 <b>наряды</b>\n"
+        "/наряд — наряд на сегодня\n"
+        "/svodki — напомнить сводки прямо сейчас\n"
+        "/dembel — дембельский аккорд\n"
+        "/chatid — узнать id этого чата\n\n"
+        "🧠 <b>ии</b>\n"
+        "/ai — команды ии (ask, roast, debate, story)\n"
+        "/persona — сменить персону бота кнопками\n"
+        "/meme, /tldr, /poll, /imagen — генерация контента\n\n"
+        "🎵 <b>музыка</b>\n"
+        "/find, /music, /queue, /dj, /playlists, /charts, /wrapped\n\n"
+        "🌦 <b>другое</b>\n"
+        "/pogoda — погода\n"
+        "/ozon — поиск товаров на ozon\n\n"
+        "жми /start, если нужна клавиатура с кнопками"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
 async def main():
     logger.info("🟡 инициализация бота...")
     _startup_selftest()
@@ -162,6 +185,10 @@ async def main():
     dp.message.register(cmd_weather,      Command("pogoda"))
     dp.message.register(cmd_dembel,       Command("dembel"))
     dp.message.register(cmd_persona,      Command("persona"))
+    dp.message.register(cmd_ai,           Command("ai"))
+    dp.message.register(cmd_help,         Command("help"))
+    dp.message.register(cmd_today,        Command("наряд"))
+    dp.message.register(cmd_remind_now,   Command("svodki"))
 
     # ── Кнопки клавиатуры ─────────────────────────────────────────────────────
     dp.message.register(cmd_today,      F.text == "📋 Наряд сегодня")
