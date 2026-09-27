@@ -36,6 +36,16 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+# ── СТАБИЛЬНОСТЬ ПУЛА (настраивается через env, дефолты — безопаснее прежних) ──
+# Без своих прокси все аккаунты бьют с одного IP хостинга — единственный рычаг
+# снизить риск бана/выброса это (а) не спешить и (б) не дёргать по кругу все
+# аккаунты при первой же временной ошибке.
+IG_DELAY_MIN          = float(os.getenv("IG_DELAY_MIN", "3"))       # мин. пауза между запросами instagrapi
+IG_DELAY_MAX          = float(os.getenv("IG_DELAY_MAX", "8"))       # макс. пауза между запросами instagrapi
+IG_SAME_ACC_RETRIES   = int(os.getenv("IG_SAME_ACC_RETRIES", "2"))  # попыток на ТОМ ЖЕ акке при ClientError
+IG_RATE_WAIT_MIN      = float(os.getenv("IG_RATE_WAIT_MIN", "20"))  # backoff при 429/PleaseWaitFewMinutes
+IG_RATE_WAIT_MAX      = float(os.getenv("IG_RATE_WAIT_MAX", "45"))
+
 # ── ЗАВИСИМОСТЬ ───────────────────────────────────────────────────────────────
 try:
     from instagrapi import Client
@@ -146,9 +156,20 @@ class _AccountPool:
         """
         Загружает клиент из session_dir/{login}.json.
         Пароль здесь не используется — только кукисы из файла.
+
+        Раньше после set_settings() ещё раз руками патчились cookies и
+        Authorization-заголовок ("Bearer IGT:2:<sessionid>"). Это лишнее и,
+        похоже, вредное: наш session.json уже собран в родном формате
+        instagrapi (uuids/cookies/device_settings/authorization_data), и
+        set_settings() сам строит корректный Authorization из
+        authorization_data. Ручной хедер с сырым sessionid не совпадает с
+        реальным форматом instagrapi (там base64 от {ds_user_id, sessionid})
+        и мог просто перетирать корректно посчитанный клиентом заголовок —
+        то есть часть "случайных" разрывов сессии могла быть самодельной.
+        Убрали патч, оставили только set_settings().
         """
         cl = Client()
-        cl.delay_range = [2, 5]
+        cl.delay_range = [IG_DELAY_MIN, IG_DELAY_MAX]
         session_file = _session_dir() / f"{login}.json"
 
         if not session_file.exists():
@@ -160,19 +181,7 @@ class _AccountPool:
         settings = json.loads(session_file.read_text())
         cl.set_settings(settings)
 
-        cookies = settings.get("cookies", {})
-        for name, value in cookies.items():
-            cl.private.cookies.set(name, value, domain=".instagram.com")
-
-        ua = settings.get("user_agent", "")
-        if ua:
-            cl.private.headers["User-Agent"] = ua
-
-        sessionid = cookies.get("sessionid", "")
-        if sessionid:
-            cl.private.headers["Authorization"] = f"Bearer IGT:2:{sessionid}"
-
-        ds_user_id = cookies.get("ds_user_id", "")
+        ds_user_id = settings.get("cookies", {}).get("ds_user_id", "")
         logger.info(f"[pool] ✅ загружен: {login}  ds_user_id={ds_user_id}")
         return cl
 
@@ -284,16 +293,25 @@ class _AccountPool:
 
     # ── выполнение запроса с ротацией ────────────────────────────────────────
 
-    async def run(self, fn, *args, retries: int = 3, **kwargs):
+    async def run(self, fn, *args, retries: int = IG_SAME_ACC_RETRIES + 3, **kwargs):
         """
         Запустить fn(client, *args, **kwargs) в executor.
         При 429 / LoginRequired переключить аккаунт и повторить.
+
+        Важно: на разовую ClientError больше НЕ прыгаем сразу на следующий
+        аккаунт — сначала пробуем ещё раз тем же (с backoff). Без прокси все
+        аккаунты и так с одного IP, и мгновенная ротация по кругу при первой
+        же временной ошибке означает, что за пару секунд мы гоняем запросы
+        через ВЕСЬ пул — а это выглядит для IG куда подозрительнее, чем
+        повторная попытка на одном клиенте.
         """
         await self._ensure_init()
         if not self._clients:
             return None
 
         last_err = None
+        same_acc_failures = 0
+
         for attempt in range(retries):
             cl = self._current_client()
             if cl is None:
@@ -309,12 +327,13 @@ class _AccountPool:
 
             except (PleaseWaitFewMinutes, RateLimitError) as e:
                 # Увеличенный backoff — не спешить ротировать
-                wait = random.uniform(15, 35)
+                wait = random.uniform(IG_RATE_WAIT_MIN, IG_RATE_WAIT_MAX)
                 logger.warning(
                     f"[pool] 429 на акк #{self._current}, "
                     f"ждём {wait:.0f}с перед ротацией... ({e})"
                 )
                 self._next_client()
+                same_acc_failures = 0
                 await asyncio.sleep(wait)
                 last_err = e
 
@@ -325,6 +344,7 @@ class _AccountPool:
                     f"👉 Обнови куки: /ig_refresh"
                 )
                 self._next_client()
+                same_acc_failures = 0
                 last_err = e
                 # Алерт только если эта сессия ещё не была помечена мёртвой
                 if login not in self._known_dead:
@@ -339,9 +359,22 @@ class _AccountPool:
                 raise  # не ошибка пула, пробрасываем выше
 
             except ClientError as e:
-                logger.warning(f"[pool] ClientError attempt {attempt}: {e}")
-                self._next_client()
-                await asyncio.sleep(2)
+                same_acc_failures += 1
+                if same_acc_failures <= IG_SAME_ACC_RETRIES:
+                    wait = 2 * same_acc_failures + random.uniform(0, 2)
+                    logger.warning(
+                        f"[pool] ClientError на акк #{self._current} "
+                        f"(попытка {same_acc_failures}/{IG_SAME_ACC_RETRIES} на этом акке): {e}"
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.warning(
+                        f"[pool] ClientError: акк #{self._current} исчерпал лимит "
+                        f"повторов на месте, ротирую: {e}"
+                    )
+                    self._next_client()
+                    same_acc_failures = 0
+                    await asyncio.sleep(2)
                 last_err = e
 
             except Exception as e:
