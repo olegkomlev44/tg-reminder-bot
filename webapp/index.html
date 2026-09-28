@@ -17,6 +17,12 @@
   --danger: var(--red); --danger-bg: rgba(239, 68, 68, 0.14);
   --info: #60a5fa; --info-bg: rgba(96, 165, 250, 0.14);
   --nav-height: 65px; --mini-player-height: 60px; --cover-color: #222233;
+  --accent2: #ff9d4d;
+  /* LIQUID GLASS — единые токены стекла */
+  --glass-bg: linear-gradient(155deg, rgba(255,255,255,0.11), rgba(255,255,255,0.03));
+  --glass-border: rgba(255,255,255,0.14);
+  --glass-blur: blur(26px) saturate(180%);
+  --glass-shadow: 0 8px 32px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.12);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 
@@ -2014,6 +2020,176 @@ audio {
   cursor: pointer;
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   LIQUID GLASS — слой редизайна. Стоит последним в <style>, поэтому
+   переопределяет прежние плоские стили, не ломая разметку и логику.
+═══════════════════════════════════════════════════════════════════ */
+body, html { background: var(--bg); }
+/* Живой фон: цветные "капли" под стеклом. Цвет подстраивается под обложку
+   играющего трека (--cover-color обновляет applyDominantColor). */
+body::before {
+  content: ''; position: fixed; inset: -20%; z-index: 0; pointer-events: none;
+  background:
+    radial-gradient(38% 32% at 18% 12%, rgba(255,204,0,0.20), transparent 70%),
+    radial-gradient(42% 36% at 88% 30%, rgba(96,110,255,0.22), transparent 70%),
+    radial-gradient(40% 34% at 30% 92%, rgba(255,90,140,0.16), transparent 70%);
+  animation: glassDrift 26s ease-in-out infinite alternate;
+  will-change: transform;
+}
+@supports (background: color-mix(in srgb, red, blue)) {
+  body::after {
+    content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background: radial-gradient(60% 45% at 50% 0%, color-mix(in srgb, var(--cover-color) 55%, transparent), transparent 75%);
+    transition: background 1s ease;
+  }
+}
+@keyframes glassDrift { from { transform: translate3d(-3%, -2%, 0) scale(1); } to { transform: translate3d(3%, 3%, 0) scale(1.12); } }
+@media (prefers-reduced-motion: reduce) { body::before { animation: none; } }
+#app { z-index: 1; }
+
+/* Бегущий блик по стеклу */
+@keyframes glassShine { from { background-position: 200% 0; } to { background-position: -100% 0; } }
+
+/* ── Нижняя навигация: плавающая стеклянная капсула ── */
+.tabs {
+  left: 10px; width: calc(100% - 20px); bottom: max(8px, env(safe-area-inset-bottom));
+  height: var(--nav-height); border-radius: 26px;
+  background: var(--glass-bg), rgba(18,18,26,0.35);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow), 0 14px 40px rgba(0,0,0,0.5);
+}
+.tab { border-radius: 20px; }
+.tab.on { color: var(--text); }
+.tab.on svg { filter: drop-shadow(0 0 8px var(--accent-glow)); }
+.tab::after {
+  content: ''; position: absolute; inset: 6px 4px; border-radius: 18px; z-index: -1;
+  background: linear-gradient(160deg, rgba(255,255,255,0.16), rgba(255,255,255,0.04));
+  border: 1px solid rgba(255,255,255,0.12); opacity: 0; transform: scale(0.85);
+  transition: opacity 0.25s, transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
+.tab.on::after { opacity: 1; transform: scale(1); }
+.tab::before { display: none; }
+:root { --nav-offset: 12px; }
+.page { padding-bottom: calc(var(--nav-height) + var(--mini-player-height) + 44px); }
+
+/* ── Мини-плеер ── */
+#mini-player {
+  bottom: calc(var(--nav-height) + max(8px, env(safe-area-inset-bottom)) + 8px);
+  left: 12px; right: 12px; border-radius: 22px;
+  background: var(--glass-bg), rgba(24,24,34,0.42);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow), 0 12px 30px rgba(0,0,0,0.5);
+}
+.mi-cover { border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+.mi-play {
+  width: 42px; height: 42px; padding: 0; justify-content: center; border-radius: 50%; position: relative;
+  background: linear-gradient(160deg, rgba(255,255,255,0.22), rgba(255,255,255,0.06));
+  border: 1px solid rgba(255,255,255,0.18);
+}
+
+/* Индикатор буферизации: кольцо вокруг кнопки play */
+body.buffering .mi-play::after, body.buffering .fp-play::after {
+  content: ''; position: absolute; inset: -4px; border-radius: 50%;
+  border: 2px solid transparent; border-top-color: var(--accent);
+  animation: spinRing 0.8s linear infinite; pointer-events: none;
+}
+@keyframes spinRing { to { transform: rotate(360deg); } }
+
+/* ── Поиск ── */
+.srch-header { background: linear-gradient(to bottom, rgba(8,8,13,0.85) 60%, transparent); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.srch-input-wrap {
+  border-radius: 22px; background: var(--glass-bg); border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-shadow);
+}
+.srch-input-wrap:focus-within { border-color: rgba(255,204,0,0.6); box-shadow: 0 0 0 3px rgba(255,204,0,0.15), var(--glass-shadow); }
+.srch-icon { fill: rgba(255,255,255,0.55); }
+.srch-genre-card, .srch-recent-tag {
+  background: var(--glass-bg); border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-shadow);
+}
+.srch-genre-card { border-radius: 22px; }
+.srch-recent-tag { border-radius: 22px; }
+.search-bar { background: transparent; }
+.search-bar input, .search-bar button {
+  background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 18px;
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+}
+
+/* ── Треки: стеклянные строки ── */
+.track { border-radius: 18px; margin: 3px 10px; padding: 9px 12px; border: 1px solid transparent; }
+.track:active { background: rgba(255,255,255,0.08); }
+.track.now {
+  background: linear-gradient(155deg, rgba(255,204,0,0.16), rgba(255,255,255,0.04));
+  border-color: rgba(255,204,0,0.28); box-shadow: 0 6px 24px rgba(255,204,0,0.08), inset 0 1px 0 rgba(255,255,255,0.1);
+}
+.cover { border-radius: 14px; box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
+.fav-btn { border-radius: 50%; width: 38px; height: 38px; justify-content: center; padding: 0; }
+.fav-btn.loved { background: rgba(255,204,0,0.12); }
+.fav-btn.loved svg { filter: drop-shadow(0 0 6px var(--accent-glow)); }
+.sec { letter-spacing: -0.3px; }
+.skeleton-block { background: linear-gradient(100deg, rgba(255,255,255,0.05) 30%, rgba(255,255,255,0.14) 50%, rgba(255,255,255,0.05) 70%); background-size: 200% 100%; animation: glassShine 1.6s linear infinite; }
+
+/* ── Полноэкранный плеер ── */
+#full-player { background: #0a0a10; }
+.fp-bg { filter: blur(80px) brightness(0.42) saturate(1.5); }
+.fp-cover { border-radius: 30px; box-shadow: 0 30px 70px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.12); }
+.fp-icon-btn { background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 50%; width: 42px; height: 42px; justify-content: center; padding: 0;
+  -webkit-backdrop-filter: var(--glass-blur-s, blur(14px)); backdrop-filter: blur(14px); }
+.fp-ctrl { margin: 0 16px; padding: 10px 12px; border-radius: 30px;
+  background: var(--glass-bg); border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-shadow); }
+.fp-play {
+  background: linear-gradient(145deg, #ffe066, #ffb300); position: relative;
+  box-shadow: 0 8px 28px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.6);
+}
+.fp-prog { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.16); }
+.fp-prog-fill { background: linear-gradient(90deg, #ffe066, #ffb300); border-radius: 3px; box-shadow: 0 0 10px var(--accent-glow); }
+.fp-thumb { width: 16px; height: 16px; top: -5px; box-shadow: 0 0 0 4px rgba(255,255,255,0.18), 0 2px 8px rgba(0,0,0,0.5); }
+.fp-upnext, .fp-bottom-banner {
+  background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 22px;
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+}
+.fp-sub-btn { -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+
+/* ── Шторки, модалки, тосты ── */
+.modal-overlay { background: rgba(0,0,0,0.45); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.sheet-modal {
+  background: linear-gradient(170deg, rgba(255,255,255,0.13), rgba(255,255,255,0.03)), rgba(20,20,30,0.55);
+  -webkit-backdrop-filter: blur(34px) saturate(190%); backdrop-filter: blur(34px) saturate(190%);
+  border: 1px solid var(--glass-border); border-bottom: none; border-radius: 30px 30px 0 0;
+  box-shadow: 0 -16px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.18);
+}
+#share-track-sheet {
+  background: linear-gradient(170deg, rgba(255,255,255,0.13), rgba(255,255,255,0.03)), rgba(20,20,30,0.6) !important;
+  -webkit-backdrop-filter: blur(34px) saturate(190%); backdrop-filter: blur(34px) saturate(190%);
+  border: 1px solid var(--glass-border); border-radius: 30px 30px 0 0 !important;
+}
+#toast {
+  background: var(--glass-bg), rgba(20,20,30,0.55); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border); border-radius: 22px; box-shadow: var(--glass-shadow), 0 10px 30px rgba(0,0,0,0.4);
+  top: max(20px, env(safe-area-inset-top));
+}
+
+/* ── Профиль и прочее ── */
+.prof-stats-row, .prof-listen-time {
+  background: var(--glass-bg); border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); box-shadow: var(--glass-shadow);
+}
+.prof-stats-row { margin: 12px 16px; border-radius: 22px; }
+.prof-listen-time { border-radius: 22px; }
+.prof-badge { -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.prof-recent-cover { border-radius: 18px; }
+.empty-cta { background: linear-gradient(145deg, #ffe066, #ffb300); box-shadow: 0 8px 24px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.5); }
+
+/* Слабые устройства: тяжёлый blur заменяем облегчённым */
+@media (max-width: 380px), (prefers-reduced-transparency: reduce) {
+  :root { --glass-blur: blur(14px) saturate(150%); }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .tabs, #mini-player, .sheet-modal, .srch-input-wrap, .fp-ctrl, #toast { background: rgba(22,22,32,0.96) !important; }
+}
+
 </style>
 </head>
 <body>
@@ -3785,8 +3961,12 @@ function playWaveFromStart() {
   qIdx = 0; playTrack(queue[0], 1); checkMiniPlayerVis('wave');
 }
 
+let _playToken = 0;        // защита от гонки при быстрых тапах по трекам
+let _streamFailStreak = 0; // подряд неудачных потоков — чтобы не мотать очередь вечно
 function playTrack(t, dir = 1) {
   if (!t) return;
+  const _tok = ++_playToken;
+  document.body.classList.add('buffering');
 
   // ── Сброс crossfade gain при ручном переключении ──────────────────
   _xfadeActive = false;
@@ -3797,6 +3977,7 @@ function playTrack(t, dir = 1) {
   coverEl.classList.add(dir > 0 ? 'slide-out-left' : 'slide-out-right');
   
   setTimeout(() => {
+    if (_tok !== _playToken) return;
     ['mini-title', 'fp-title', 'wa-pill-title'].forEach(id => document.getElementById(id).textContent = t.title);
     ['mini-artist', 'fp-artist', 'wa-huge-artist'].forEach(id => document.getElementById(id).textContent = t.artist);
     // (banner title removed)
@@ -3830,25 +4011,27 @@ function playTrack(t, dir = 1) {
     const topTitle = document.getElementById('fp-top-title');
     if (topTitle) topTitle.innerHTML = (t.source || 'Сейчас играет') + ' <span id="sleep-timer-display">' + (document.getElementById('sleep-timer-display')?.textContent || '') + '</span>';
 
-aud.src = `/api/stream/${encodeURIComponent(t.id)}`;
-aud.load(); 
+    if (_tok !== _playToken) return; // пока ждали анимацию, выбрали другой трек
+    aud.src = `/api/stream/${encodeURIComponent(t.id)}`;
+    aud.load();
 
-// Ждем, пока браузер реально начнет воспроизведение
-aud.play().then(() => {
-    // Вызываем обновление шторки ТОЛЬКО когда звук пошел
-    updateMediaSession(t);
-    if (typeof updatePositionState === 'function') {
-        updatePositionState();
-    }
-    setPlayState(true); 
-}).catch(e => {
-    console.warn('Autoplay blocked', e);
-    setPlayState(false);
-});
+    // Обновляем шторку/позицию ТОЛЬКО когда звук реально пошёл
+    aud.play().then(() => {
+      if (_tok !== _playToken) return;
+      updateMediaSession(t);
+      if (typeof updatePositionState === 'function') updatePositionState();
+      setPlayState(true);
+    }).catch(e => {
+      // AbortError — нормально: src сменился на другой трек до старта
+      if (e && e.name === 'AbortError') return;
+      console.warn('play() rejected', e);
+      document.body.classList.remove('buffering');
+      setPlayState(false);
+    });
 
-logHistoryToServer(t);
-    setPlayState(true); logHistoryToServer(t);
-    // Добавляем инициализацию аудио-контекста и запуск пульсации
+    setPlayState(true);
+    logHistoryToServer(t);
+    // Инициализация аудио-контекста и запуск пульсации
     initAudioCtx();
     if (actx && actx.state === 'suspended') actx.resume();
     startWavePulse();
@@ -4123,9 +4306,24 @@ aud.addEventListener('play', () => {
 });
 aud.addEventListener('loadeddata', updatePositionState);
 aud.addEventListener('seeked', updatePositionState);
-aud.addEventListener('error', () => { 
-  toast('Ошибка потока'); 
-  setTimeout(playNext, 1500); 
+aud.addEventListener('waiting', () => document.body.classList.add('buffering'));
+aud.addEventListener('loadstart', () => document.body.classList.add('buffering'));
+['playing', 'canplay'].forEach(ev => aud.addEventListener(ev, () => {
+  document.body.classList.remove('buffering');
+  if (ev === 'playing') _streamFailStreak = 0;
+}));
+aud.addEventListener('error', () => {
+  if (!aud.getAttribute('src')) return; // пустой src — не ошибка потока
+  document.body.classList.remove('buffering');
+  _streamFailStreak++;
+  // Больше 3 подряд неудач — останавливаемся, а не листаем всю очередь
+  if (_streamFailStreak > 3 || queue.length <= 1) {
+    toast('Не удалось загрузить трек. Попробуй другой', 'error');
+    setPlayState(false);
+    return;
+  }
+  toast('Трек недоступен — переключаю', 'warning');
+  setTimeout(playNext, 900);
 });
 
 // ── FULLSCREEN MANAGEMENT ──
