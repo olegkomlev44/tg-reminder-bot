@@ -718,7 +718,6 @@ async def api_pl_create(request):
 
 async def api_stream_track(request):
     tid = request.match_info["track_id"]
-    if tid.startswith("yt_"): return cors(web.json_response({"error": "YT not supported"}, status=422))
 
     # ReplayGain / EBU R128 через ffmpeg — только для первичных запросов (без Range)
     normalize = request.rel_url.query.get("norm", "1") != "0"
@@ -727,6 +726,8 @@ async def api_stream_track(request):
     # Уже нормализовали этот трек раньше — отдаём готовый файл с диска и не
     # трогаем ffmpeg вообще. web.FileResponse сам умеет Range-запросы, так что
     # перемотка внутри уже играющего трека тоже пойдёт из кэша, а не с источника.
+    # Это же попутно решает проблему истекающих ссылок YouTube: первый прогон
+    # транскодирует и кэширует файл на диск, дальше он играет уже из кэша.
     if normalize:
         cached_path = _normalized_cache_path(tid)
         if os.path.exists(cached_path):
@@ -734,21 +735,36 @@ async def api_stream_track(request):
             return cors(resp)
 
     track = await music_engine.get_track_details(tid)
-    if not track or not track.get("stream_url"): return cors(web.Response(status=404, text="Stream not found"))
+    if not track: return cors(web.Response(status=404, text="Stream not found"))
+
+    # У YouTube-треков track["stream_url"] — это служебный маркер вида "yt_...",
+    # а не http-адрес (его понимает только download_file, см. music_engine.py).
+    # Реальный проксируемый адрес аудио-CDN лежит в direct_stream_url. Раньше
+    # здесь был безусловный 422 для всех yt_-id, из-за чего ЛЮБОЙ трек, найденный
+    # только через YouTube-фолбэк поиска (когда SoundCloud ничего не нашёл),
+    # не запускался вообще.
+    if tid.startswith("yt_"):
+        source_url = track.get("direct_stream_url")
+        extra_headers = track.get("stream_headers") or {}
+    else:
+        source_url = track.get("stream_url")
+        extra_headers = {}
+
+    if not source_url: return cors(web.Response(status=404, text="Stream not found"))
 
     if normalize and not rng:
         try:
-            result = await _stream_normalized(request, track["stream_url"], tid)
+            result = await _stream_normalized(request, source_url, tid)
             if result is not None:
                 return result
         except Exception as e:
             logger.warning(f"ffmpeg loudnorm failed ({e}), passthrough")
 
-    hdrs = {"User-Agent": "Mozilla/5.0"}
+    hdrs = {"User-Agent": "Mozilla/5.0", **extra_headers}
     if rng: hdrs["Range"] = rng
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(track["stream_url"], headers=hdrs) as up:
+            async with session.get(source_url, headers=hdrs) as up:
                 ct = up.headers.get("Content-Type", "audio/mpeg")
                 rh = {"Content-Type": ct, "Accept-Ranges": "bytes", "Cache-Control": "max-age=3600",
                       "Access-Control-Allow-Origin": "*", "X-Audio-Norm": "passthrough"}

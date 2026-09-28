@@ -360,11 +360,20 @@ class MusicEngine:
         try:
             loop = asyncio.get_event_loop()
             info = await loop.run_in_executor(None, _get_info)
+            # ВАЖНО: stream_url ниже — служебный маркер ("yt_..."), его понимает
+            # только download_file() (полная закачка файла, напр. для отправки
+            # трека ботом в Telegram). Для веб-стрима нужен реальный http(s)-адрес
+            # аудио-CDN, который yt-dlp уже резолвит в info['url'] — сохраняем его
+            # отдельно как direct_stream_url, иначе /api/stream не может его
+            # проксировать и трек из поиска (когда SoundCloud ничего не нашёл и
+            # сработал фолбэк на YouTube) не запускается вовсе.
             return {
                 "id": track_id,
                 "title": info.get('title', 'Unknown'),
                 "artist": info.get('uploader', 'Unknown'),
                 "stream_url": track_id,  # маркер для download_file
+                "direct_stream_url": info.get('url'),  # реальный адрес для проксирования в /api/stream
+                "stream_headers": info.get('http_headers') or {},
                 "artwork_url": info.get('thumbnail', ''),
                 "genre": "Мультиплатформа",
                 "source": "YouTube Music"
