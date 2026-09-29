@@ -2338,6 +2338,67 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   .fp-glow { transition: none; }
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   RELIABILITY PACK — подсказки, подгрузка при скролле, запасной
+   источник, предзагрузка, офлайн-очередь избранного, статус источников
+═══════════════════════════════════════════════════════════════════ */
+
+/* ── 1. Автоподсказки ── */
+.gx-suggest {
+  position: absolute; left: 16px; right: 16px; top: calc(100% + 6px); z-index: 40;
+  max-height: 0; overflow: hidden; opacity: 0; pointer-events: none;
+  border-radius: 20px; background: linear-gradient(170deg, rgba(255,255,255,0.14), rgba(255,255,255,0.03)), rgba(18,18,26,0.7);
+  -webkit-backdrop-filter: blur(28px) saturate(180%); backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow-lg, var(--glass-shadow));
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+}
+.gx-suggest.vis { max-height: 340px; opacity: 1; pointer-events: auto; overflow-y: auto; }
+.srch-header { position: relative; }
+.gx-sg-item { display: flex; align-items: center; gap: 12px; padding: 11px 14px; cursor: pointer; }
+.gx-sg-item:active, .gx-sg-item.sel { background: rgba(255,255,255,0.08); }
+.gx-sg-item svg { width: 18px; height: 18px; fill: var(--text-sec); flex-shrink: 0; }
+.gx-sg-cover { width: 34px; height: 34px; border-radius: 10px; overflow: hidden; flex-shrink: 0; }
+.gx-sg-cover img, .gx-sg-cover .cover-fallback { width: 100%; height: 100%; object-fit: cover; }
+.gx-sg-text { min-width: 0; flex: 1; }
+.gx-sg-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gx-sg-artist { font-size: 12px; color: var(--text-sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gx-sg-loading { display: flex; justify-content: center; padding: 14px; }
+.gx-spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.18); border-top-color: var(--accent); animation: spinRing 0.8s linear infinite; }
+
+/* ── 2. Подгрузка при скролле ── */
+.gx-more-spin { display: flex; justify-content: center; padding: 18px 0 26px; }
+.gx-more-spin .gx-spin { width: 24px; height: 24px; border-width: 3px; }
+.gx-end-note { text-align: center; color: var(--text-sec); font-size: 12px; padding: 10px 0 26px; }
+
+/* ── 3. Восстановление трека (fallback / resume) ── */
+.gx-resume-note { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-sec);
+  padding: 6px 14px 0; }
+.gx-resume-note .gx-spin { width: 13px; height: 13px; border-width: 2px; }
+
+/* ── network banner (оффлайн / переподключение) ── */
+#gx-net-banner {
+  position: fixed; left: 12px; right: 12px; z-index: 900; top: max(10px, env(safe-area-inset-top));
+  padding: 10px 16px; border-radius: 18px; font-size: 13px; font-weight: 600; text-align: center;
+  color: #fff; background: linear-gradient(160deg, rgba(251,146,60,0.9), rgba(217,119,6,0.9));
+  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+  box-shadow: var(--glass-shadow); transform: translateY(-140%); transition: transform 0.35s cubic-bezier(0.34,1.56,0.64,1);
+}
+#gx-net-banner.vis { transform: translateY(0); }
+#gx-net-banner.ok { background: linear-gradient(160deg, rgba(52,211,153,0.92), rgba(16,150,105,0.92)); }
+
+/* ── 10. Карточка статуса источников ── */
+.gx-status-body { display: flex; flex-direction: column; }
+.gx-status-row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-top: 1px solid rgba(255,255,255,0.08); font-size: 14px; }
+.gx-status-row:first-child { border-top: none; }
+.gx-status-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: var(--c, #888); box-shadow: 0 0 8px var(--c, #888); }
+.gx-status-main { flex: 1; min-width: 0; }
+.gx-status-sub { font-size: 11px; color: var(--text-sec); margin-top: 1px; }
+.gx-status-val { font-size: 12px; color: var(--text-sec); flex-shrink: 0; }
+.gx-status-btn { border: 1px solid var(--glass-border); background: rgba(255,255,255,0.08); color: var(--text);
+  font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 12px; flex-shrink: 0; }
+.gx-status-btn:disabled { opacity: 0.5; }
+
 </style>
 </head>
 <body>
@@ -2443,6 +2504,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
         </button>
       </div>
+      <div id="gx-suggest" class="gx-suggest"></div>
     </div>
 
     <!-- Empty state: categories + recent searches -->
@@ -2608,6 +2670,11 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     </div>
 
     <!-- Stats row -->
+    <div class="gx-card" id="gx-status-card">
+      <div class="gx-card-title">Состояние</div>
+      <div id="gx-status-body" class="gx-status-body"><div class="gx-status-row"><span class="gx-status-dot" style="--c:#888"></span><span>Загрузка…</span></div></div>
+    </div>
+
     <div class="prof-stats-row">
       <div class="prof-stat-item">
         <div class="prof-stat-num" id="stat-favs">0</div>
@@ -4472,6 +4539,9 @@ aud.addEventListener('loadstart', () => document.body.classList.add('buffering')
 aud.addEventListener('error', () => {
   if (!aud.getAttribute('src')) return; // пустой src — не ошибка потока
   document.body.classList.remove('buffering');
+  // Сначала пробуем без сети / запасной источник (см. RELIABILITY PACK ниже).
+  // true — уже разбирается сам (ждёт сеть либо ищет трек в другом источнике).
+  if (typeof _gxOnStreamError === 'function' && _gxOnStreamError()) { setPlayState(false); return; }
   _streamFailStreak++;
   // Больше 3 подряд неудач — останавливаемся, а не листаем всю очередь
   if (_streamFailStreak > 3 || queue.length <= 1) {
@@ -7444,6 +7514,302 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   const _pt = window.playTrack;
   window.playTrack = function (t) { try { renderWave(t); } catch (e) {} return _pt.apply(this, arguments); };
   try { const cur = queue[qIdx]; if (cur) renderWave(cur); } catch (e) {}
+})();
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   RELIABILITY PACK (JS): подсказки, подгрузка при скролле, запасной
+   источник, предзагрузка, офлайн-очередь избранного, статус источников
+═══════════════════════════════════════════════════════════════════ */
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  /* ───────── сеть: fetch с ретраями + офлайн-баннер ───────── */
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+  async function gxFetchRetry(url, opts, tries) {
+    tries = tries || 3;
+    let lastErr;
+    for (let i = 0; i < tries; i++) {
+      try { return await fetch(url, opts); }
+      catch (e) {
+        lastErr = e; // TypeError — обрыв сети/DNS; HTTP-ошибки (4xx/5xx) сюда не попадают
+        if (i < tries - 1) await sleep(500 * Math.pow(2, i));
+      }
+    }
+    throw lastErr;
+  }
+  window.gxFetchRetry = gxFetchRetry;
+
+  let netBanner = null;
+  function ensureBanner() {
+    if (netBanner) return netBanner;
+    netBanner = document.createElement('div'); netBanner.id = 'gx-net-banner';
+    document.body.appendChild(netBanner); return netBanner;
+  }
+  function showBanner(text, ok, autoHideMs) {
+    const b = ensureBanner();
+    b.textContent = text; b.classList.toggle('ok', !!ok);
+    void b.offsetWidth; b.classList.add('vis');
+    clearTimeout(b._t);
+    if (autoHideMs) b._t = setTimeout(() => b.classList.remove('vis'), autoHideMs);
+  }
+  function hideBanner() { if (netBanner) netBanner.classList.remove('vis'); }
+
+  let gxWasOffline = !navigator.onLine;
+  if (gxWasOffline) showBanner('Нет соединения — жду сеть');
+  window.addEventListener('offline', () => { gxWasOffline = true; showBanner('Нет соединения — жду сеть'); });
+  window.addEventListener('online', () => {
+    if (!gxWasOffline) return;
+    gxWasOffline = false;
+    showBanner('Сеть восстановлена', true, 2200);
+    try { flushFavQueue(); } catch (e) {}
+    try { refreshStatusCard(); } catch (e) {}
+    // Трек, который не смог стартовать из-за обрыва сети, — пробуем снова
+    if (gxPendingResume && aud.paused && queue[qIdx] === gxPendingResume) {
+      const t = gxPendingResume; gxPendingResume = null;
+      setTimeout(() => playTrack(t, 1), 400);
+    }
+  });
+
+  /* ───────── 7. Избранное: офлайн-очередь + слияние с сервером ───────── */
+  const FAV_Q_KEY = 'gx_fav_queue';
+  function readFavQueue() { try { return JSON.parse(localStorage.getItem(FAV_Q_KEY)) || []; } catch (e) { return []; } }
+  function writeFavQueue(q) { try { localStorage.setItem(FAV_Q_KEY, JSON.stringify(q.slice(-300))); } catch (e) {} }
+  function queueFavOp(op, id, track) {
+    const q = readFavQueue();
+    q.push({ op, id: String(id), track: track || null, ts: Date.now() });
+    writeFavQueue(q);
+  }
+  let favFlushing = false;
+  async function flushFavQueue() {
+    if (favFlushing) return;
+    const ops = readFavQueue();
+    if (!ops.length || !navigator.onLine) return;
+    favFlushing = true;
+    try {
+      const r = await gxFetchRetry('/api/fav/sync', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr },
+        body: JSON.stringify({ ops }),
+      }, 2);
+      if (r.ok) {
+        const data = await r.json();
+        writeFavQueue([]);
+        if (data && Array.isArray(data.favs)) {
+          // Сервер — источник истины после слияния (учитывает и другие устройства)
+          allData.favs = data.favs;
+          localStorage.setItem('music_data', JSON.stringify(allData));
+          renderFavs(); updateAllHeartButtons(); updateFavBtnPlayer();
+        }
+      }
+    } catch (e) { /* останется в очереди до следующей попытки */ }
+    finally { favFlushing = false; }
+  }
+  window.addEventListener('load', () => setTimeout(flushFavQueue, 1500));
+  setInterval(flushFavQueue, 45000);
+
+  const _favToggle = window.favToggle;
+  window.favToggle = async function (btn, trackJsonStr) {
+    const track = decodeTrackJson(trackJsonStr);
+    const wasLoved = isFav(track.id);
+    queueFavOp(wasLoved ? 'remove' : 'add', track.id, track);
+    const r = await _favToggle.apply(this, arguments);
+    flushFavQueue();
+    return r;
+  };
+
+  /* ───────── 3. Запасной источник при сбое трека ───────── */
+  // Метим результат подмены флагом на самом объекте (а не глобальным
+  // счётчиком): счётчик сбрасывался бы при каждом playTrack — в том числе
+  // при собственном вызове playTrack(alt) внутри фолбэка — и уводил бы
+  // в бесконечную цепочку подмен, если альтернатива тоже не заиграла.
+  let gxPendingResume = null;
+  async function gxTryFallback(t) {
+    try {
+      const dur = (function toSec(d) { const p = String(d || '').split(':').map(Number); return p.reduce((a, b) => a * 60 + b, 0); })(t.duration);
+      const qs = new URLSearchParams({ title: t.title || '', artist: t.artist || '', exclude: String(t.id), dur: String(dur || 0) });
+      const r = await gxFetchRetry('/api/resolve?' + qs.toString(), {}, 2);
+      const data = r.ok ? await r.json() : null;
+      const alt = data && data.track;
+      if (alt && qIdx >= 0 && queue[qIdx] === t) {
+        alt.__gxIsFallback = true;
+        queue[qIdx] = alt;
+        toast('Не нашли на ' + (t.source || 'источнике') + ' — включаю с ' + (alt.source || 'другого источника'), 'warning');
+        playTrack(alt, 1);
+        return;
+      }
+    } catch (e) {}
+    toast('Трек недоступен — переключаю', 'warning');
+    setTimeout(playNext, 900);
+  }
+  window.gxTryFallback = gxTryFallback;
+  window._gxOnStreamError = function () {
+    const t = queue[qIdx];
+    if (!navigator.onLine) { gxPendingResume = t || null; return true; }
+    if (t && !t.__gxIsFallback) { gxTryFallback(t); return true; }
+    return false;
+  };
+
+  const _pt2 = window.playTrack;
+  window.playTrack = function () { gxPendingResume = null; gxPrefetchNext(); return _pt2.apply(this, arguments); };
+
+  /* ───────── 5. Предзагрузка следующих треков ───────── */
+  let _lastPrefetchKey = '';
+  function gxPrefetchNext() {
+    const ids = [queue[qIdx + 1], queue[qIdx + 2]].filter(Boolean).map((x) => String(x.id));
+    if (!ids.length) return;
+    const key = ids.join(',');
+    if (key === _lastPrefetchKey) return;
+    _lastPrefetchKey = key;
+    fetch('/api/prefetch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr },
+      body: JSON.stringify({ ids }),
+    }).catch(() => {});
+  }
+
+  /* ───────── 1. Автоподсказки ───────── */
+  const qInput = $('q'), sugBox = $('gx-suggest');
+  let sugAbort = null, sugT = null, sugSel = -1;
+  function hideSuggest() { if (sugBox) { sugBox.classList.remove('vis'); sugBox.innerHTML = ''; } sugSel = -1; }
+  function renderSuggest(items) {
+    if (!sugBox) return;
+    if (!items.length) { hideSuggest(); return; }
+    sugBox.innerHTML = items.map((t, i) => {
+      const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : coverFallbackHTML(t.title, t.artist);
+      return `<div class="gx-sg-item" data-i="${i}"><div class="gx-sg-cover">${cover}</div>
+        <div class="gx-sg-text"><div class="gx-sg-title">${esc(t.title)}</div><div class="gx-sg-artist">${esc(t.artist || '')}</div></div>
+        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>`;
+    }).join('');
+    sugBox.classList.add('vis');
+    sugBox.querySelectorAll('.gx-sg-item').forEach((el) => {
+      el.addEventListener('click', () => {
+        const t = items[+el.dataset.i]; if (!t) return;
+        qInput.value = t.title + (t.artist ? ' ' + t.artist : '');
+        hideSuggest(); haptic(); doSearch();
+      });
+    });
+  }
+  if (qInput && sugBox) {
+    qInput.addEventListener('input', (e) => {
+      const v = e.target.value.trim();
+      clearTimeout(sugT);
+      if (v.length < 2) { hideSuggest(); return; }
+      sugT = setTimeout(async () => {
+        if (sugAbort) sugAbort.abort();
+        sugAbort = new AbortController();
+        sugBox.innerHTML = '<div class="gx-sg-loading"><div class="gx-spin"></div></div>';
+        sugBox.classList.add('vis');
+        try {
+          const r = await fetch('/api/suggest?q=' + encodeURIComponent(v), { signal: sugAbort.signal });
+          if (qInput.value.trim() !== v) return; // пользователь уже печатает дальше
+          const items = r.ok ? await r.json() : [];
+          renderSuggest(items.slice(0, 6));
+        } catch (e) { if (e.name !== 'AbortError') hideSuggest(); }
+      }, 220);
+    });
+    qInput.addEventListener('keydown', (e) => {
+      const items = sugBox.querySelectorAll('.gx-sg-item');
+      if (!items.length || !sugBox.classList.contains('vis')) return;
+      if (e.key === 'ArrowDown') { e.preventDefault(); sugSel = Math.min(sugSel + 1, items.length - 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); sugSel = Math.max(sugSel - 1, 0); }
+      else if (e.key === 'Enter' && sugSel >= 0) { e.preventDefault(); items[sugSel].click(); return; }
+      else return;
+      items.forEach((el, i) => el.classList.toggle('sel', i === sugSel));
+    });
+    document.addEventListener('click', (e) => { if (!e.target.closest('.srch-header')) hideSuggest(); });
+  }
+  const _doSearch = window.doSearch;
+  window.doSearch = async function () {
+    hideSuggest();
+    gxSearchQuery = (qInput && qInput.value || '').trim();
+    gxSearchEnded = false; gxSearchLoading = false;
+    return _doSearch.apply(this, arguments);
+  };
+
+  /* ───────── 2. Подгрузка результатов при скролле ───────── */
+  let gxSearchQuery = '', gxSearchEnded = false, gxSearchLoading = false;
+  const SEARCH_PAGE = 30;
+  async function loadMoreSearch() {
+    const ul = $('search-list');
+    if (!ul || gxSearchLoading || gxSearchEnded || !gxSearchQuery) return;
+    if ($('srch-results').style.display === 'none') return;
+    const have = ul.querySelectorAll('li.track').length;
+    if (have < SEARCH_PAGE) return; // первая страница ещё не долистана до конца — рано
+    gxSearchLoading = true;
+    const spin = document.createElement('div'); spin.className = 'gx-more-spin'; spin.innerHTML = '<div class="gx-spin"></div>';
+    ul.parentElement.appendChild(spin);
+    try {
+      const r = await gxFetchRetry('/api/search?q=' + encodeURIComponent(gxSearchQuery) + '&offset=' + have + '&limit=' + SEARCH_PAGE, {}, 2);
+      const tracks = r.ok ? await r.json() : [];
+      if (tracks.length) { appendTracks(tracks, ul, 'search'); updateAllHeartButtons(); }
+      if (!tracks.length || tracks.length < SEARCH_PAGE) {
+        gxSearchEnded = true;
+        const note = document.createElement('div'); note.className = 'gx-end-note'; note.textContent = 'Это все результаты';
+        ul.parentElement.appendChild(note);
+      }
+    } catch (e) { /* сеть подведёт в другой раз — просто не помечаем "конец" */ }
+    finally { spin.remove(); gxSearchLoading = false; }
+  }
+  const searchPage = $('page-search');
+  if (searchPage) {
+    searchPage.addEventListener('scroll', () => {
+      if (searchPage.scrollTop + searchPage.clientHeight > searchPage.scrollHeight - 700) loadMoreSearch();
+    }, { passive: true });
+  }
+
+  /* ───────── 10. Карточка статуса источников ───────── */
+  function dotColor(state) { return state === 'ok' ? '#34d399' : state === 'recovering' ? '#60a5fa' : state === 'missing' ? '#888' : '#fb923c'; }
+  function stateLabel(state) { return { ok: 'работает', degraded: 'недоступен', recovering: 'проверяю снова', missing: 'не установлен' }[state] || state; }
+  function fmtMB(bytes) { return (bytes / 1024 / 1024).toFixed(0) + ' МБ'; }
+  function fmtAgo(ts) {
+    if (!ts) return null;
+    const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+    if (s < 90) return 'только что'; if (s < 3600) return Math.round(s / 60) + ' мин назад';
+    if (s < 86400) return Math.round(s / 3600) + ' ч назад'; return Math.round(s / 86400) + ' дн назад';
+  }
+  function pluralFiles(n) {
+    const n10 = n % 10, n100 = n % 100;
+    if (n100 >= 11 && n100 <= 14) return n + ' файлов';
+    if (n10 === 1) return n + ' файл';
+    if (n10 >= 2 && n10 <= 4) return n + ' файла';
+    return n + ' файлов';
+  }
+  async function refreshStatusCard() {
+    const body = $('gx-status-body'); if (!body) return;
+    try {
+      const r = await fetch('/api/status', { headers: { Authorization: authStr } });
+      if (!r.ok) throw 0;
+      const st = await r.json();
+      const yt = st.youtube, sc = st.soundcloud, yd = st.yt_dlp, cache = st.cache || {};
+      body.innerHTML = `
+        <div class="gx-status-row"><span class="gx-status-dot" style="--c:${dotColor(sc.state)}"></span>
+          <div class="gx-status-main">SoundCloud<div class="gx-status-sub">${sc.state === 'ok' ? 'основной источник' : esc(sc.last_error || 'сбой')}</div></div></div>
+        <div class="gx-status-row"><span class="gx-status-dot" style="--c:${dotColor(yt.state)}"></span>
+          <div class="gx-status-main">YouTube (запасной)<div class="gx-status-sub">${yt.state === 'ok' ? 'доступен' : yt.retry_in_sec ? 'вернётся через ' + yt.retry_in_sec + ' с' : stateLabel(yt.state)}</div></div></div>
+        <div class="gx-status-row"><span class="gx-status-dot" style="--c:${st.ffmpeg ? '#34d399' : '#fb923c'}"></span>
+          <div class="gx-status-main">Кэш аудио<div class="gx-status-sub">${pluralFiles(cache.files || 0)} · ${fmtMB(cache.bytes || 0)}</div></div></div>
+        <div class="gx-status-row"><span class="gx-status-dot" style="--c:${yd.version && yd.version !== 'not installed' ? '#34d399' : '#888'}"></span>
+          <div class="gx-status-main">yt-dlp ${esc(yd.version || '?')}<div class="gx-status-sub">${yd.updating ? 'обновляю…' : (fmtAgo(yd.last_check_ts) ? 'проверено ' + fmtAgo(yd.last_check_ts) : 'ещё не проверялось')}</div></div>
+          <button class="gx-status-btn" id="gx-ytdlp-upd" ${yd.updating ? 'disabled' : ''}>Проверить</button></div>`;
+      const btn = $('gx-ytdlp-upd');
+      if (btn) btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = '…';
+        try {
+          const rr = await fetch('/api/ytdlp/update', { method: 'POST', headers: { Authorization: authStr } });
+          const d = await rr.json();
+          toast(d.updated ? `Обновлено до ${d.version}` : d.error ? 'Не удалось: ' + d.error : 'Уже последняя версия');
+        } catch (e) { toast('Нет соединения', 'warning'); }
+        refreshStatusCard();
+      });
+    } catch (e) {
+      body.innerHTML = `<div class="gx-status-row"><span class="gx-status-dot" style="--c:#fb923c"></span><div class="gx-status-main">Не удалось получить статус<div class="gx-status-sub">Проверьте соединение</div></div></div>`;
+    }
+  }
+  document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('.tab[onclick*="profile"]')) setTimeout(refreshStatusCard, 200); });
+  if (location.hash.includes('profile')) setTimeout(refreshStatusCard, 800);
+
+  window.flushFavQueue = flushFavQueue;
+  window.refreshStatusCard = refreshStatusCard;
 })();
 
 </script>
