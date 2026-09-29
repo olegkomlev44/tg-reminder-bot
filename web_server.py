@@ -1,13 +1,13 @@
-import os, json, hmac, hashlib, aiohttp, asyncio, random, re, urllib.parse
+import os, json, hmac, hashlib, aiohttp, asyncio, random, re, urllib.parse, uuid, shutil
 from urllib.parse import parse_qsl
 from aiohttp import web
-from music_engine import music_engine, check_yt_dlp_freshness
+from music_engine import music_engine, check_yt_dlp_freshness, yt_dlp_maintenance_loop
 from db import (
                 init_db, get_cached_file_id, save_cached_file_id,
                 save_music_fav, get_music_favs, log_track_history, get_user_history, 
                 get_total_listen_seconds, save_playlist_track, get_playlists,
                 rename_playlist, remove_track_from_playlist, delete_playlist_db,
-                remove_music_fav, clear_history, DB_PATH,
+                remove_music_fav, sync_music_favs, clear_history, DB_PATH,
                 save_playback_state, get_playback_state,
                 init_db, add_dislike, get_blacklist,
                 collab_create, collab_get_meta, collab_get_tracks,
@@ -245,7 +245,12 @@ async def cors_middleware(request, handler):
 RATE_LIMIT_RULES = [
     # (префикс пути, лимит запросов, окно в секундах)
     ("/api/stream/", 60, 60),        # аудиостримы — разрешаем чаще
-    ("/api/search", 30, 60),
+    ("/api/suggest", 90, 60),        # подсказки при наборе (с дебаунсом на клиенте)
+    ("/api/search", 60, 60),         # первая страница + подгрузка при скролле
+    ("/api/resolve", 20, 60),        # поиск запасного источника
+    ("/api/prefetch", 40, 60),
+    ("/api/status", 20, 60),
+    ("/api/fav/sync", 40, 60),
     ("/api/wave", 20, 60),
     ("/api/radio", 20, 60),
     ("/api/lyrics", 30, 60),
@@ -306,16 +311,65 @@ async def api_get_tracks(request):
 async def api_search(request):
     q = request.rel_url.query.get("q", "").strip()
     if not q: return cors(web.json_response([]))
-    limit = int(request.rel_url.query.get("limit", 120))
-    tracks = await music_engine.search_multi(q, limit=limit)
+    try:
+        limit = max(1, min(int(request.rel_url.query.get("limit", 120)), 120))
+        offset = max(0, min(int(request.rel_url.query.get("offset", 0)), 500))
+    except ValueError:
+        limit, offset = 120, 0
+    tracks = await music_engine.search_multi(q, limit=limit, offset=offset)
     resp = web.json_response(tracks)
     # Пустой результат мог получиться не потому что "ничего не нашлось",
     # а потому что YouTube-источник сейчас в circuit-breaker cooldown —
     # явно сигнализируем об этом заголовком, а не молчим полным нулём.
     yt_status = music_engine.get_yt_status()
-    if not tracks and not yt_status["available"]:
+    if not tracks and not yt_status["available"] and offset == 0:
         resp.headers["X-Source-Degraded"] = "youtube"
     return cors(resp)
+
+async def api_suggest(request):
+    q = request.rel_url.query.get("q", "").strip()
+    if len(q) < 2: return cors(web.json_response([]))
+    return cors(web.json_response(await music_engine.suggest(q, limit=6)))
+
+async def api_resolve(request):
+    """Тот же трек в другом источнике — запасной вариант, когда основной не грузится."""
+    qs = request.rel_url.query
+    title = qs.get("title", "").strip()[:200]
+    artist = qs.get("artist", "").strip()[:200]
+    exclude = qs.get("exclude", "").strip()[:64]
+    prefer = qs.get("prefer") or ("sc" if exclude.startswith("yt_") else "yt")
+    try:
+        dur = int(qs.get("dur", 0) or 0)
+    except ValueError:
+        dur = 0
+    if not title:
+        return cors(web.json_response({"track": None}))
+    track = await music_engine.find_alternative(title, artist, prefer=prefer, exclude_id=exclude, duration_sec=dur)
+    return cors(web.json_response({"track": track}))
+
+async def api_status(request):
+    """Статус источников и кэша — для карточки «Состояние» в профиле."""
+    verify(request.headers.get("Authorization", ""))
+    files = size = 0
+    try:
+        for fname in os.listdir(NORM_CACHE_DIR):
+            fpath = os.path.join(NORM_CACHE_DIR, fname)
+            if os.path.isfile(fpath) and not fname.endswith(".tmp"):
+                files += 1
+                size += os.path.getsize(fpath)
+    except Exception:
+        pass
+    try:
+        free = shutil.disk_usage(NORM_CACHE_DIR).free
+    except Exception:
+        free = None
+    body = music_engine.get_source_status()
+    body.update({
+        "ffmpeg": shutil.which("ffmpeg") is not None,
+        "cache": {"files": files, "bytes": size, "limit_bytes": NORM_CACHE_MAX_BYTES, "disk_free_bytes": free},
+        "uptime_sec": round(time.monotonic() - START_TIME, 1),
+    })
+    return cors(web.json_response(body))
 
 async def api_radio(request):
     """
@@ -557,6 +611,26 @@ async def api_fav_add(request):
         logger.warning(f"api_fav_add: {e}")
     return cors(web.json_response({"error": "bad req"}, status=400))
 
+async def api_ytdlp_update(request):
+    """Кнопка «Обновить сейчас» в карточке статуса профиля."""
+    verify(request.headers.get("Authorization", ""))
+    result = await music_engine.update_yt_dlp(reason="manual", force=True)
+    return cors(web.json_response(result))
+
+async def api_fav_sync(request):
+    """Слияние очереди офлайн-операций клиента с избранным на сервере."""
+    user = verify(request.headers.get("Authorization", ""))
+    try:
+        body = await request.json()
+        ops = body.get("ops") or []
+        if not isinstance(ops, list):
+            raise ValueError("ops must be a list")
+    except Exception as e:
+        logger.warning(f"api_fav_sync: {e}")
+        return cors(web.json_response({"error": "bad req"}, status=400))
+    favs = sync_music_favs(user["id"], ops)
+    return cors(web.json_response({"ok": True, "favs": favs}))
+
 async def api_fav_remove(request):
     """Удалить трек из избранного по track_id."""
     user = verify(request.headers.get("Authorization", ""))
@@ -726,63 +800,76 @@ async def api_stream_track(request):
     # Уже нормализовали этот трек раньше — отдаём готовый файл с диска и не
     # трогаем ffmpeg вообще. web.FileResponse сам умеет Range-запросы, так что
     # перемотка внутри уже играющего трека тоже пойдёт из кэша, а не с источника.
-    # Это же попутно решает проблему истекающих ссылок YouTube: первый прогон
-    # транскодирует и кэширует файл на диск, дальше он играет уже из кэша.
     if normalize:
         cached_path = _normalized_cache_path(tid)
+        if not os.path.exists(cached_path) and _prefetch_state.get(tid) == "running":
+            # Этот же трек прямо сейчас досчитывается в фоне (предзагрузка) —
+            # подождём до 20 секунд вместо второго параллельного транскода.
+            for _ in range(40):
+                await asyncio.sleep(0.5)
+                if os.path.exists(cached_path) or _prefetch_state.get(tid) != "running":
+                    break
         if os.path.exists(cached_path):
             resp = web.FileResponse(cached_path, headers={"X-Audio-Norm": "cached"})
             return cors(resp)
 
-    track = await music_engine.get_track_details(tid)
-    if not track: return cors(web.Response(status=404, text="Stream not found"))
+    # Две попытки: если закэшированная ссылка на аудио протухла (403/404/410 от
+    # источника или ffmpeg не смог её открыть) — сбрасываем кэш и берём свежую.
+    for attempt in (0, 1):
+        track = await music_engine.get_track_details(tid, fresh=(attempt == 1))
+        if not track: return cors(web.Response(status=404, text="Stream not found"))
 
-    # У YouTube-треков track["stream_url"] — это служебный маркер вида "yt_...",
-    # а не http-адрес (его понимает только download_file, см. music_engine.py).
-    # Реальный проксируемый адрес аудио-CDN лежит в direct_stream_url. Раньше
-    # здесь был безусловный 422 для всех yt_-id, из-за чего ЛЮБОЙ трек, найденный
-    # только через YouTube-фолбэк поиска (когда SoundCloud ничего не нашёл),
-    # не запускался вообще.
-    if tid.startswith("yt_"):
-        source_url = track.get("direct_stream_url")
-        extra_headers = track.get("stream_headers") or {}
-    else:
-        source_url = track.get("stream_url")
-        extra_headers = {}
+        # У YouTube-треков track["stream_url"] — служебный маркер вида "yt_...",
+        # а не http-адрес (его понимает только download_file, см. music_engine.py).
+        # Реальный проксируемый адрес аудио-CDN лежит в direct_stream_url.
+        if tid.startswith("yt_"):
+            source_url = track.get("direct_stream_url")
+            extra_headers = track.get("stream_headers") or {}
+        else:
+            source_url = track.get("stream_url")
+            extra_headers = {}
+        if not source_url: return cors(web.Response(status=404, text="Stream not found"))
 
-    if not source_url: return cors(web.Response(status=404, text="Stream not found"))
-
-    if normalize and not rng:
-        try:
-            result = await _stream_normalized(request, source_url, tid)
-            if result is not None:
+        if normalize and not rng:
+            try:
+                result = await _stream_normalized(request, source_url, tid)
+            except Exception as e:
+                logger.warning(f"ffmpeg loudnorm failed ({e}), passthrough")
+                result = None
+            if result is False and attempt == 0:   # источник не отдал ни байта
+                music_engine.invalidate_details(tid)
+                continue
+            if result:
                 return result
+
+        hdrs = {"User-Agent": "Mozilla/5.0", **extra_headers}
+        if rng: hdrs["Range"] = rng
+        started = False
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(source_url, headers=hdrs) as up:
+                    if up.status in (401, 403, 404, 410) and attempt == 0:
+                        music_engine.invalidate_details(tid)
+                        continue
+                    ct = up.headers.get("Content-Type", "audio/mpeg")
+                    rh = {"Content-Type": ct, "Accept-Ranges": "bytes", "Cache-Control": "max-age=3600",
+                          "Access-Control-Allow-Origin": "*", "X-Audio-Norm": "passthrough"}
+                    if cl := up.headers.get("Content-Length"): rh["Content-Length"] = cl
+                    if cr := up.headers.get("Content-Range"): rh["Content-Range"] = cr
+                    resp = web.StreamResponse(status=up.status, headers=rh)
+                    await resp.prepare(request)
+                    started = True
+                    async for chunk in up.content.iter_chunked(CHUNK): await resp.write(chunk)
+                    return resp
         except Exception as e:
-            logger.warning(f"ffmpeg loudnorm failed ({e}), passthrough")
+            if started:
+                return resp  # клиент отвалился посреди трека — повторять нечего
+            if attempt == 0:
+                music_engine.invalidate_details(tid)
+                continue
+            return cors(web.Response(status=502, text=str(e)))
+    return cors(web.Response(status=502, text="Stream unavailable"))
 
-    hdrs = {"User-Agent": "Mozilla/5.0", **extra_headers}
-    if rng: hdrs["Range"] = rng
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(source_url, headers=hdrs) as up:
-                ct = up.headers.get("Content-Type", "audio/mpeg")
-                rh = {"Content-Type": ct, "Accept-Ranges": "bytes", "Cache-Control": "max-age=3600",
-                      "Access-Control-Allow-Origin": "*", "X-Audio-Norm": "passthrough"}
-                if cl := up.headers.get("Content-Length"): rh["Content-Length"] = cl
-                if cr := up.headers.get("Content-Range"): rh["Content-Range"] = cr
-                resp = web.StreamResponse(status=up.status, headers=rh)
-                await resp.prepare(request)
-                async for chunk in up.content.iter_chunked(CHUNK): await resp.write(chunk)
-                return resp
-    except Exception as e:
-        return cors(web.Response(status=502, text=str(e)))
-
-
-# ── Кэш нормализованных (loudnorm) аудиофайлов на диске ────────────────
-# ffmpeg loudnorm — не бесплатная операция; без кэша он перезапускался бы
-# на КАЖДОЕ прослушивание одного и того же трека любым пользователем, что
-# заметно нагружает CPU на слабом bothost-хостинге. Кэшируем результат
-# один раз на track_id и переиспользуем для всех.
 NORM_CACHE_DIR = os.path.join(os.path.dirname(DB_PATH), "norm_cache")
 os.makedirs(NORM_CACHE_DIR, exist_ok=True)
 NORM_CACHE_MAX_BYTES = int(os.getenv("NORM_CACHE_MAX_MB", "500")) * 1024 * 1024
@@ -825,45 +912,64 @@ def _prune_norm_cache():
         logger.warning(f"_prune_norm_cache: {e}")
 
 
-async def _stream_normalized(request, source_url: str, track_id: str):
-    """
-    Проксирует аудио через ffmpeg loudnorm EBU R128 (-14 LUFS), одновременно
-    отдавая поток клиенту и записывая его во временный файл на диске.
-    По завершении без ошибок временный файл атомарно переименовывается в
-    постоянный кэш — следующий запрос этого трека уже не тронет ffmpeg.
-    """
-    import shutil
-    if not shutil.which("ffmpeg"):
-        return None  # ffmpeg не установлен — тихий fallback
-
-    cache_path = _normalized_cache_path(track_id)
-    tmp_path = f"{cache_path}.{os.getpid()}.tmp"
-
+def _ffmpeg_loudnorm_cmd(source_url: str, output: str) -> list:
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", source_url,
         "-af", "loudnorm=I=-14:TP=-1:LRA=11:print_format=none",
         "-vn",
         "-c:a", "libmp3lame", "-q:a", "2",
-        "-f", "mp3", "pipe:1",
+        "-f", "mp3", output,
     ]
+    return cmd
+
+
+async def _stream_normalized(request, source_url: str, track_id: str):
+    """
+    Проксирует аудио через ffmpeg loudnorm EBU R128 (-14 LUFS), одновременно
+    отдавая поток клиенту и записывая его во временный файл на диске.
+    По завершении без ошибок временный файл атомарно переименовывается в
+    постоянный кэш — следующий запрос этого трека уже не тронет ffmpeg.
+
+    Возвращает: StreamResponse — успех; None — ffmpeg не установлен (играем
+    напрямую); False — ffmpeg не получил от источника ни байта (ссылка мертва).
+    Заголовки клиенту уходят только после первого куска данных, поэтому при
+    мёртвой ссылке вызывающий код ещё может сделать повторную попытку.
+    """
+    if not shutil.which("ffmpeg"):
+        return None  # ffmpeg не установлен — тихий fallback
+
+    cache_path = _normalized_cache_path(track_id)
+    # Уникальный суффикс: два одновременных первых запроса одного трека не
+    # должны писать в один и тот же временный файл.
+    tmp_path = f"{cache_path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
+        *_ffmpeg_loudnorm_cmd(source_url, "pipe:1"),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    resp = web.StreamResponse(status=200, headers={
-        "Content-Type": "audio/mpeg",
-        "Cache-Control": "max-age=3600",
-        "Access-Control-Allow-Origin": "*",
-        "X-Audio-Norm": "loudnorm-r128",
-        "Transfer-Encoding": "chunked",
-    })
-    await resp.prepare(request)
+    resp = None
     tmp_file = None
     completed_ok = False
     try:
+        try:
+            first = await asyncio.wait_for(proc.stdout.read(CHUNK), timeout=30)
+        except asyncio.TimeoutError:
+            first = b""
+        if not first:
+            return False
+        resp = web.StreamResponse(status=200, headers={
+            "Content-Type": "audio/mpeg",
+            "Cache-Control": "max-age=3600",
+            "Access-Control-Allow-Origin": "*",
+            "X-Audio-Norm": "loudnorm-r128",
+            "Transfer-Encoding": "chunked",
+        })
+        await resp.prepare(request)
         tmp_file = open(tmp_path, "wb")
+        await resp.write(first)
+        tmp_file.write(first)
         while True:
             chunk = await proc.stdout.read(CHUNK)
             if not chunk:
@@ -893,6 +999,85 @@ async def _stream_normalized(request, source_url: str, track_id: str):
             try: os.remove(tmp_path)
             except OSError: pass
     return resp
+
+
+# ═══════════════════════════════════════════════════════════════
+# ПРЕДЗАГРУЗКА СЛЕДУЮЩИХ ТРЕКОВ
+# ═══════════════════════════════════════════════════════════════
+# Пока играет текущий трек, клиент просит подготовить следующие 1-2: сервер
+# заранее получает ссылку на аудио и нормализует трек в кэш. Когда очередь
+# доходит до него, файл отдаётся с диска мгновенно (и с нормой громкости).
+_prefetch_state: dict[str, str] = {}      # track_id -> "queued" | "running"
+_prefetch_sem = asyncio.Semaphore(1)      # один ffmpeg за раз — хостинг слабый
+_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+
+async def _normalize_to_cache(source_url: str, track_id: str) -> bool:
+    cache_path = _normalized_cache_path(track_id)
+    tmp_path = f"{cache_path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    cmd = _ffmpeg_loudnorm_cmd(source_url, tmp_path)
+    if shutil.which("nice"):
+        cmd = ["nice", "-n", "10", *cmd]  # не отнимаем CPU у самого бота
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        rc = await asyncio.wait_for(proc.wait(), timeout=300)
+    except asyncio.TimeoutError:
+        try: proc.kill()
+        except Exception: pass
+        await proc.wait()
+        rc = -1
+    ok = rc == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 10_000
+    if ok:
+        try:
+            os.replace(tmp_path, cache_path)
+            _prune_norm_cache()
+        except OSError as e:
+            logger.warning(f"prefetch: не удалось сохранить кэш: {e}")
+            ok = False
+    if not ok and os.path.exists(tmp_path):
+        try: os.remove(tmp_path)
+        except OSError: pass
+    return ok
+
+
+async def _prefetch_track(tid: str):
+    try:
+        async with _prefetch_sem:
+            if os.path.exists(_normalized_cache_path(tid)):
+                return
+            _prefetch_state[tid] = "running"
+            track = await music_engine.get_track_details(tid)   # заодно прогревает кэш ссылок
+            if not track:
+                return
+            src = track.get("direct_stream_url") if tid.startswith("yt_") else track.get("stream_url")
+            if not src or not shutil.which("ffmpeg"):
+                return
+            await _normalize_to_cache(src, tid)
+    except Exception as e:
+        logger.debug(f"prefetch {tid}: {e}")
+    finally:
+        _prefetch_state.pop(tid, None)
+
+
+async def api_prefetch(request):
+    verify(request.headers.get("Authorization", ""))
+    try:
+        body = await request.json()
+        ids = list(dict.fromkeys(str(i) for i in (body.get("ids") or [])))[:3]
+    except Exception:
+        return cors(web.json_response({"error": "bad req"}, status=400))
+    queued, cached = [], []
+    for tid in ids:
+        if not _ID_RE.match(tid):
+            continue
+        if os.path.exists(_normalized_cache_path(tid)):
+            cached.append(tid)
+        elif tid not in _prefetch_state and len(_prefetch_state) < 6:
+            _prefetch_state[tid] = "queued"
+            asyncio.create_task(_prefetch_track(tid))
+            queued.append(tid)
+    return cors(web.json_response({"queued": queued, "cached": cached}))
 
 # ═══════════════════════════════════════════════════════════════
 # ARTIST SUBSCRIPTIONS
@@ -1035,6 +1220,12 @@ async def start_web_server():
     app.router.add_get("/sw.js", handle_sw)
     app.router.add_get("/api/tracks", api_get_tracks)
     app.router.add_get("/api/search", api_search)
+    app.router.add_get("/api/suggest", api_suggest)
+    app.router.add_get("/api/resolve", api_resolve)
+    app.router.add_get("/api/status", api_status)
+    app.router.add_post("/api/prefetch", api_prefetch)
+    app.router.add_post("/api/fav/sync", api_fav_sync)
+    app.router.add_post("/api/ytdlp/update", api_ytdlp_update)
     app.router.add_get("/api/wave", api_wave)
     app.router.add_get("/api/radio", api_radio)
     app.router.add_get("/api/lyrics", api_lyrics)
@@ -1078,9 +1269,9 @@ async def start_web_server():
     await web.TCPSite(runner, "0.0.0.0", port).start()
     logger.info(f"🌐 Web server on :{port}")
 
-    # Не блокирует старт сервера — просто пишет предупреждение в лог,
-    # если установленная версия yt-dlp отстала от актуальной в PyPI.
-    asyncio.create_task(check_yt_dlp_freshness())
+    # Не блокирует старт: раз в сутки проверяет PyPI и обновляет yt-dlp сам
+    # (отключается переменной YTDLP_AUTOUPDATE=0).
+    asyncio.create_task(yt_dlp_maintenance_loop())
 
 # ═══════════════════════════════════════════════════════════
 # КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ — API

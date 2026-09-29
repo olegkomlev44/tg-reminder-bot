@@ -2,9 +2,11 @@ import aiohttp
 import re
 import logging
 import struct
+import sys
 import time
 import urllib.parse
 import asyncio
+import importlib
 import os
 import tempfile
 try:
@@ -36,6 +38,9 @@ class _TTLCache:
             return None
         return value
 
+    def pop(self, key: str):
+        self._store.pop(key, None)
+
     def set(self, key: str, value):
         if len(self._store) >= self.maxsize:
             # Вытесняем самую старую запись (простой LRU-подобный лимит)
@@ -65,6 +70,31 @@ SOURCE_EMOJI = {
 }
 
 
+def _ytdlp_version() -> str:
+    if yt_dlp is None:
+        return "not installed"
+    return getattr(yt_dlp, "__version__", None) or getattr(getattr(yt_dlp, "version", None), "__version__", "unknown")
+
+
+def _norm_words(text: str) -> set:
+    """Слова названия без шума вроде (Official Video) — для сопоставления треков."""
+    t = re.sub(r"[\(\[].*?[\)\]]", " ", text or "")
+    words = re.findall(r"\w+", t.lower())
+    noise = {"official", "video", "audio", "lyrics", "lyric", "hd", "hq", "clip", "клип", "topic", "feat", "ft", "prod"}
+    return {w for w in words if w not in noise and len(w) > 1}
+
+
+def _dur_to_sec(d) -> int:
+    try:
+        parts = [int(x) for x in str(d).split(":")]
+        sec = 0
+        for x in parts:
+            sec = sec * 60 + x
+        return sec
+    except Exception:
+        return 0
+
+
 class MusicEngine:
     def __init__(self):
         self.dynamic_cid = None
@@ -78,6 +108,25 @@ class MusicEngine:
         # временно недоступным и явно сигнализируем об этом наружу, вместо
         # того чтобы бесконечно тихо возвращать пустой список.
         self.yt_status = {"available": True, "consecutive_failures": 0, "disabled_until": 0.0, "last_error": None}
+
+        # Кэш "паспортов" треков (прямые ссылки на аудио). Ссылки yt-dlp живут
+        # часы, но привязаны к IP/времени — держим 25 минут: повторный старт,
+        # перемотка и предзагрузка не гоняют yt-dlp/SoundCloud заново.
+        self.yt_details_cache = _TTLCache(ttl=1500, maxsize=200)
+        self.sc_details_cache = _TTLCache(ttl=480, maxsize=300)
+        # Одновременные запросы одного и того же трека (play + prefetch)
+        # ждут один общий результат, а не запускают yt-dlp дважды.
+        self._details_inflight: dict = {}
+
+        # Состояние SoundCloud-источника — для карточки статуса в профиле.
+        self.sc_status = {"ok": True, "last_error": None, "last_ok_ts": None, "last_fail_ts": None}
+
+        # Состояние yt-dlp и автообновления.
+        self.ytdlp_state = {
+            "version": _ytdlp_version(), "latest": None,
+            "last_check_ts": None, "last_update_ts": None, "last_attempt_ts": 0.0,
+            "last_error": None, "updating": False,
+        }
 
     # ─────────────────────────────────────────────
     #  SoundCloud helpers
@@ -117,6 +166,7 @@ class MusicEngine:
             }
             try:
                 async with session.get(f"{SC_API}/search/tracks", params=params, headers=SC_HEADERS) as resp:
+                    self._record_sc(resp.status == 200, f"HTTP {resp.status}")
                     if resp.status == 200:
                         data = await resp.json()
                         results = []
@@ -140,7 +190,15 @@ class MusicEngine:
                         return results
             except Exception as e:
                 logger.error(f"SC Search error: {e}")
+                self._record_sc(False, str(e))
         return []
+
+    def _record_sc(self, ok: bool, error: str = ""):
+        st = self.sc_status
+        if ok:
+            st["ok"] = True; st["last_error"] = None; st["last_ok_ts"] = time.time()
+        else:
+            st["ok"] = False; st["last_error"] = error; st["last_fail_ts"] = time.time()
 
     YT_FAILURE_THRESHOLD = 3      # подряд неудач, после которых считаем источник недоступным
     YT_COOLDOWN_SEC = 300         # пауза перед следующей пробной попыткой (5 мин)
@@ -173,6 +231,12 @@ class MusicEngine:
                 )
             st["available"] = False
             st["disabled_until"] = time.monotonic() + self.YT_COOLDOWN_SEC
+            # Чаще всего YouTube ломается из-за устаревшего yt-dlp — пробуем
+            # обновиться сами (не чаще раза в 6 часов, см. update_yt_dlp).
+            try:
+                asyncio.get_event_loop().create_task(self.update_yt_dlp(reason="circuit"))
+            except RuntimeError:
+                pass
 
     async def search_yt(self, query: str, limit: int = 5) -> list:
         """Поиск через yt-dlp (YouTube Music)."""
@@ -190,7 +254,7 @@ class MusicEngine:
                 'quiet': True, 'extract_flat': True
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+                return ydl.extract_info(f"ytsearch{max(1, min(int(limit), 50))}:{query}", download=False)
         try:
             loop = asyncio.get_event_loop()
             data = await loop.run_in_executor(None, _search)
@@ -213,6 +277,23 @@ class MusicEngine:
             logger.error(f"YT search error: {e}")
             self._record_yt_failure(str(e))
         return []
+
+    async def suggest(self, query: str, limit: int = 6) -> list:
+        """
+        Быстрые подсказки при наборе: только SoundCloud (без тяжёлого фолбэка на
+        YouTube на каждую букву) и с кэшем — чтобы живой поиск не выбивал лимиты.
+        """
+        q = query.strip()
+        if len(q) < 2:
+            return []
+        key = f"sg::{q.lower()}::{limit}"
+        hit = self.search_cache.get(key)
+        if hit is not None:
+            return hit
+        res = await self.search_sc(q, limit=limit)
+        if res:
+            self.search_cache.set(key, res)
+        return res
 
     async def search_multi(self, query: str, limit: int = 5, offset: int = 0) -> list:
         """
@@ -300,10 +381,44 @@ class MusicEngine:
     #  ДЕТАЛИ ТРЕКА + СТРИМ
     # ─────────────────────────────────────────────
 
-    async def get_track_details(self, track_id: str) -> dict | None:
-        if track_id.startswith("yt_"):
-            return await self._get_yt_details(track_id)
-        return await self._get_sc_details(track_id)
+    async def get_track_details(self, track_id: str, fresh: bool = False) -> dict | None:
+        """
+        Паспорт трека с прямой ссылкой на аудио. Успешные ответы кэшируются
+        (YouTube 25 мин, SoundCloud 8 мин); fresh=True принудительно обходит
+        кэш — на случай, когда закэшированная ссылка уже протухла.
+        """
+        tid = str(track_id)
+        is_yt = tid.startswith("yt_")
+        cache = self.yt_details_cache if is_yt else self.sc_details_cache
+        if fresh:
+            cache.pop(tid)
+        else:
+            hit = cache.get(tid)
+            if hit is not None:
+                return hit
+
+        waiting = self._details_inflight.get(tid)
+        if waiting is not None and not fresh:
+            return await asyncio.shield(waiting)
+
+        fut = asyncio.get_event_loop().create_future()
+        self._details_inflight[tid] = fut
+        result = None
+        try:
+            result = await (self._get_yt_details(tid) if is_yt else self._get_sc_details(tid))
+            playable = bool(result and (result.get("direct_stream_url") if is_yt else result.get("stream_url")))
+            if playable:
+                cache.set(tid, result)
+            return result
+        finally:
+            if not fut.done():
+                fut.set_result(result)
+            if self._details_inflight.get(tid) is fut:
+                self._details_inflight.pop(tid, None)
+
+    def invalidate_details(self, track_id: str):
+        tid = str(track_id)
+        (self.yt_details_cache if tid.startswith("yt_") else self.sc_details_cache).pop(tid)
 
     async def _get_sc_details(self, track_id: str) -> dict | None:
         async with aiohttp.ClientSession() as session:
@@ -469,6 +584,192 @@ class MusicEngine:
         return None
 
     # ─────────────────────────────────────────────
+    #  ЗАПАСНОЙ ИСТОЧНИК (fallback при сбое трека)
+    # ─────────────────────────────────────────────
+
+    _BAD_VERSION_WORDS = {"live", "cover", "karaoke", "караоке", "instrumental", "remix", "slowed",
+                          "reverb", "nightcore", "sped", "8d", "acoustic"}
+
+    async def find_alternative(self, title: str, artist: str, prefer: str = "yt",
+                               exclude_id: str = "", duration_sec: int = 0) -> dict | None:
+        """
+        Ищет тот же трек в другом источнике (prefer: "yt" — YouTube, "sc" —
+        SoundCloud). Совпадение проверяется по словам названия и длительности,
+        чтобы вместо упавшего трека не включилась другая песня или кавер.
+        Возвращает трек в формате поиска либо None, если уверенного совпадения нет.
+        """
+        want = _norm_words(title)
+        if not want:
+            return None
+        artist_words = _norm_words(artist)
+        clean_title = re.sub(r"[\(\[].*?[\)\]]", " ", title or "").strip()
+        query = f"{artist or ''} {clean_title}".strip()
+
+        if prefer == "yt":
+            if not self.get_yt_status()["available"]:
+                return None
+            cands = await self.search_yt(query, limit=8)
+        else:
+            cands = await self.search_sc(query, limit=10)
+
+        best, best_score = None, 0.0
+        for c in cands or []:
+            if str(c.get("id")) == str(exclude_id):
+                continue
+            cw = _norm_words(c.get("title", ""))
+            pool = cw | _norm_words(c.get("artist", ""))
+            cov = len(want & pool) / len(want)
+            extra = len(cw - want - artist_words) / max(1, len(cw))
+            score = cov * (1 - 0.5 * extra)
+            if (cw & self._BAD_VERSION_WORDS) - want:
+                score *= 0.6
+            cd = _dur_to_sec(c.get("duration"))
+            if duration_sec and cd:
+                diff = abs(cd - duration_sec)
+                if diff > 30:
+                    score *= 0.4
+                elif diff > 12:
+                    score *= 0.8
+            if score > best_score:
+                best, best_score = c, score
+        if best and best_score >= 0.5:
+            return {**best, "match_score": round(best_score, 2)}
+        return None
+
+    # ─────────────────────────────────────────────
+    #  АВТООБНОВЛЕНИЕ yt-dlp
+    # ─────────────────────────────────────────────
+
+    async def _pypi_latest_ytdlp(self) -> str | None:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://pypi.org/pypi/yt-dlp/json",
+                                       timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        return (await resp.json()).get("info", {}).get("version")
+        except Exception as e:
+            logger.debug(f"PyPI недоступен: {e}")
+        return None
+
+    async def _pip_upgrade_ytdlp(self) -> tuple[bool, str]:
+        last = ""
+        for extra in ([], ["--user"]):  # вторая попытка — если site-packages только для чтения
+            cmd = [sys.executable, "-m", "pip", "install", "-U", "--no-cache-dir",
+                   "--disable-pip-version-check", "--quiet", *extra, "yt-dlp"]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=240)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return False, "pip: таймаут"
+            except Exception as e:
+                return False, str(e)
+            if proc.returncode == 0:
+                return True, ""
+            last = (err or out or b"").decode(errors="ignore")[-300:]
+        return False, last or "pip завершился с ошибкой"
+
+    def _reload_yt_dlp(self) -> bool:
+        """Подгружает свежеустановленный yt-dlp без перезапуска процесса."""
+        global yt_dlp
+        old_mods = {n: m for n, m in sys.modules.items() if n == "yt_dlp" or n.startswith("yt_dlp.")}
+        for n in old_mods:
+            sys.modules.pop(n, None)
+        importlib.invalidate_caches()
+        try:
+            yt_dlp = importlib.import_module("yt_dlp")
+            return True
+        except Exception as e:
+            sys.modules.update(old_mods)  # откат: остаёмся на старой версии
+            logger.error(f"Не удалось подгрузить обновлённый yt-dlp: {e}")
+            return False
+
+    async def update_yt_dlp(self, reason: str = "scheduled", force: bool = False) -> dict:
+        """
+        Проверяет PyPI и при необходимости обновляет yt-dlp через pip, затем
+        подгружает новую версию на лету. Не чаще раза в час (после срабатывания
+        circuit breaker — раза в 6 часов). Отключается переменной YTDLP_AUTOUPDATE=0.
+        """
+        st = self.ytdlp_state
+        if yt_dlp is None:
+            return {"updated": False, "error": "yt-dlp не установлен"}
+        if os.getenv("YTDLP_AUTOUPDATE", "1") == "0" and not force:
+            return {"updated": False, "disabled": True}
+        if st["updating"]:
+            return {"updated": False, "busy": True}
+        now = time.time()
+        min_gap = 6 * 3600 if reason == "circuit" else 3600
+        if not force and now - st["last_attempt_ts"] < min_gap:
+            return {"updated": False, "throttled": True}
+
+        st["updating"] = True
+        st["last_attempt_ts"] = now
+        try:
+            before = _ytdlp_version()
+            latest = await self._pypi_latest_ytdlp()
+            st["latest"] = latest
+            st["last_check_ts"] = now
+            if latest and latest == before and not force:
+                logger.info(f"yt-dlp актуален: {before}")
+                return {"updated": False, "version": before, "latest": latest}
+            if latest is None and reason != "circuit" and not force:
+                return {"updated": False, "version": before, "error": "PyPI недоступен"}
+
+            logger.info(f"yt-dlp: обновляю {before} → {latest or 'последняя'} (причина: {reason})")
+            ok, err = await self._pip_upgrade_ytdlp()
+            if not ok:
+                st["last_error"] = err
+                logger.warning(f"Автообновление yt-dlp не удалось: {err}")
+                return {"updated": False, "error": err}
+            if not self._reload_yt_dlp():
+                st["last_error"] = "не удалось подгрузить новую версию (нужен перезапуск)"
+                return {"updated": False, "error": st["last_error"]}
+
+            after = _ytdlp_version()
+            st.update(version=after, last_update_ts=time.time(), last_error=None)
+            # Даём YouTube новый шанс сразу, не дожидаясь конца cooldown.
+            self.yt_status.update(available=True, consecutive_failures=0, disabled_until=0.0, last_error=None)
+            logger.info(f"✅ yt-dlp обновлён: {before} → {after}")
+            return {"updated": after != before, "version": after, "previous": before}
+        except Exception as e:
+            st["last_error"] = str(e)
+            logger.warning(f"update_yt_dlp: {e}")
+            return {"updated": False, "error": str(e)}
+        finally:
+            st["updating"] = False
+
+    # ─────────────────────────────────────────────
+    #  СТАТУС ИСТОЧНИКОВ (для карточки в профиле)
+    # ─────────────────────────────────────────────
+
+    def get_source_status(self) -> dict:
+        yt = self.get_yt_status()
+        if yt_dlp is None:
+            yt_state = "missing"
+        elif not yt["available"]:
+            yt_state = "degraded"
+        elif yt.get("half_open"):
+            yt_state = "recovering"
+        else:
+            yt_state = "ok"
+        retry = max(0, int(yt["disabled_until"] - time.monotonic())) if not yt["available"] else 0
+        st = self.ytdlp_state
+        return {
+            "youtube": {"state": yt_state, "failures": yt["consecutive_failures"],
+                        "retry_in_sec": retry, "last_error": yt.get("last_error")},
+            "soundcloud": {"state": "ok" if self.sc_status["ok"] else "degraded",
+                           "last_error": self.sc_status["last_error"]},
+            "yt_dlp": {"version": st["version"], "latest": st["latest"],
+                       "last_update_ts": st["last_update_ts"], "updating": st["updating"],
+                       "last_error": st["last_error"],
+                       "autoupdate": os.getenv("YTDLP_AUTOUPDATE", "1") != "0"},
+        }
+
+    # ─────────────────────────────────────────────
     #  LYRICS / COVER
     # ─────────────────────────────────────────────
 
@@ -504,6 +805,19 @@ class MusicEngine:
 
 
 music_engine = MusicEngine()
+
+
+async def yt_dlp_maintenance_loop():
+    """Раз в сутки проверяет и обновляет yt-dlp (первый раз — через 30 секунд после старта)."""
+    if yt_dlp is None:
+        return
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await music_engine.update_yt_dlp(reason="scheduled")
+        except Exception as e:
+            logger.warning(f"yt_dlp_maintenance_loop: {e}")
+        await asyncio.sleep(24 * 3600)
 
 
 async def check_yt_dlp_freshness():

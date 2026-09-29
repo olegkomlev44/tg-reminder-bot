@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +59,12 @@ def init_db():
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
     c.execute('''CREATE TABLE IF NOT EXISTS favorites (user_id TEXT, track_id TEXT, title TEXT, artist TEXT)''')
+    # «Надгробия» удалений избранного: без них устройство, бывшее офлайн, при
+    # синхронизации воскресило бы трек, который другое устройство уже убрало.
+    c.execute('''CREATE TABLE IF NOT EXISTS fav_tombstones (
+        user_id TEXT NOT NULL, track_id TEXT NOT NULL, deleted_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, track_id)
+    )''')
     # Подписки на артистов
     c.execute('''CREATE TABLE IF NOT EXISTS artist_subscriptions (
         user_id TEXT NOT NULL,
@@ -143,6 +150,7 @@ def init_db():
     for stmt in (
         "ALTER TABLE favorites ADD COLUMN artwork_url TEXT",
         "ALTER TABLE favorites ADD COLUMN source TEXT",
+        "ALTER TABLE favorites ADD COLUMN added_at INTEGER DEFAULT 0",
         "ALTER TABLE history ADD COLUMN artwork_url TEXT",
         "ALTER TABLE history ADD COLUMN source TEXT",
         "ALTER TABLE playlists ADD COLUMN artwork_url TEXT",
@@ -154,6 +162,13 @@ def init_db():
             pass  # колонка уже существует — это нормально
         except Exception as e:
             logger.error(f"Миграция БД неожиданно упала на '{stmt}': {e}")
+
+    # Старым записям избранного проставляем «время добавления» по порядку вставки
+    # (rowid ≪ миллисекундных меток новых записей — порядок сохраняется).
+    try:
+        c.execute("UPDATE favorites SET added_at = rowid WHERE added_at IS NULL OR added_at = 0")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -176,34 +191,101 @@ def save_cached_file_id(track_id, file_id):
     conn.close()
 
 # --- ИЗБРАННОЕ И ИСТОРИЯ ---
-def save_music_fav(user_id, track_info):
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def save_music_fav(user_id, track_info, added_at=None):
     conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT 1 FROM favorites WHERE user_id=? AND track_id=?", (str(user_id), str(track_info['id'])))
     if c.fetchone():
         conn.close()
         return False
-    c.execute("INSERT INTO favorites (user_id, track_id, title, artist, artwork_url, source) VALUES (?, ?, ?, ?, ?, ?)",
-              (str(user_id), str(track_info['id']), track_info.get('title', ''), track_info.get('artist', ''), track_info.get('artwork_url', ''), track_info.get('source', 'SoundCloud')))
+    c.execute("INSERT INTO favorites (user_id, track_id, title, artist, artwork_url, source, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (str(user_id), str(track_info['id']), track_info.get('title', ''), track_info.get('artist', ''), track_info.get('artwork_url', ''), track_info.get('source', 'SoundCloud'), int(added_at or _now_ms())))
+    c.execute("DELETE FROM fav_tombstones WHERE user_id=? AND track_id=?", (str(user_id), str(track_info['id'])))
     conn.commit()
     conn.close()
     return True
 
 def remove_music_fav(user_id, track_id):
-    """Удалить трек из избранного."""
+    """Удалить трек из избранного (и запомнить удаление для синхронизации)."""
     conn = _db_connect()
     conn.execute("DELETE FROM favorites WHERE user_id=? AND track_id=?", (str(user_id), str(track_id)))
+    conn.execute("REPLACE INTO fav_tombstones (user_id, track_id, deleted_at) VALUES (?, ?, ?)",
+                 (str(user_id), str(track_id), _now_ms()))
     conn.commit()
     conn.close()
     return True
 
+def _fetch_favs(c, user_id):
+    c.execute("SELECT track_id, title, artist, artwork_url, source, added_at FROM favorites "
+              "WHERE user_id=? ORDER BY added_at DESC, rowid DESC", (str(user_id),))
+    return [{"id": r[0], "title": r[1], "artist": r[2], "artwork_url": r[3], "source": r[4], "added_at": r[5]}
+            for r in c.fetchall()]
+
 def get_music_favs(user_id):
     conn = _db_connect()
-    c = conn.cursor()
-    c.execute("SELECT track_id, title, artist, artwork_url, source FROM favorites WHERE user_id=?", (str(user_id),))
-    rows = c.fetchall()
-    conn.close()
-    return [{"id": r[0], "title": r[1], "artist": r[2], "artwork_url": r[3], "source": r[4]} for r in rows]
+    try:
+        return _fetch_favs(conn.cursor(), user_id)
+    finally:
+        conn.close()
+
+def sync_music_favs(user_id, ops):
+    """
+    Сливает очередь офлайн-операций клиента [{op: add|remove, id, track, ts}]
+    с избранным на сервере по принципу «последнее действие по треку побеждает».
+    Возвращает актуальный список избранного (новые сверху).
+    """
+    uid = str(user_id)
+    now = _now_ms()
+    latest = {}
+    for op in (ops or [])[:500]:
+        if not isinstance(op, dict):
+            continue
+        track = op.get("track") if isinstance(op.get("track"), dict) else None
+        tid = str(op.get("id") or (track or {}).get("id") or "")[:200]
+        kind = op.get("op")
+        if not tid or kind not in ("add", "remove"):
+            continue
+        try:
+            ts = int(op.get("ts") or now)
+        except (TypeError, ValueError):
+            ts = now
+        ts = min(ts, now + 60_000)  # часы клиента не могут «убежать» в будущее и выиграть навсегда
+        if tid not in latest or ts >= latest[tid][0]:
+            latest[tid] = (ts, kind, track)
+
+    conn = _db_connect()
+    try:
+        c = conn.cursor()
+        for tid, (ts, kind, track) in latest.items():
+            c.execute("SELECT added_at FROM favorites WHERE user_id=? AND track_id=?", (uid, tid))
+            row = c.fetchone()
+            c.execute("SELECT deleted_at FROM fav_tombstones WHERE user_id=? AND track_id=?", (uid, tid))
+            tomb = c.fetchone()
+            tomb_ts = tomb[0] if tomb else 0
+            if kind == "add":
+                if tomb_ts >= ts:
+                    continue  # на другом устройстве трек убрали позже
+                if row is None and track:
+                    c.execute("INSERT INTO favorites (user_id, track_id, title, artist, artwork_url, source, added_at) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (uid, tid, str(track.get("title", ""))[:300], str(track.get("artist", ""))[:300],
+                               str(track.get("artwork_url", ""))[:600], str(track.get("source", "SoundCloud"))[:40], ts))
+                if row is not None or track:
+                    c.execute("DELETE FROM fav_tombstones WHERE user_id=? AND track_id=?", (uid, tid))
+            else:  # remove
+                if row is not None and (row[0] or 0) > ts:
+                    continue  # трек добавили позже этого удаления
+                c.execute("DELETE FROM favorites WHERE user_id=? AND track_id=?", (uid, tid))
+                c.execute("REPLACE INTO fav_tombstones (user_id, track_id, deleted_at) VALUES (?, ?, ?)",
+                          (uid, tid, max(ts, tomb_ts)))
+        conn.commit()
+        return _fetch_favs(c, uid)
+    finally:
+        conn.close()
 
 def log_track_history(user_id, track_info):
     conn = _db_connect()
