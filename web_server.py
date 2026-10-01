@@ -251,6 +251,7 @@ RATE_LIMIT_RULES = [
     ("/api/prefetch", 40, 60),
     ("/api/status", 20, 60),
     ("/api/fav/sync", 40, 60),
+    ("/api/playlist/import", 6, 60),
     ("/api/wave", 20, 60),
     ("/api/radio", 20, 60),
     ("/api/lyrics", 30, 60),
@@ -616,6 +617,20 @@ async def api_ytdlp_update(request):
     verify(request.headers.get("Authorization", ""))
     result = await music_engine.update_yt_dlp(reason="manual", force=True)
     return cors(web.json_response(result))
+
+async def api_playlist_import(request):
+    """Импорт плейлиста YouTube/SoundCloud по ссылке (см. gx-import-sheet)."""
+    verify(request.headers.get("Authorization", ""))
+    try:
+        body = await request.json()
+        url = str(body.get("url", ""))[:2000]
+    except Exception:
+        return cors(web.json_response({"error": "bad req"}, status=400))
+    if not url:
+        return cors(web.json_response({"error": "no url"}, status=400))
+    result = await music_engine.extract_playlist(url)
+    status = 200 if "tracks" in result else 422
+    return cors(web.json_response(result, status=status))
 
 async def api_fav_sync(request):
     """Слияние очереди офлайн-операций клиента с избранным на сервере."""
@@ -1226,6 +1241,7 @@ async def start_web_server():
     app.router.add_post("/api/prefetch", api_prefetch)
     app.router.add_post("/api/fav/sync", api_fav_sync)
     app.router.add_post("/api/ytdlp/update", api_ytdlp_update)
+    app.router.add_post("/api/playlist/import", api_playlist_import)
     app.router.add_get("/api/wave", api_wave)
     app.router.add_get("/api/radio", api_radio)
     app.router.add_get("/api/lyrics", api_lyrics)

@@ -84,6 +84,18 @@ def _norm_words(text: str) -> set:
     return {w for w in words if w not in noise and len(w) > 1}
 
 
+def _sec_to_dur(seconds) -> str:
+    try:
+        s = int(seconds)
+        if s <= 0:
+            return ""
+        m, s = divmod(s, 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+    except (TypeError, ValueError):
+        return ""
+
+
 def _dur_to_sec(d) -> int:
     try:
         parts = [int(x) for x in str(d).split(":")]
@@ -582,6 +594,80 @@ class MusicEngine:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         return None
+
+    # ─────────────────────────────────────────────
+    #  ИМПОРТ ПЛЕЙЛИСТА ПО ССЫЛКЕ
+    # ─────────────────────────────────────────────
+
+    PLAYLIST_URL_RE = re.compile(
+        r"^https?://(www\.|music\.|m\.)?"
+        r"(youtube\.com|youtu\.be|soundcloud\.com)/",
+        re.IGNORECASE,
+    )
+
+    async def extract_playlist(self, url: str, limit: int = 60) -> dict:
+        """
+        Импорт плейлиста YouTube (playlist/mix) или SoundCloud (set/плейлист)
+        по ссылке. Сначала быстрый extract_flat (список без резолва каждого
+        трека по отдельности — иначе плейлист на 60 треков был бы 60
+        последовательными обращениями к источнику), затем каждая запись
+        превращается в трек в нашем обычном формате (как из search_multi),
+        так что дальше плеер не отличает его от результата поиска.
+        """
+        url = (url or "").strip()
+        if not url or not self.PLAYLIST_URL_RE.match(url):
+            return {"error": "unsupported_url"}
+        if not yt_dlp:
+            return {"error": "yt_dlp_missing"}
+
+        def _extract():
+            ydl_opts = {
+                "quiet": True, "extract_flat": "in_playlist",
+                "playlistend": limit, "skip_download": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        try:
+            loop = asyncio.get_event_loop()
+            info = await asyncio.wait_for(loop.run_in_executor(None, _extract), timeout=45)
+        except asyncio.TimeoutError:
+            return {"error": "timeout"}
+        except Exception as e:
+            logger.warning(f"extract_playlist('{url}'): {e}")
+            return {"error": "extract_failed"}
+
+        entries = info.get("entries") or ([info] if info.get("id") else [])
+        if not entries:
+            return {"error": "empty"}
+
+        is_sc = "soundcloud.com" in url.lower()
+        tracks = []
+        seen = set()
+        for e in entries[:limit]:
+            if not e or not e.get("id"):
+                continue
+            tid = str(e["id"]) if is_sc else f"yt_{e['id']}"
+            if tid in seen:
+                continue
+            seen.add(tid)
+            thumb = e.get("thumbnail")
+            if not thumb and e.get("thumbnails"):
+                thumb = e["thumbnails"][-1].get("url")
+            tracks.append({
+                "id": tid,
+                "title": e.get("title") or "Без названия",
+                "artist": e.get("uploader") or e.get("channel") or (info.get("uploader") if not is_sc else "") or "",
+                "artwork_url": thumb or "",
+                "duration": _sec_to_dur(e.get("duration")),
+                "source": "SoundCloud" if is_sc else "YouTube Music",
+            })
+
+        return {
+            "title": info.get("title") or "Импортированный плейлист",
+            "tracks": tracks,
+            "truncated": len(entries) > limit,
+        }
 
     # ─────────────────────────────────────────────
     #  ЗАПАСНОЙ ИСТОЧНИК (fallback при сбое трека)
