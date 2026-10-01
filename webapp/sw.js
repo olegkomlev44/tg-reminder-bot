@@ -2,7 +2,7 @@
 //  Music App — Service Worker  (Cache-First Architecture)
 //  Версия кэша: при изменении SW всегда меняй VERSION
 // ════════════════════════════════════════════════════════════════════
-const VERSION   = 'v1.2.0';
+const VERSION   = 'v1.3.0';
 const SHELL     = `shell-${VERSION}`;   // App Shell — статика
 const API_CACHE = `api-${VERSION}`;     // API-ответы (поиск, треки, волна)
 const AUD_CACHE = `audio-${VERSION}`;   // Аудиопотоки (авто-кэш при прослушивании, LRU)
@@ -264,6 +264,15 @@ self.addEventListener('message', event => {
                     return;
                 }
                 const body = await resp.arrayBuffer();
+                // Страховка от "успешного" ответа с пустым/обрезанным телом
+                // (например сервер вернул JSON-ошибку с статусом 200, что
+                // раньше молча кэшировалось как валидный офлайн-трек и потом
+                // тихо не игралось без сети). 15 КБ — заведомо меньше самого
+                // короткого реального аудиофайла.
+                if (body.byteLength < 15000) {
+                    event.source?.postMessage({ type: 'OFFLINE_SAVE_FAILED', trackId, reason: 'empty' });
+                    return;
+                }
                 await cache.put(url, new Response(body, { status: 200, headers: resp.headers }));
                 event.source?.postMessage({ type: 'OFFLINE_SAVED', trackId });
             } catch (_) {

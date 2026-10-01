@@ -2292,17 +2292,22 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-collapsed .hist-page-sub { opacity: 0; max-height: 0; }
 
 /* ── 7. Раскрытие плеера ── */
-@keyframes gxRise { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: none; } }
-#full-player.fp-opening .fp-top, #full-player.fp-opening .fp-info, #full-player.fp-opening .fp-prog-area,
+@keyframes gxRise { from { opacity: 0; transform: translateY(14px) scale(0.985); filter: blur(2px); } to { opacity: 1; transform: none; filter: blur(0); } }
+@keyframes gxRiseTop { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
+/* Раньше текст/кнопки появлялись большими ступенчатыми задержками ПОСЛЕ
+   приземления обложки — ощущалось как два отдельных действия. Задержки
+   сжаты и идут почти сразу за обложкой (её пружина визуально "оседает"
+   уже к ~60% из 0.76s), так что переход читается как одно движение. */
+#full-player.fp-opening .fp-top { animation: gxRiseTop 0.42s cubic-bezier(0.22,1,0.36,1) both; animation-delay: 0.02s; }
+#full-player.fp-opening .fp-info, #full-player.fp-opening .fp-prog-area,
 #full-player.fp-opening .fp-times, #full-player.fp-opening .fp-ctrl, #full-player.fp-opening .fp-sub-row,
-#full-player.fp-opening .fp-upnext { animation: gxRise 0.6s cubic-bezier(0.22,1,0.36,1) both; }
-#full-player.fp-opening .fp-top { animation-delay: 0.04s; }
-#full-player.fp-opening .fp-info { animation-delay: 0.10s; }
-#full-player.fp-opening .fp-prog-area { animation-delay: 0.15s; }
-#full-player.fp-opening .fp-times { animation-delay: 0.17s; }
-#full-player.fp-opening .fp-ctrl { animation-delay: 0.22s; }
-#full-player.fp-opening .fp-sub-row { animation-delay: 0.27s; }
-#full-player.fp-opening .fp-upnext { animation-delay: 0.32s; }
+#full-player.fp-opening .fp-upnext { animation: gxRise 0.46s cubic-bezier(0.22,1,0.36,1) both; }
+#full-player.fp-opening .fp-info { animation-delay: 0.05s; }
+#full-player.fp-opening .fp-prog-area { animation-delay: 0.09s; }
+#full-player.fp-opening .fp-times { animation-delay: 0.10s; }
+#full-player.fp-opening .fp-ctrl { animation-delay: 0.13s; }
+#full-player.fp-opening .fp-sub-row { animation-delay: 0.16s; }
+#full-player.fp-opening .fp-upnext { animation-delay: 0.19s; }
 
 /* ── 8. Живая обложка ── */
 .fp-glow { position: absolute; left: 50%; top: 50%; width: min(78%, 370px); aspect-ratio: 1; border-radius: 50%;
@@ -2398,6 +2403,79 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-status-btn { border: 1px solid var(--glass-border); background: rgba(255,255,255,0.08); color: var(--text);
   font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 12px; flex-shrink: 0; }
 .gx-status-btn:disabled { opacity: 0.5; }
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   EXTRA PACK — круговой таймер сна, импорт плейлиста, подтверждения,
+   частицы у лайка, pull-to-refresh
+═══════════════════════════════════════════════════════════════════ */
+
+/* ── Круговой таймер сна ── */
+#gx-timer-idle, #gx-timer-active { padding: 6px 4px 22px; display: flex; flex-direction: column; align-items: center; }
+.gx-dial-wrap { position: relative; width: 220px; height: 220px; margin: 6px auto 18px; touch-action: none; }
+.gx-dial-wrap svg { width: 100%; height: 100%; overflow: visible; }
+.gx-dial-track { fill: none; stroke: rgba(255,255,255,0.10); stroke-width: 14; }
+.gx-dial-arc { stroke: var(--accent); stroke-width: 14; stroke-linecap: round; filter: drop-shadow(0 0 8px var(--accent-glow)); }
+.gx-dial-arc-active { stroke-dasharray: 578; transition: stroke-dashoffset 0.3s linear; }
+.gx-dial-handle { fill: #fff; stroke: var(--accent); stroke-width: 4; cursor: grab; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.5)); }
+.gx-dial-handle:active { cursor: grabbing; }
+.gx-dial-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+.gx-dial-mins { font-size: 46px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.gx-dial-label { font-size: 13px; color: var(--text-sec); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.gx-dial-chips { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 18px; }
+.gx-chip { padding: 8px 14px; border-radius: 16px; background: var(--glass-bg); border: 1px solid var(--glass-border);
+  color: var(--text); font-size: 13px; font-weight: 600; -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+.gx-chip.on, .gx-chip:active { background: rgba(var(--accent-rgb),0.18); border-color: rgba(var(--accent-rgb),0.4); color: var(--accent); }
+.gx-dial-start { width: 100%; padding: 15px; border-radius: 18px; border: none; background: linear-gradient(145deg, var(--accent-light), var(--accent-dark));
+  color: #000; font-size: 16px; font-weight: 700; box-shadow: 0 8px 24px var(--accent-glow); }
+.gx-dial-stop { background: linear-gradient(145deg, #ff6b6b, #e03131); color: #fff; box-shadow: 0 8px 24px rgba(224,49,49,0.35); }
+
+/* ── Импорт плейлиста по ссылке ── */
+.gx-import-fab { width: 44px; padding: 0; justify-content: center; margin-right: 8px; }
+#gx-import-sheet { padding-bottom: max(22px, env(safe-area-inset-bottom)); }
+.gx-import-body { padding: 4px 4px 4px; }
+.gx-import-hint { font-size: 13px; color: var(--text-sec); margin-bottom: 12px; }
+.gx-import-input { width: 100%; padding: 14px 16px; border-radius: 16px; background: var(--glass-bg); border: 1px solid var(--glass-border);
+  color: var(--text); font-size: 15px; margin-bottom: 14px; -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+.gx-import-input::placeholder { color: var(--text-sec); }
+.gx-import-status { margin-top: 14px; font-size: 13px; color: var(--text-sec); text-align: center; min-height: 18px; }
+.gx-import-status.err { color: #ff8a8a; }
+
+/* ── Подтверждающая шторка (дубли в избранном и т.п.) ── */
+#gx-confirm-ov { position: fixed; inset: 0; z-index: 920; background: rgba(0,0,0,0.5); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  opacity: 0; transition: opacity 0.25s; display: flex; align-items: center; justify-content: center; padding: 24px; }
+#gx-confirm-ov.vis { opacity: 1; }
+.gx-confirm-box { width: 100%; max-width: 320px; border-radius: 26px; padding: 22px 20px; text-align: center;
+  background: linear-gradient(170deg, rgba(255,255,255,0.14), rgba(255,255,255,0.03)), rgba(22,22,32,0.7);
+  -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%);
+  border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow-lg, 0 20px 60px rgba(0,0,0,0.5));
+  transform: scale(0.9); transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1); }
+#gx-confirm-ov.vis .gx-confirm-box { transform: scale(1); }
+.gx-confirm-icon { font-size: 34px; margin-bottom: 8px; }
+.gx-confirm-msg { font-size: 15px; line-height: 1.45; margin-bottom: 18px; }
+.gx-confirm-btns { display: flex; gap: 10px; }
+.gx-confirm-btns button { flex: 1; padding: 12px; border-radius: 15px; border: 1px solid var(--glass-border); background: rgba(255,255,255,0.08);
+  color: var(--text); font-size: 14px; font-weight: 600; }
+.gx-confirm-btns .gx-confirm-ok { background: linear-gradient(145deg, var(--accent-light), var(--accent-dark)); color: #000; border: none; }
+
+/* ── Частицы у сердечка ── */
+.gx-heart-particles { position: absolute; inset: 0; pointer-events: none; overflow: visible; z-index: 5; }
+.gx-hp { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  transform: translate(-50%, -50%); animation: gxHeartBurst 0.65s cubic-bezier(0.2,0.8,0.3,1) forwards; }
+@keyframes gxHeartBurst {
+  0% { transform: translate(-50%, -50%) scale(0.4); opacity: 1; }
+  70% { opacity: 1; }
+  100% { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(0); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .gx-hp { animation: none; display: none; } }
+
+/* ── Pull-to-refresh ── */
+.gx-ptr { position: absolute; left: 50%; top: 0; transform: translate(-50%, -140%); width: 38px; height: 38px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; z-index: 30; pointer-events: none;
+  background: var(--glass-bg); border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+.gx-ptr svg { width: 18px; height: 18px; stroke: var(--accent); fill: none; stroke-width: 2.4; stroke-linecap: round; transform-origin: center; }
+.gx-ptr.spin svg { animation: spinRing 0.7s linear infinite; }
 
 </style>
 </head>
@@ -2559,10 +2637,25 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <!-- Page header -->
     <div class="pls-page-header">
       <h1 class="pls-page-title">Плейлисты</h1>
+      <button class="pls-new-fab gx-import-fab" onclick="haptic();gxOpenImportSheet()" aria-label="Импорт по ссылке">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+      </button>
       <button class="pls-new-fab" onclick="haptic();showCreatePlaylist()">
         <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
         Создать
       </button>
+    </div>
+
+    <div id="gx-import-ov" class="modal-overlay"></div>
+    <div class="sheet-modal" id="gx-import-sheet">
+      <div class="modal-grabber"></div>
+      <div class="modal-head"><span>🔗 Импорт по ссылке</span><button class="close-modal" onclick="gxCloseImportSheet()">✕</button></div>
+      <div class="gx-import-body">
+        <p class="gx-import-hint">Ссылка на плейлист или подборку YouTube / SoundCloud</p>
+        <input id="gx-import-url" class="gx-import-input" type="url" inputmode="url" placeholder="https://..." autocomplete="off">
+        <button class="gx-dial-start" id="gx-import-go">Импортировать</button>
+        <div id="gx-import-status" class="gx-import-status"></div>
+      </div>
     </div>
 
     <!-- Create playlist inline form (hidden by default) -->
@@ -2673,6 +2766,11 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <div class="gx-card" id="gx-status-card">
       <div class="gx-card-title">Состояние</div>
       <div id="gx-status-body" class="gx-status-body"><div class="gx-status-row"><span class="gx-status-dot" style="--c:#888"></span><span>Загрузка…</span></div></div>
+    </div>
+
+    <div class="gx-card" id="gx-playback-card">
+      <div class="gx-card-title">Воспроизведение</div>
+      <div class="gx-row" style="margin-top:0;border-top:none;padding-top:2px;"><div><div class="gx-row-t">Автопродолжение</div><div class="gx-row-s">Когда треки в очереди кончаются — подмешиваю похожие</div></div><button class="gx-switch" id="gx-sw-autocontinue" role="switch" aria-checked="true"><i></i></button></div>
     </div>
 
     <div class="prof-stats-row">
@@ -2856,11 +2954,42 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 <div class="sheet-modal" id="timer-modal">
   <div class="modal-grabber"></div>
   <div class="modal-head"><span>🌙 Таймер сна</span><button class="close-modal" onclick="closeModals()">✕</button></div>
-  <button class="timer-btn" onclick="haptic();setSleepTimer(15)">15 минут</button>
-  <button class="timer-btn" onclick="haptic();setSleepTimer(30)">30 минут</button>
-  <button class="timer-btn" onclick="haptic();setSleepTimer(60)">60 минут</button>
-  <button class="timer-btn" onclick="haptic();setSleepTimer('track')">До конца трека</button>
-  <button class="timer-btn" style="background:var(--red);border-color:var(--red);" onclick="haptic();setSleepTimer(0)">Выключить таймер</button>
+
+  <div id="gx-timer-idle">
+    <div class="gx-dial-wrap">
+      <svg id="gx-dial" viewBox="0 0 220 220">
+        <circle class="gx-dial-track" cx="110" cy="110" r="92"></circle>
+        <path id="gx-dial-arc" class="gx-dial-arc" fill="none"></path>
+        <circle id="gx-dial-handle" class="gx-dial-handle" cx="110" cy="18" r="14"></circle>
+      </svg>
+      <div class="gx-dial-center">
+        <div class="gx-dial-mins" id="gx-dial-mins">30</div>
+        <div class="gx-dial-label">минут</div>
+      </div>
+    </div>
+    <div class="gx-dial-chips">
+      <button class="gx-chip" data-m="15">15</button>
+      <button class="gx-chip" data-m="30">30</button>
+      <button class="gx-chip" data-m="45">45</button>
+      <button class="gx-chip" data-m="60">60</button>
+      <button class="gx-chip" id="gx-chip-track">До конца трека</button>
+    </div>
+    <button class="gx-dial-start" id="gx-dial-start">Запустить</button>
+  </div>
+
+  <div id="gx-timer-active" style="display:none">
+    <div class="gx-dial-wrap">
+      <svg viewBox="0 0 220 220">
+        <circle class="gx-dial-track" cx="110" cy="110" r="92"></circle>
+        <circle id="gx-dial-remain" class="gx-dial-arc gx-dial-arc-active" cx="110" cy="110" r="92" fill="none" transform="rotate(-90 110 110)"></circle>
+      </svg>
+      <div class="gx-dial-center">
+        <div class="gx-dial-mins" id="gx-dial-remain-text">30:00</div>
+        <div class="gx-dial-label">осталось</div>
+      </div>
+    </div>
+    <button class="gx-dial-start gx-dial-stop" id="gx-dial-stop">Остановить</button>
+  </div>
 </div>
 
 <!-- More menu (три точки) -->
@@ -3612,8 +3741,15 @@ function makeItem(t, ctx) {
 
   li.innerHTML = `<div class="cover">${cover}${badge}<div class="now-eq"><span></span><span></span><span></span><span></span></div></div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><div class="tright">${durationHtml}${rightBtn}</div>`;
   li.addEventListener('click', () => {
-    if (ctx === 'wave') { queue = Array.from(document.getElementById('wave-list').children).map(el => decodeTrackJson(el.dataset.json)); }
-    else if (ctx === 'search') { queue = Array.from(document.getElementById('search-list').children).map(el => decodeTrackJson(el.dataset.json)); }
+    // ВАЖНО: .children включает служебный <li class="track-list-sentinel">
+    // для подгрузки при скролле (см. appendTracksPaged) — он не выводится
+    // но участвует в .children, а dataset.json у него нет. Без фильтра по
+    // классу .track decodeTrackJson(undefined) кидал исключение прямо тут,
+    // клик обрывался ДО playTrack — трек молча не включался (баг с "недавние
+    // прослушивания / поиск не играют, а избранное — играет", т.к. только
+    // у wave/search очередь строится из DOM, а не из allData напрямую).
+    if (ctx === 'wave') { queue = Array.from(document.getElementById('wave-list').querySelectorAll('li.track')).map(el => decodeTrackJson(el.dataset.json)); }
+    else if (ctx === 'search') { queue = Array.from(document.getElementById('search-list').querySelectorAll('li.track')).map(el => decodeTrackJson(el.dataset.json)); }
     else if (ctx === 'fav') { queue = [...allData.favs]; }
     else if (ctx === 'history') { queue = [...allData.history]; }
     else if (ctx === 'playlist') { queue = [...(allData.playlists[currentPl] || [])]; }
@@ -4475,6 +4611,13 @@ aud.addEventListener('timeupdate', () => {
       startCrossfade(queue[qIdx+1]);
   }
 
+  // ── ТАЙМЕР СНА "до конца трека": плавно гасим громкость к финалу ──
+  if (typeof sleepTimerType !== 'undefined' && sleepTimerType === 'track' && typeof gxFadeOutForSleep === 'function'
+      && !sleepFadeStarted && remaining > 0 && remaining <= SLEEP_FADE_SECS) {
+      sleepFadeStarted = true;
+      gxFadeOutForSleep(remaining);
+  }
+
   // ── СИНХРОНИЗАЦИЯ ПОЗИЦИИ МЕЖДУ УСТРОЙСТВАМИ (не чаще раза в ~12 сек) ──
   syncPlaybackState(false);
 });
@@ -4511,10 +4654,20 @@ aud.addEventListener('ended', () => {
         // Подгружаем ещё треки если конец очереди
         if (qIdx >= queue.length - 3 && document.getElementById('page-wave').classList.contains('on')) loadWave();
     } else if (repeatMode === 0 && !shuffle && qIdx >= queue.length - 1) {
-        // Повтор выключен и это последний трек очереди — останавливаемся,
-        // а не начинаем очередь с начала (в отличие от ручного нажатия "next",
-        // которое всегда должно закольцовывать очередь независимо от repeatMode).
-        setPlayState(false);
+        // Повтор выключен и это последний трек очереди. Раньше плеер просто
+        // останавливался; теперь, если включено автопродолжение, сперва
+        // незаметно подмешиваем похожие треки тем же механизмом, что и режим
+        // "Радио" (loadRadioMore), и только если совсем нечего предложить —
+        // останавливаемся, как раньше.
+        if (typeof gxAutoContinue !== 'undefined' && gxAutoContinue && typeof loadRadioMore === 'function') {
+            const seed = queue[qIdx];
+            const before = queue.length;
+            loadRadioMore(seed, false).then(() => {
+                if (queue.length > before) playNext(); else setPlayState(false);
+            }).catch(() => setPlayState(false));
+        } else {
+            setPlayState(false);
+        }
     } else {
         playNext();
     }
@@ -4847,20 +5000,37 @@ function resetLyricsOnTrackChange() {
 }
 
 // ── SLEEP TIMER ──
-let sleepTimerId = null; let sleepTimerType = null;
-function openSleepTimer() { document.getElementById('timer-modal').classList.add('vis'); document.getElementById('overlay').classList.add('vis'); }
-function setSleepTimer(mins) {
-  clearTimeout(sleepTimerId); sleepTimerType = null;
-  const disp = document.getElementById('sleep-timer-display');
-  if (mins === 0) { disp.textContent = ''; toast('Таймер выключен'); }
-  else if (mins === 'track') { sleepTimerType = 'track'; disp.textContent = '(до конца трека)'; toast('Выключится после трека'); }
-  else {
-      sleepTimerId = setTimeout(executeSleepTimer, mins * 60000);
-      disp.textContent = `(${mins} мин)`; toast(`Выключится через ${mins} мин.`);
-  }
-  closeModals();
+// Таймер сна: круговой циферблат (разметка в #timer-modal) + настоящее
+// плавное затухание громкости перед остановкой вместо резкого обрыва.
+// Детали циферблата (перетаскивание, отрисовка дуги) — в GLASS UX PACK ниже,
+// здесь только состояние и сама механика отсчёта/затухания.
+let sleepTimerId = null;        // legacy-имя: используется как id setInterval
+let sleepTimerType = null;      // null | 'minutes' | 'track'
+let sleepTimerEndAt = 0;        // Date.now() момент срабатывания (режим 'minutes')
+let sleepTimerTotalMs = 0;      // исходная длительность — для кольца прогресса
+let sleepFadeStarted = false;
+const SLEEP_FADE_SECS = 15;
+
+function openSleepTimer() {
+  document.getElementById('timer-modal').classList.add('vis');
+  document.getElementById('overlay').classList.add('vis');
+  if (typeof gxSyncSleepTimerView === 'function') gxSyncSleepTimerView();
 }
-function executeSleepTimer() { if(!aud.paused) togglePlay(); document.getElementById('sleep-timer-display').textContent = ''; sleepTimerType = null; toast('Таймер сна сработал 🌙'); }
+function setSleepTimer(mins) {
+  // Обратная совместимость: старые вызовы setSleepTimer(0) ("выключить"),
+  // из остальных мест кода теперь используется startSleepTimer/stopSleepTimer.
+  if (mins === 0) { if (typeof stopSleepTimer === 'function') stopSleepTimer(); return; }
+  if (typeof startSleepTimer === 'function') startSleepTimer(mins);
+}
+function executeSleepTimer() {
+  if (!aud.paused) togglePlay();
+  if (typeof gxRestoreSleepVolume === 'function') gxRestoreSleepVolume();
+  clearInterval(sleepTimerId); sleepTimerId = null;
+  sleepTimerType = null; sleepFadeStarted = false;
+  document.getElementById('sleep-timer-display').textContent = '';
+  if (typeof gxSyncSleepTimerView === 'function') gxSyncSleepTimerView();
+  toast('Таймер сна сработал 🌙');
+}
 
 // ── VISUALIZER (Canvas) ──
 let visCtx = null, analyser = null, dataArray = null; let isVisActive = false;
@@ -5037,11 +5207,19 @@ function saveOfflineMeta() {
     try { localStorage.setItem('offline_tracks_meta', JSON.stringify(offlineMeta)); } catch (e) {}
 }
 
-function saveTrackOffline(t) {
+async function saveTrackOffline(t) {
     if (!t || !t.id) return;
     const id = String(t.id);
     if (isOfflineSaved(id) || offlinePending.has(id)) return;
-    if (!navigator.serviceWorker?.controller) { toast('Офлайн-режим недоступен'); return; }
+    if (!navigator.serviceWorker) { toast('Офлайн-режим недоступен'); return; }
+    if (!navigator.serviceWorker.controller) {
+        // Сразу после первой установки SW ещё может не успеть "взять под
+        // контроль" уже открытую страницу (controller на миг null), хотя
+        // skipWaiting()+clients.claim() в sw.js как раз для этого и нужны —
+        // просто ждём готовности вместо немедленного отказа.
+        try { await Promise.race([navigator.serviceWorker.ready, new Promise(r => setTimeout(r, 2500))]); } catch (e) {}
+        if (!navigator.serviceWorker.controller) { toast('Офлайн-режим недоступен — перезайди в приложение'); return; }
+    }
     offlinePending.add(id);
     toast('📥 Сохраняю офлайн...');
     navigator.serviceWorker.controller.postMessage({ type: 'SAVE_OFFLINE', payload: { trackId: id } });
@@ -7810,6 +7988,352 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
 
   window.flushFavQueue = flushFavQueue;
   window.refreshStatusCard = refreshStatusCard;
+})();
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   EXTRA PACK (JS): круговой таймер сна, автопродолжение очереди, защита
+   от дублей в избранном, частицы у лайка, импорт плейлиста по ссылке,
+   pull-to-refresh, устойчивость к сворачиванию Telegram
+═══════════════════════════════════════════════════════════════════ */
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  /* ───────── Автопродолжение очереди: переключатель ───────── */
+  window.gxAutoContinue = localStorage.getItem('gx_autocontinue') !== '0';
+  const acSw = $('gx-sw-autocontinue');
+  if (acSw) {
+    acSw.classList.toggle('on', window.gxAutoContinue);
+    acSw.setAttribute('aria-checked', String(window.gxAutoContinue));
+    acSw.addEventListener('click', () => {
+      window.gxAutoContinue = !window.gxAutoContinue;
+      localStorage.setItem('gx_autocontinue', window.gxAutoContinue ? '1' : '0');
+      acSw.classList.toggle('on', window.gxAutoContinue);
+      acSw.setAttribute('aria-checked', String(window.gxAutoContinue));
+      haptic();
+    });
+  }
+
+  /* ───────── Круговой таймер сна ───────── */
+  const DIAL_CIRC = 2 * Math.PI * 92; // ≈ 578.05
+  function dialXY(deg, r) { const rad = deg * Math.PI / 180; return { x: 110 + r * Math.sin(rad), y: 110 - r * Math.cos(rad) }; }
+  function gxRenderSleepDial(mins) {
+    window.sleepDialMinutes = mins;
+    const deg = Math.min(359.999, (mins / 120) * 360);
+    const h = dialXY(deg, 92);
+    const handle = $('gx-dial-handle');
+    if (handle) { handle.setAttribute('cx', h.x.toFixed(2)); handle.setAttribute('cy', h.y.toFixed(2)); }
+    const arc = $('gx-dial-arc');
+    if (arc) arc.setAttribute('d', deg < 1 ? '' : `M 110 18 A 92 92 0 ${deg > 180 ? 1 : 0} 1 ${h.x.toFixed(2)} ${h.y.toFixed(2)}`);
+    const txt = $('gx-dial-mins'); if (txt) txt.textContent = mins;
+    document.querySelectorAll('#gx-timer-idle .gx-chip[data-m]').forEach((c) => c.classList.toggle('on', +c.dataset.m === mins));
+    const tc = $('gx-chip-track'); if (tc) tc.classList.remove('on');
+  }
+  window.gxRenderSleepDial = gxRenderSleepDial;
+  window.sleepDialMinutes = 30;
+
+  (function initDial() {
+    const svg = $('gx-dial');
+    if (svg) {
+      let dragging = false;
+      const onMove = (e) => {
+        if (!dragging) return;
+        const rect = svg.getBoundingClientRect();
+        const scale = 220 / rect.width;
+        const x = (e.clientX - rect.left) * scale - 110;
+        const y = (e.clientY - rect.top) * scale - 110;
+        let deg = Math.atan2(x, -y) * 180 / Math.PI; if (deg < 0) deg += 360;
+        let mins = Math.round((deg / 360 * 120) / 5) * 5;
+        mins = Math.max(5, Math.min(120, mins));
+        gxRenderSleepDial(mins);
+      };
+      svg.addEventListener('pointerdown', (e) => { dragging = true; try { svg.setPointerCapture(e.pointerId); } catch (_) {} haptic(); onMove(e); });
+      svg.addEventListener('pointermove', onMove);
+      svg.addEventListener('pointerup', () => { dragging = false; });
+      svg.addEventListener('pointercancel', () => { dragging = false; });
+    }
+    document.querySelectorAll('#gx-timer-idle .gx-chip[data-m]').forEach((c) => c.addEventListener('click', () => { haptic(); gxRenderSleepDial(+c.dataset.m); }));
+    const tc = $('gx-chip-track'); if (tc) tc.addEventListener('click', () => { haptic(); startSleepTimer('track'); });
+    const startBtn = $('gx-dial-start'); if (startBtn) startBtn.addEventListener('click', () => { haptic(); startSleepTimer(window.sleepDialMinutes); });
+    const stopBtn = $('gx-dial-stop'); if (stopBtn) stopBtn.addEventListener('click', () => { haptic(); stopSleepTimer(); });
+  })();
+
+  window.gxSleepTick = gxSleepTick;
+  window.gxSyncSleepTimerView = function () {
+    const idle = $('gx-timer-idle'), active = $('gx-timer-active');
+    if (!idle || !active) return;
+    const isActive = sleepTimerType !== null;
+    idle.style.display = isActive ? 'none' : '';
+    active.style.display = isActive ? '' : 'none';
+    if (isActive) gxSleepTick();
+  };
+
+  function gxSleepTick() {
+    if (sleepTimerType !== 'minutes') {
+      const t = $('gx-dial-remain-text'); if (t) t.textContent = '🎵';
+      const ring = $('gx-dial-remain'); if (ring) ring.style.strokeDashoffset = '0';
+      return;
+    }
+    const remainMs = sleepTimerEndAt - Date.now();
+    const remainSec = Math.max(0, Math.ceil(remainMs / 1000));
+    const mm = Math.floor(remainSec / 60), ss = remainSec % 60;
+    const txt = $('gx-dial-remain-text'); if (txt) txt.textContent = `${mm}:${String(ss).padStart(2, '0')}`;
+    const ring = $('gx-dial-remain');
+    if (ring && sleepTimerTotalMs > 0) {
+      const frac = Math.max(0, Math.min(1, remainMs / sleepTimerTotalMs));
+      ring.style.strokeDasharray = String(DIAL_CIRC);
+      ring.style.strokeDashoffset = (DIAL_CIRC * (1 - frac)).toFixed(1);
+    }
+    if (remainSec <= SLEEP_FADE_SECS && remainSec > 0 && !sleepFadeStarted) { sleepFadeStarted = true; gxFadeOutForSleep(remainSec); }
+  }
+
+  window.startSleepTimer = function (minutesOrTrack) {
+    clearInterval(sleepTimerId); sleepFadeStarted = false;
+    const disp = $('sleep-timer-display');
+    if (minutesOrTrack === 'track') {
+      sleepTimerType = 'track'; sleepTimerEndAt = 0; sleepTimerTotalMs = 0;
+      if (disp) disp.textContent = '(до конца трека)';
+      toast('Выключится после трека');
+    } else {
+      const mins = minutesOrTrack;
+      sleepTimerType = 'minutes';
+      sleepTimerTotalMs = mins * 60000;
+      sleepTimerEndAt = Date.now() + sleepTimerTotalMs;
+      if (disp) disp.textContent = `(${mins} мин)`;
+      toast(`Выключится через ${mins} мин.`);
+      sleepTimerId = setInterval(() => { gxSleepTick(); if (Date.now() >= sleepTimerEndAt) executeSleepTimer(); }, 1000);
+    }
+    gxSyncSleepTimerView();
+    closeModals();
+  };
+  window.stopSleepTimer = function () {
+    clearInterval(sleepTimerId); sleepTimerId = null;
+    sleepTimerType = null; sleepFadeStarted = false;
+    const disp = $('sleep-timer-display'); if (disp) disp.textContent = '';
+    gxRestoreSleepVolume();
+    gxSyncSleepTimerView();
+    toast('Таймер выключен');
+    closeModals();
+  };
+  window.gxFadeOutForSleep = function (remainSec) {
+    try {
+      initAudioCtx();
+      if (typeof masterGain !== 'undefined' && masterGain && typeof actx !== 'undefined' && actx) {
+        masterGain.gain.cancelScheduledValues(actx.currentTime);
+        masterGain.gain.setValueAtTime(masterGain.gain.value, actx.currentTime);
+        masterGain.gain.linearRampToValueAtTime(0.0001, actx.currentTime + Math.max(0.5, remainSec));
+      }
+    } catch (e) {}
+  };
+  window.gxRestoreSleepVolume = function () {
+    try {
+      if (typeof masterGain !== 'undefined' && masterGain && typeof actx !== 'undefined' && actx) {
+        masterGain.gain.cancelScheduledValues(actx.currentTime);
+        masterGain.gain.setValueAtTime(1.0, actx.currentTime);
+      }
+    } catch (e) {}
+  };
+
+  /* ───────── Подтверждающая шторка (переиспользуемая) ───────── */
+  function gxConfirm(messageHtml, icon, okLabel, cancelLabel) {
+    return new Promise((resolve) => {
+      const ov = document.createElement('div'); ov.id = 'gx-confirm-ov';
+      ov.innerHTML = `<div class="gx-confirm-box">
+        <div class="gx-confirm-icon">${icon || '❓'}</div>
+        <div class="gx-confirm-msg">${messageHtml}</div>
+        <div class="gx-confirm-btns">
+          <button class="gx-confirm-cancel">${cancelLabel || 'Отмена'}</button>
+          <button class="gx-confirm-ok">${okLabel || 'Ок'}</button>
+        </div></div>`;
+      document.body.appendChild(ov);
+      void ov.offsetWidth; ov.classList.add('vis');
+      const done = (val) => { ov.classList.remove('vis'); setTimeout(() => ov.remove(), 260); resolve(val); };
+      ov.addEventListener('click', (e) => { if (e.target === ov) done(false); });
+      ov.querySelector('.gx-confirm-cancel').addEventListener('click', () => { haptic(); done(false); });
+      ov.querySelector('.gx-confirm-ok').addEventListener('click', () => { haptic(); done(true); });
+    });
+  }
+  window.gxConfirm = gxConfirm;
+
+  /* ───────── Защита от дублей + частицы у лайка ───────── */
+  const GX_NOISE = new Set(['official', 'video', 'audio', 'lyrics', 'lyric', 'hd', 'hq', 'clip', 'клип', 'feat', 'ft', 'prod', 'remix', 'live', 'cover']);
+  function gxNormWords(s) {
+    const cleaned = String(s || '').toLowerCase().replace(/[\(\[].*?[\)\]]/g, ' ');
+    const words = cleaned.match(/[\w\u0400-\u04FF]+/g) || [];
+    return new Set(words.filter((w) => w.length > 1 && !GX_NOISE.has(w)));
+  }
+  function gxFindFavDuplicate(t) {
+    const want = gxNormWords(t.title);
+    if (!want.size || !Array.isArray(allData.favs)) return null;
+    for (const f of allData.favs) {
+      if (String(f.id) === String(t.id)) continue;
+      const fw = gxNormWords(f.title);
+      if (!fw.size) continue;
+      let inter = 0; want.forEach((w) => { if (fw.has(w)) inter++; });
+      if (inter / want.size >= 0.7) return f;
+    }
+    return null;
+  }
+  window.gxFindFavDuplicate = gxFindFavDuplicate;
+
+  function gxHeartParticles(btn) {
+    if (!btn || typeof btn.getBoundingClientRect !== 'function') return;
+    if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    let holder = btn.querySelector('.gx-heart-particles');
+    if (!holder) {
+      holder = document.createElement('span'); holder.className = 'gx-heart-particles';
+      if (getComputedStyle(btn).position === 'static') btn.style.position = 'relative';
+      btn.appendChild(holder);
+    }
+    holder.innerHTML = '';
+    const colors = ['var(--accent)', '#ff6b9d', '#fff'];
+    for (let i = 0; i < 9; i++) {
+      const p = document.createElement('span'); p.className = 'gx-hp';
+      const ang = (Math.PI * 2 * i) / 9 + (Math.random() * 0.5 - 0.25);
+      const dist = 16 + Math.random() * 16;
+      p.style.setProperty('--dx', (Math.cos(ang) * dist).toFixed(1) + 'px');
+      p.style.setProperty('--dy', (Math.sin(ang) * dist).toFixed(1) + 'px');
+      p.style.background = colors[i % 3];
+      p.style.animationDelay = (Math.random() * 0.06).toFixed(2) + 's';
+      holder.appendChild(p);
+    }
+    setTimeout(() => { holder.innerHTML = ''; }, 760);
+  }
+
+  const _favToggleDup = window.favToggle;
+  window.favToggle = async function (btn, trackJsonStr) {
+    const track = decodeTrackJson(trackJsonStr);
+    const wasLoved = isFav(track.id);
+    if (!wasLoved) {
+      const dup = gxFindFavDuplicate(track);
+      if (dup) {
+        const ok = await gxConfirm(
+          `Похоже, «${esc(dup.title)} — ${esc(dup.artist)}» уже в избранном${dup.source ? ' (с ' + esc(dup.source) + ')' : ''}. Добавить всё равно?`,
+          '🎵', 'Добавить', 'Не надо'
+        );
+        if (!ok) return;
+      }
+    }
+    const r = await _favToggleDup.apply(this, arguments);
+    if (!wasLoved) gxHeartParticles(btn);
+    return r;
+  };
+
+  /* ───────── Импорт плейлиста по ссылке ───────── */
+  window.gxOpenImportSheet = function () {
+    $('gx-import-ov')?.classList.add('vis');
+    $('gx-import-sheet')?.classList.add('vis');
+    const st = $('gx-import-status'); if (st) { st.textContent = ''; st.className = 'gx-import-status'; }
+    const inp = $('gx-import-url'); if (inp) { inp.value = ''; setTimeout(() => inp.focus(), 250); }
+  };
+  window.gxCloseImportSheet = function () {
+    $('gx-import-ov')?.classList.remove('vis');
+    $('gx-import-sheet')?.classList.remove('vis');
+  };
+  $('gx-import-ov')?.addEventListener('click', window.gxCloseImportSheet);
+
+  async function gxDoImport() {
+    const inp = $('gx-import-url'), statusEl = $('gx-import-status'), btn = $('gx-import-go');
+    const url = (inp && inp.value || '').trim();
+    if (!url) { statusEl.textContent = 'Вставь ссылку'; statusEl.className = 'gx-import-status err'; return; }
+    btn.disabled = true; btn.textContent = 'Импортирую…';
+    statusEl.className = 'gx-import-status'; statusEl.textContent = 'Читаю плейлист…';
+    try {
+      const r = await fetch('/api/playlist/import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr },
+        body: JSON.stringify({ url }),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error || !data.tracks || !data.tracks.length) {
+        const msgs = { unsupported_url: 'Такие ссылки пока не поддерживаются', timeout: 'Источник долго отвечает, попробуй ещё раз', empty: 'В плейлисте ничего не нашлось', extract_failed: 'Не удалось прочитать плейлист', yt_dlp_missing: 'Импорт сейчас недоступен на сервере' };
+        statusEl.textContent = msgs[data.error] || 'Не удалось импортировать';
+        statusEl.className = 'gx-import-status err';
+        return;
+      }
+      let base = (data.title || 'Импорт').trim().slice(0, 80) || 'Импорт', name = base, i = 2;
+      while (allData.playlists[name]) name = `${base} (${i++})`;
+      allData.playlists[name] = data.tracks;
+      localStorage.setItem('music_data', JSON.stringify(allData));
+      renderPlaylists();
+      statusEl.textContent = `Добавлено ${data.tracks.length} ${pluralRu(data.tracks.length, 'трек', 'трека', 'треков')}${data.truncated ? ' (плейлист длиннее — взяли первые)' : ''}`;
+      toast(`🎵 Плейлист «${name}» импортирован`, 'success');
+      (async () => {
+        try {
+          await fetch('/api/playlist/create', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr }, body: JSON.stringify({ name }) });
+          for (let i = 0; i < data.tracks.length; i += 8) {
+            const chunk = data.tracks.slice(i, i + 8);
+            await Promise.all(chunk.map((t) => fetch('/api/playlist/add', {
+              method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr },
+              body: JSON.stringify({ name, track_data: t }),
+            }).catch(() => {})));
+          }
+        } catch (e) {}
+      })();
+      setTimeout(window.gxCloseImportSheet, 1100);
+    } catch (e) {
+      statusEl.textContent = 'Нет соединения'; statusEl.className = 'gx-import-status err';
+    } finally {
+      btn.disabled = false; btn.textContent = 'Импортировать';
+    }
+  }
+  $('gx-import-go')?.addEventListener('click', gxDoImport);
+
+  /* ───────── Pull-to-refresh ───────── */
+  function gxInitPullToRefresh(pageId, onRefresh) {
+    const page = $(pageId);
+    if (!page) return;
+    const ind = document.createElement('div'); ind.className = 'gx-ptr';
+    ind.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>';
+    if (getComputedStyle(page).position === 'static') page.style.position = 'relative';
+    page.prepend(ind);
+    let startY = 0, pulling = false, triggered = false;
+    const THRESH = 70;
+    page.addEventListener('touchstart', (e) => {
+      if (page.scrollTop > 2) { pulling = false; return; }
+      startY = e.touches[0].clientY; pulling = true; triggered = false;
+    }, { passive: true });
+    page.addEventListener('touchmove', (e) => {
+      if (!pulling) return;
+      const dy = e.touches[0].clientY - startY;
+      if (dy <= 0) { ind.style.transform = 'translate(-50%, -140%)'; return; }
+      const capped = Math.min(dy * 0.5, 90);
+      ind.style.transform = `translate(-50%, ${(capped - 40).toFixed(1)}px) rotate(${(capped * 3).toFixed(0)}deg)`;
+      if (capped > THRESH * 0.5 && !triggered) { triggered = true; haptic(); }
+    }, { passive: true });
+    page.addEventListener('touchend', async (e) => {
+      if (!pulling) return; pulling = false;
+      const dy = (e.changedTouches[0].clientY - startY) * 0.5;
+      if (dy > THRESH * 0.5) {
+        ind.classList.add('spin'); ind.style.transform = 'translate(-50%, 10px)';
+        try { await onRefresh(); } catch (err) {}
+        setTimeout(() => { ind.classList.remove('spin'); ind.style.transform = 'translate(-50%, -140%)'; }, 350);
+      } else {
+        ind.style.transform = 'translate(-50%, -140%)';
+      }
+    }, { passive: true });
+  }
+  gxInitPullToRefresh('page-history', async () => { await loadData(); renderHistory(); toast('Обновлено'); });
+  gxInitPullToRefresh('page-profile', async () => { await loadData(); renderFavs(); toast('Обновлено'); });
+
+  /* ───────── Устойчивость к сворачиванию Telegram ───────── */
+  let _gxWasPlaying = false;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      _gxWasPlaying = !aud.paused;
+    } else {
+      try { if (typeof actx !== 'undefined' && actx && actx.state === 'suspended') actx.resume(); } catch (e) {}
+      // iOS-WebView иногда сам ставит на паузу при сворачивании; пробуем
+      // возобновить — если браузер потребует свежий жест, aud останется на
+      // паузе, а мини-плеер и так уже показывает кнопку play для одного тапа.
+      if (_gxWasPlaying && aud.paused && queue[qIdx]) {
+        aud.play().catch(() => {});
+      }
+    }
+  });
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) { try { if (typeof actx !== 'undefined' && actx && actx.state === 'suspended') actx.resume(); } catch (err) {} }
+  });
 })();
 
 </script>
