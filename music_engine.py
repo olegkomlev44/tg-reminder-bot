@@ -600,7 +600,11 @@ class MusicEngine:
     # ─────────────────────────────────────────────
 
     PLAYLIST_URL_RE = re.compile(
-        r"^https?://(www\.|music\.|m\.)?"
+        # Раньше принимался только www./music./m. — страница мобильного шеринга
+        # SoundCloud генерирует ссылки вида on.soundcloud.com/..., которые
+        # отваливались с "unsupported_url" ещё до того, как до них добирался
+        # yt-dlp (который сам прекрасно умеет такие ссылки разворачивать).
+        r"^https?://(?:[a-z0-9-]+\.)*"
         r"(youtube\.com|youtu\.be|soundcloud\.com)/",
         re.IGNORECASE,
     )
