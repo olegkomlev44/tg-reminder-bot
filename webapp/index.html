@@ -2477,6 +2477,49 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-ptr svg { width: 18px; height: 18px; stroke: var(--accent); fill: none; stroke-width: 2.4; stroke-linecap: round; transform-origin: center; }
 .gx-ptr.spin svg { animation: spinRing 0.7s linear infinite; }
 
+
+/* ═══════════════════════════════════════════════════════════════════
+   NEON PLAYER PACK — цветная обводка обложки, разделитель у источника,
+   свечение у heart/more, декор на панели управления
+═══════════════════════════════════════════════════════════════════ */
+.fp-cover {
+  border: 1.5px solid rgba(var(--accent-rgb), 0.45);
+  box-shadow: 0 30px 70px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.06),
+    0 0 46px -4px rgba(var(--accent-rgb), 0.55), inset 0 1px 0 rgba(255,255,255,0.1);
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.4s ease, box-shadow 0.6s ease, border-color 0.6s ease;
+}
+
+/* Источник трека: тонкие линии-разделители + иконка вместо голого текста */
+.fp-top-title { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 7px; }
+.fp-top-line { flex: 1 1 auto; max-width: 30px; height: 1px; min-width: 10px;
+  background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), 0.55), transparent); }
+.fp-top-ico { width: 14px; height: 14px; fill: var(--accent); flex-shrink: 0; filter: drop-shadow(0 0 4px var(--accent-glow)); }
+#fp-top-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Heart/3-точки у названия трека — тонкое свечение по акценту даже без лайка */
+.fp-actions .fav-btn, #fp-more-btn {
+  border: 1px solid rgba(var(--accent-rgb), 0.3);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.06), 0 4px 16px rgba(var(--accent-rgb), 0.16);
+}
+.fp-actions .fav-btn.loved {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.12), 0 6px 20px rgba(var(--accent-rgb), 0.32);
+}
+
+/* Декоративные акценты над панелью управления (сердечко слева, искры справа) */
+.fp-ctrl { position: relative; overflow: visible; margin-top: 16px; }
+.fp-ctrl-deco { position: absolute; pointer-events: none; filter: drop-shadow(0 0 6px var(--accent-glow)); }
+.fp-ctrl-deco svg { fill: var(--accent); display: block; }
+.fp-ctrl-deco-heart { top: -9px; left: 18px; width: 15px; height: 15px; opacity: 0.9; }
+.fp-ctrl-deco-spark { top: -11px; right: 18px; display: flex; align-items: flex-end; gap: 9px; }
+.fp-ctrl-deco-spark svg:first-child { width: 12px; height: 12px; opacity: 0.95; }
+.fp-ctrl-deco-spark svg:last-child { width: 7px; height: 7px; opacity: 0.6; margin-bottom: 1px; }
+@media (prefers-reduced-motion: no-preference) {
+  .fp-ctrl-deco-heart svg { animation: gxCtrlDecoPulse 2.6s ease-in-out infinite; transform-origin: center; }
+  .fp-ctrl-deco-spark svg:first-child { animation: gxCtrlDecoPulse 2.6s ease-in-out 0.5s infinite; transform-origin: center; }
+}
+@keyframes gxCtrlDecoPulse { 0%, 100% { transform: scale(1); opacity: 0.75; } 50% { transform: scale(1.18); opacity: 1; } }
+
 </style>
 </head>
 <body>
@@ -2903,6 +2946,11 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   
   <!-- Controls: Яндекс Музыка order: shuffle | prev | play | next | repeat -->
   <div class="fp-ctrl">
+    <span class="fp-ctrl-deco fp-ctrl-deco-heart" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></span>
+    <span class="fp-ctrl-deco fp-ctrl-deco-spark" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M12 2l1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5z"/></svg>
+      <svg viewBox="0 0 24 24"><path d="M12 2l1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5z"/></svg>
+    </span>
     <button class="fp-ctrl-btn sec-btn" id="btn-shuf" onclick="haptic();toggleShuffle()"><svg viewBox="0 0 24 24"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg></button>
     <button class="fp-ctrl-btn" onclick="haptic();playPrev()"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
     <button class="fp-play" id="fp-play" onclick="haptic();togglePlay()"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
@@ -4369,7 +4417,21 @@ function playTrack(t, dir = 1) {
 
     // Update fp-top-title
     const topTitle = document.getElementById('fp-top-title');
-    if (topTitle) topTitle.innerHTML = (t.source || 'Сейчас играет') + ' <span id="sleep-timer-display">' + (document.getElementById('sleep-timer-display')?.textContent || '') + '</span>';
+    if (topTitle) {
+      const label = t.source || 'Сейчас играет';
+      const isSC = /soundcloud/i.test(t.source || '');
+      const isYT = /youtube/i.test(t.source || '');
+      const ico = isSC
+        ? '<path d="M5.5 18.5a3.9 3.9 0 01-.4-7.78 5 5 0 019.57-2.1A4 4 0 1117.9 16l.1 2.5z"/>'
+        : isYT
+        ? '<path d="M12 2a10 10 0 100 20 10 10 0 000-20zm-2 14.5v-9l7 4.5z"/>'
+        : '<path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/>';
+      topTitle.innerHTML = '<span class="fp-top-line"></span>'
+        + '<svg class="fp-top-ico" viewBox="0 0 24 24">' + ico + '</svg>'
+        + '<span id="fp-top-label">' + esc(label) + '</span>'
+        + '<span id="sleep-timer-display">' + (document.getElementById('sleep-timer-display')?.textContent || '') + '</span>'
+        + '<span class="fp-top-line"></span>';
+    }
 
     if (_tok !== _playToken) return; // пока ждали анимацию, выбрали другой трек
     aud.src = `/api/stream/${encodeURIComponent(t.id)}`;
@@ -4577,14 +4639,18 @@ progArea.addEventListener('touchend', (e) => { e.stopPropagation(); if(isScrubbi
 function getScrubRatio(clientX) { const rect = document.getElementById('fp-prog').getBoundingClientRect(); let ratio = (clientX - rect.left) / rect.width; return Math.max(0, Math.min(1, ratio)); }
 function updateScrubPosition(clientX) { const ratio = getScrubRatio(clientX); document.getElementById('fp-fill').style.width = (ratio * 100) + '%'; document.getElementById('fp-thumb').style.left = (ratio * 100) + '%'; if (aud.duration) document.getElementById('fp-cur').textContent = fmt(ratio * aud.duration); }
 
+// Визуальное положение ползунка/заливки (mini-, full- и wave-плеер) теперь
+// ведёт отдельный rAF-цикл (startProgTick ниже), а не этот обработчик:
+// timeupdate по спецификации может срабатывать всего несколько раз в
+// секунду (в Telegram WebView — особенно редко), поэтому ползунок заметно
+// "скакал". currentTime при этом сам обновляется непрерывно, так что rAF
+// читает его на каждом кадре и двигает плавно. Здесь остаётся только то,
+// чему точность в 60 кадров/сек не нужна.
 aud.addEventListener('timeupdate', () => {
   if (!aud.duration) return;
   const p = aud.currentTime / aud.duration;
   const remaining = aud.duration - aud.currentTime;
 
-  document.getElementById('mini-prog-fill').style.width = (p * 100) + '%';
-  document.getElementById('wa-pill-prog').style.width = (p * 100) + '%';
-  if(!isScrubbing) { document.getElementById('fp-fill').style.width = (p * 100) + '%'; document.getElementById('fp-thumb').style.left = (p * 100) + '%'; document.getElementById('fp-cur').textContent = fmt(aud.currentTime); }
   document.getElementById('fp-dur').textContent = fmt(aud.duration);
 
   // ── GAPLESS PRE-FETCH (начинаем за 12 сек) ─────────────────────
@@ -4621,6 +4687,29 @@ aud.addEventListener('timeupdate', () => {
   // ── СИНХРОНИЗАЦИЯ ПОЗИЦИИ МЕЖДУ УСТРОЙСТВАМИ (не чаще раза в ~12 сек) ──
   syncPlaybackState(false);
 });
+
+// ── ПЛАВНЫЙ ПРОГРЕСС: двигаем ползунок каждый кадр, а не только по timeupdate ──
+let _progRaf = 0;
+function progTick() {
+  _progRaf = 0;
+  if (aud.paused || document.hidden) return; // не тратим кадры без надобности
+  if (aud.duration && !isScrubbing) {
+    const pct = (aud.currentTime / aud.duration * 100) + '%';
+    const fill = document.getElementById('fp-fill'), thumb = document.getElementById('fp-thumb');
+    const miniFill = document.getElementById('mini-prog-fill'), waFill = document.getElementById('wa-pill-prog');
+    if (fill) fill.style.width = pct;
+    if (thumb) thumb.style.left = pct;
+    if (miniFill) miniFill.style.width = pct;
+    if (waFill) waFill.style.width = pct;
+    const cur = document.getElementById('fp-cur'); if (cur) cur.textContent = fmt(aud.currentTime);
+  }
+  _progRaf = requestAnimationFrame(progTick);
+}
+function startProgTick() { if (!_progRaf) _progRaf = requestAnimationFrame(progTick); }
+aud.addEventListener('playing', startProgTick);
+aud.addEventListener('play', startProgTick);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !aud.paused) startProgTick(); });
+
 aud.addEventListener('ended', () => {
     if (repeatMode === 2) { aud.currentTime = 0; aud.play(); return; }
     if (sleepTimerType === 'track') executeSleepTimer();
@@ -7475,6 +7564,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     ori0 = null; tgtX = tgtY = 0;
     const c = $('fp-cover'); if (c) c.style.rotate = '';
   }
+  let _fpFlightActive = false;
   function fxTick(now) {
     fxRaf = 0;
     if (!fpVisible() || document.hidden) return;
@@ -7494,7 +7584,10 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     bass += (b - bass) * (b > bass ? 0.55 : 0.1);
     if (Math.abs(bass - lastBass) > 0.008) setBass(clamp(bass, 0, 1));
     const cover = $('fp-cover');
-    if (tiltOn && cover && !reduceMotion) {
+    // Пока летит обложка (пружинная анимация mini→full), не трогаем её же
+    // через наклон по гироскопу — оба одновременно писали в transform одного
+    // элемента и несколько секунд после открытия плеера обложка "дёргалась".
+    if (tiltOn && cover && !reduceMotion && !_fpFlightActive) {
       curX += (tgtX - curX) * 0.14; curY += (tgtY - curY) * 0.14;
       const m = Math.hypot(curX, curY);
       cover.style.rotate = m > 0.04 ? `${(-curX).toFixed(3)} ${curY.toFixed(3)} 0 ${m.toFixed(3)}deg` : '';
@@ -7562,9 +7655,10 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
       { transform: `translate(${dx}px, ${dy}px) scale(${s})`, borderRadius: (12 / s).toFixed(1) + 'px' },
       { transform: endT && endT !== 'none' ? endT : 'none', borderRadius: '30px' },
     ];
+    _fpFlightActive = true;
     try { cover.animate(kf, { duration: 760, easing: SPRING || 'cubic-bezier(0.22, 1.1, 0.36, 1)' }); }
     catch (e) { try { cover.animate(kf, { duration: 620, easing: 'cubic-bezier(0.22, 1.1, 0.36, 1)' }); } catch (e2) {} }
-    setTimeout(() => { fp.classList.remove('fp-opening'); fp.style.transition = ''; fp.style.opacity = ''; fp.style.transform = ''; }, 800);
+    setTimeout(() => { fp.classList.remove('fp-opening'); fp.style.transition = ''; fp.style.opacity = ''; fp.style.transform = ''; _fpFlightActive = false; }, 800);
   };
   window.closeFull = function () {
     const r = _closeFull.apply(this, arguments);
