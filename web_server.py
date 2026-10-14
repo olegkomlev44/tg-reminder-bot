@@ -1,39 +1,45 @@
-import os, json, hmac, hashlib, aiohttp, asyncio, random, re, urllib.parse, uuid, shutil
+﻿import os, io, json, hmac, hashlib, aiohttp, asyncio, random, re, urllib.parse, uuid, shutil
+from datetime import datetime
 from urllib.parse import parse_qsl
-from aiohttp import web
-from music_engine import music_engine, check_yt_dlp_freshness, yt_dlp_maintenance_loop
+from aiohttp import web, WSMsgType
+from PIL import Image, ImageDraw, ImageFont
+from music_engine import music_engine, add_id3_tags, check_yt_dlp_freshness, yt_dlp_maintenance_loop
 from db import (
-                init_db, get_cached_file_id, save_cached_file_id,
-                save_music_fav, get_music_favs, log_track_history, get_user_history, 
-                get_total_listen_seconds, save_playlist_track, get_playlists,
-                rename_playlist, remove_track_from_playlist, delete_playlist_db,
-                remove_music_fav, sync_music_favs, clear_history, DB_PATH,
-                save_playback_state, get_playback_state,
-                init_db, add_dislike, get_blacklist,
-                collab_create, collab_get_meta, collab_get_tracks,
-                collab_add_track, collab_remove_track, collab_delete,
-                # Новые функции
-                upsert_user_profile, get_user_profile, search_users,
-                subscribe_artist, unsubscribe_artist, get_subscribed_artists, is_subscribed_artist,
-                send_friend_request, accept_friend_request, get_friends,
-                get_friend_requests_incoming, get_friend_status,
-                get_friend_favs, get_friend_history,
-                add_notification, get_notifications, mark_notifications_read,
-                get_unread_notifications_count)
+    init_db, get_cached_file_id, save_cached_file_id,
+    save_music_fav, get_music_favs, log_track_history, get_user_history,
+    get_total_listen_seconds, save_playlist_track, get_playlists,
+    rename_playlist, remove_track_from_playlist, delete_playlist_db,
+    remove_music_fav, sync_music_favs, clear_history, DB_PATH,
+    save_playback_state, get_playback_state,
+    add_dislike, get_blacklist,
+    collab_create, collab_get_meta, collab_get_tracks,
+    collab_add_track, collab_remove_track, collab_delete,
+    upsert_user_profile, get_user_profile, search_users,
+    subscribe_artist, unsubscribe_artist, get_subscribed_artists, is_subscribed_artist,
+    get_all_subscribed_artists, get_artist_subscribers,
+    get_artist_seen_track_ids, mark_artist_tracks_seen,
+    send_friend_request, accept_friend_request, get_friends,
+    get_friend_requests_incoming, get_friend_status,
+    get_friend_favs, get_friend_history,
+    add_notification, get_notifications, mark_notifications_read,
+    get_unread_notifications_count,
+    get_cached_lyrics, save_cached_lyrics, save_cached_lyrics_translation,
+)
 import logging
 import time
 from collections import defaultdict, deque
 
+
 logger = logging.getLogger(__name__)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-# DEV_MODE включает фейкового пользователя для локальной разработки без
-# реального Telegram-клиента. НИКОГДА не должен быть включён в продакшене —
-# при DEV_MODE=1 подпись initData вообще не проверяется.
 DEV_MODE = os.getenv("DEV_MODE", "0") == "1"
 CHUNK = 32 * 1024
-INITDATA_MAX_AGE = 24 * 3600  # секунд — старше считаем протухшим (защита от replay)
+INITDATA_MAX_AGE = 24 * 3600
+
 
 init_db()
+
 
 if not BOT_TOKEN and not DEV_MODE:
     logger.error(
@@ -42,12 +48,11 @@ if not BOT_TOKEN and not DEV_MODE:
     )
 
 
+
+
 # ═══════════════════════════════════════════════════════════════
 # МЕТРИКИ И /health
 # ═══════════════════════════════════════════════════════════════
-# Лёгкие in-memory метрики без внешних зависимостей (Prometheus и т.п.) —
-# на bothost их некуда собирать снаружи, но /health хотя бы даёт быстрый
-# ответ на вопрос "процесс жив и адекватен?" без ручного захода в контейнер.
 START_TIME = time.monotonic()
 _metrics = {
     "requests_total": 0,
@@ -57,10 +62,11 @@ _metrics = {
 }
 
 
+
+
 @web.middleware
 async def metrics_middleware(request, handler):
     _metrics["requests_total"] += 1
-    # Группируем по префиксу пути (без id), чтобы не разрастался словарь
     path_key = request.path.rsplit("/", 1)[0] if request.path.startswith("/api/") else request.path
     _metrics["requests_by_path"][path_key] += 1
     try:
@@ -77,12 +83,9 @@ async def metrics_middleware(request, handler):
         raise
 
 
+
+
 async def api_health(request):
-    """
-    Health-check для мониторинга (UptimeRobot/Better Uptime/ручной curl).
-    Специально не требует авторизации — сторонний монитор не знает и не
-    должен знать initData. Отдаёт 200, только если БД реально отвечает.
-    """
     checks = {"db": False, "yt_dlp": False, "ffmpeg": False}
     db_error = None
     try:
@@ -94,19 +97,20 @@ async def api_health(request):
     except Exception as e:
         db_error = str(e)
 
+
     try:
         import yt_dlp as _ydl
         checks["yt_dlp"] = _ydl is not None
     except ImportError:
         checks["yt_dlp"] = False
 
+
     yt_status = music_engine.get_yt_status()
     checks["yt_dlp_circuit"] = "available" if yt_status["available"] else "degraded"
+    checks["ffmpeg"] = shutil.which("ffmpeg") is not None
 
-    import shutil as _shutil
-    checks["ffmpeg"] = _shutil.which("ffmpeg") is not None
 
-    healthy = checks["db"]  # yt-dlp/ffmpeg — деградация допустима, БД — нет
+    healthy = checks["db"]
     body = {
         "status": "ok" if healthy else "degraded",
         "uptime_sec": round(time.monotonic() - START_TIME, 1),
@@ -119,10 +123,10 @@ async def api_health(request):
     return web.json_response(body, status=200 if healthy else 503)
 
 
+
+
 async def api_metrics(request):
-    """Чуть более подробные метрики — не для публичного доступа, поэтому
-    защищена тем же Telegram-auth, что и остальной API."""
-    user = verify(request.headers.get("Authorization", ""))
+    verify(request.headers.get("Authorization", ""))
     norm_cache_files = 0
     norm_cache_bytes = 0
     try:
@@ -146,12 +150,9 @@ async def api_metrics(request):
     }))
 
 
+
+
 def _check_telegram_auth(init_data: str) -> dict | None:
-    """
-    Проверяет подпись Telegram WebApp initData по алгоритму из документации:
-    https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
-    Возвращает распарсенного пользователя при успешной проверке, иначе None.
-    """
     if not init_data or not BOT_TOKEN:
         return None
     try:
@@ -160,18 +161,22 @@ def _check_telegram_auth(init_data: str) -> dict | None:
         if not received_hash:
             return None
 
+
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
         secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
         computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
 
         if not hmac.compare_digest(computed_hash, received_hash):
             logger.warning("initData: подпись не совпала (возможна подделка запроса)")
             return None
 
+
         auth_date = int(pairs.get("auth_date", 0) or 0)
         if auth_date and (time.time() - auth_date) > INITDATA_MAX_AGE:
             logger.warning("initData: подпись просрочена (auth_date старше суток)")
             return None
+
 
         user_raw = pairs.get("user")
         if not user_raw:
@@ -182,21 +187,19 @@ def _check_telegram_auth(init_data: str) -> dict | None:
         return None
 
 
+
+
 def verify(init_data: str):
-    """
-    Возвращает словарь пользователя Telegram, только если initData прошла
-    криптографическую проверку. Бросает web.HTTPUnauthorized, если проверка
-    не пройдена — aiohttp сам превратит это в корректный 401-ответ.
-    """
     if DEV_MODE and (not init_data or init_data == "test_mode"):
         return {"id": "123456789", "first_name": "DevUser"}
+
 
     user = _check_telegram_auth(init_data)
     if not user:
         raise web.HTTPUnauthorized(text=json.dumps({"error": "invalid or missing Telegram auth"}),
                                     content_type="application/json")
 
-    # Сохраняем профиль при каждом успешно проверенном запросе (кеш актуальных данных)
+
     try:
         uid = str(user.get("id", ""))
         if uid:
@@ -207,7 +210,9 @@ def verify(init_data: str):
     except Exception as e:
         logger.warning(f"upsert_user_profile failed for user {user.get('id')}: {e}")
 
+
     return user
+
 
 def cors(r):
     r.headers.update({
@@ -218,13 +223,10 @@ def cors(r):
     return r
 
 
+
+
 @web.middleware
 async def cors_middleware(request, handler):
-    """
-    Гарантирует CORS-заголовки на ЛЮБОМ ответе, включая ошибки (например,
-    401 из verify() при неверной initData) — без этого браузер показывал бы
-    "CORS error" вместо реального кода ошибки, что маскирует настоящую причину.
-    """
     if request.method == "OPTIONS":
         return cors(web.Response())
     try:
@@ -235,30 +237,34 @@ async def cors_middleware(request, handler):
     return cors(response)
 
 
+
+
 # ═══════════════════════════════════════════════════════════════
 # RATE LIMITING
 # ═══════════════════════════════════════════════════════════════
-# Простой in-memory sliding-window лимитер на процесс. Для одного инстанса
-# на bothost этого достаточно; при горизонтальном масштабировании нужно
-# заменить на Redis (INCR + EXPIRE) — единый счётчик на все инстансы.
-
 RATE_LIMIT_RULES = [
-    # (префикс пути, лимит запросов, окно в секундах)
-    ("/api/stream/", 60, 60),        # аудиостримы — разрешаем чаще
-    ("/api/suggest", 90, 60),        # подсказки при наборе (с дебаунсом на клиенте)
-    ("/api/search", 60, 60),         # первая страница + подгрузка при скролле
-    ("/api/resolve", 20, 60),        # поиск запасного источника
+    ("/api/stream/", 60, 60),
+    ("/api/suggest", 90, 60),
+    ("/api/search", 60, 60),
+    ("/api/track/", 60, 60),
+    ("/api/resolve", 20, 60),
     ("/api/prefetch", 40, 60),
     ("/api/status", 20, 60),
     ("/api/fav/sync", 40, 60),
     ("/api/playlist/import", 6, 60),
+    ("/api/send_to_chat", 10, 60),
+    ("/api/story_card", 15, 60),
     ("/api/wave", 20, 60),
     ("/api/radio", 20, 60),
+    ("/api/lyrics/translate", 15, 60),
     ("/api/lyrics", 30, 60),
     ("/api/users/search", 20, 60),
 ]
 
+
 _rate_buckets: dict[str, deque] = defaultdict(deque)
+
+
 
 
 def _is_rate_limited(key: str, limit: int, window: int) -> bool:
@@ -270,6 +276,8 @@ def _is_rate_limited(key: str, limit: int, window: int) -> bool:
         return True
     bucket.append(now)
     return False
+
+
 
 
 @web.middleware
@@ -288,16 +296,19 @@ async def rate_limit_middleware(request, handler):
             break
     return await handler(request)
 
+
 async def handle_index(request):
     p = os.path.join(os.path.dirname(__file__), "webapp", "index.html")
     if not os.path.exists(p): p = os.path.join(os.path.dirname(__file__), "index.html")
     return web.Response(text=open(p, encoding="utf-8").read(), content_type="text/html")
 
+
 async def handle_sw(request):
     p = os.path.join(os.path.dirname(__file__), "webapp", "sw.js")
-    if not os.path.exists(p): 
+    if not os.path.exists(p):
         p = os.path.join(os.path.dirname(__file__), "sw.js")
     return web.FileResponse(p)
+
 
 async def api_get_tracks(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -309,31 +320,51 @@ async def api_get_tracks(request):
         "listen_seconds": get_total_listen_seconds(uid),
     }))
 
+
 async def api_search(request):
     q = request.rel_url.query.get("q", "").strip()
     if not q: return cors(web.json_response([]))
+    source = request.rel_url.query.get("source", "all").strip().lower()
     try:
         limit = max(1, min(int(request.rel_url.query.get("limit", 120)), 120))
         offset = max(0, min(int(request.rel_url.query.get("offset", 0)), 500))
     except ValueError:
         limit, offset = 120, 0
-    tracks = await music_engine.search_multi(q, limit=limit, offset=offset)
+    tracks = await music_engine.search_multi(q, limit=limit, offset=offset, source=source)
     resp = web.json_response(tracks)
-    # Пустой результат мог получиться не потому что "ничего не нашлось",
-    # а потому что YouTube-источник сейчас в circuit-breaker cooldown —
-    # явно сигнализируем об этом заголовком, а не молчим полным нулём.
     yt_status = music_engine.get_yt_status()
-    if not tracks and not yt_status["available"] and offset == 0:
+    if not tracks and not yt_status["available"] and offset == 0 and source in ("all", "yt"):
         resp.headers["X-Source-Degraded"] = "youtube"
     return cors(resp)
+
+
+async def api_track_get(request):
+    """Мгновенное получение метаданных одного трека по его ID (для ?startapp=play_track_<id>)."""
+    track_id = request.match_info.get("track_id", "").strip()
+    if not track_id:
+        return cors(web.json_response({"error": "missing track_id"}, status=400))
+    track = await music_engine.get_track_details(track_id)
+    if not track:
+        return cors(web.json_response({"error": "not found"}, status=404))
+    return cors(web.json_response({
+        "id": str(track.get("id", track_id)),
+        "title": track.get("title", "Unknown"),
+        "artist": track.get("artist", "Unknown"),
+        "duration": track.get("duration", ""),
+        "artwork_url": track.get("artwork_url", ""),
+        "artist_avatar": track.get("artist_avatar", ""),
+        "genre": track.get("genre", ""),
+        "source": track.get("source", "SoundCloud"),
+    }))
+
 
 async def api_suggest(request):
     q = request.rel_url.query.get("q", "").strip()
     if len(q) < 2: return cors(web.json_response([]))
     return cors(web.json_response(await music_engine.suggest(q, limit=6)))
 
+
 async def api_resolve(request):
-    """Тот же трек в другом источнике — запасной вариант, когда основной не грузится."""
     qs = request.rel_url.query
     title = qs.get("title", "").strip()[:200]
     artist = qs.get("artist", "").strip()[:200]
@@ -348,8 +379,8 @@ async def api_resolve(request):
     track = await music_engine.find_alternative(title, artist, prefer=prefer, exclude_id=exclude, duration_sec=dur)
     return cors(web.json_response({"track": track}))
 
+
 async def api_status(request):
-    """Статус источников и кэша — для карточки «Состояние» в профиле."""
     verify(request.headers.get("Authorization", ""))
     files = size = 0
     try:
@@ -372,13 +403,8 @@ async def api_status(request):
     })
     return cors(web.json_response(body))
 
+
 async def api_radio(request):
-    """
-    'Радио' — бесконечный автоплей от ОДНОГО трека (в отличие от /api/wave,
-    который строит подборку из всего избранного+истории пользователя).
-    Фронтенд вызывает это при включении радио и затем повторно — с последним
-    треком очереди как новым сидом — чтобы очередь пополнялась сама по себе.
-    """
     user = verify(request.headers.get("Authorization", ""))
     uid = user["id"]
     artist = request.rel_url.query.get("artist", "").strip()
@@ -389,18 +415,22 @@ async def api_radio(request):
     except ValueError:
         limit = 10
 
+
     if not artist:
         return cors(web.json_response({"error": "artist required"}, status=400))
+
 
     bl = get_blacklist(uid)
     seen = {exclude_id} if exclude_id else set()
     results = []
+
 
     try:
         similar = await music_engine.get_similar_lastfm(artist, title, limit=limit + 10)
     except Exception as e:
         logger.warning(f"api_radio: Last.fm error для '{artist} - {title}': {e}")
         similar = []
+
 
     async def resolve(sugg):
         try:
@@ -409,6 +439,7 @@ async def api_radio(request):
             return res[0] if res else None
         except Exception:
             return None
+
 
     if similar:
         resolved = await asyncio.gather(*[resolve(s) for s in similar[:limit + 10]], return_exceptions=True)
@@ -421,8 +452,7 @@ async def api_radio(request):
                     if len(results) >= limit:
                         break
 
-    # Last.fm недоступен / нет API-ключа / ничего не нашлось — не оставляем
-    # радио молча пустым, подкидываем что-то по духу через чарты.
+
     if not results:
         charts = await music_engine.get_charts(limit=limit + 10)
         for t in charts:
@@ -433,7 +463,10 @@ async def api_radio(request):
                 if len(results) >= limit:
                     break
 
+
     return cors(web.json_response(results))
+
+
 
 
 async def api_wave(request):
@@ -442,28 +475,28 @@ async def api_wave(request):
     user = verify(request.headers.get("Authorization", ""))
     uid = user["id"]
 
+
     bl = get_blacklist(uid)
     favs = get_music_favs(uid)
     history = get_user_history(uid)
 
+
     unique_tracks = []
     seen = set()
 
-    # ── 1. УМНАЯ ВОЛНА (только первая страница) ──────────────────────────────
+
     base_pool = favs + history
     if base_pool and offset == 0:
-
-        # Берём до 3 сидов: приоритет — избранному
         seed_pool = favs if favs else history
         seeds = random.sample(seed_pool, min(3, len(seed_pool)))
         lastfm_suggestions = []
 
-        # Параллельно запрашиваем Last.fm: similar tracks + similar artists
+
         async def lastfm_similar_tracks(seed):
             return await music_engine.get_similar_lastfm(seed["artist"], seed["title"], limit=6)
 
+
         async def lastfm_similar_artists(artist: str):
-            """Берём топ-треки артистов, похожих на seed-артиста."""
             LASTFM_API_KEY = os.getenv("LASTFM_API_KEY", "")
             if not LASTFM_API_KEY:
                 return []
@@ -483,7 +516,6 @@ async def api_wave(request):
                             similar_artists = [
                                 a["name"] for a in data.get("similarartists", {}).get("artist", [])
                             ]
-                            # Для каждого похожего артиста берём его топ-трек
                             top_tracks = []
                             async def get_top_track(art):
                                 p2 = {
@@ -507,16 +539,17 @@ async def api_wave(request):
                 logger.error(f"Last.fm similar artists error: {e}")
             return []
 
-        # Запускаем все Last.fm запросы параллельно
+
         sim_track_tasks = [lastfm_similar_tracks(s) for s in seeds]
         sim_artist_tasks = [lastfm_similar_artists(s["artist"]) for s in seeds]
         all_results = await asyncio.gather(*(sim_track_tasks + sim_artist_tasks), return_exceptions=True)
+
 
         for res in all_results:
             if isinstance(res, list):
                 lastfm_suggestions.extend(res)
 
-        # Дедуп Last.fm подсказок
+
         seen_suggestions = set()
         unique_suggestions = []
         for s in lastfm_suggestions:
@@ -525,7 +558,7 @@ async def api_wave(request):
                 seen_suggestions.add(key)
                 unique_suggestions.append(s)
 
-        # ── 2. КОЛЛАБОРАТИВНАЯ ФИЛЬТРАЦИЯ из локальной БД ───────────────────
+
         from db import _db_connect
         user_track_ids = {t["id"] for t in base_pool}
         cf_tracks = []
@@ -556,7 +589,7 @@ async def api_wave(request):
                 logger.error(f"CF query error: {e}")
             conn.close()
 
-        # ── 3. Резолвим Last.fm подсказки через SC/YT параллельно ───────────
+
         async def resolve_track(sugg):
             try:
                 q = f"{sugg['artist']} {sugg['title']}"
@@ -565,17 +598,17 @@ async def api_wave(request):
             except Exception:
                 return None
 
-        # Ограничиваем до 15 подсказок, чтобы не перегружать SC
+
         resolve_tasks = [resolve_track(s) for s in unique_suggestions[:15]]
         resolved = await asyncio.gather(*resolve_tasks, return_exceptions=True)
 
-        # Сначала добавляем CF-треки (они уже в нужном формате)
+
         for t in cf_tracks:
             if t["id"] not in seen and t["id"] not in bl:
                 seen.add(t["id"])
                 unique_tracks.append(t)
 
-        # Потом Last.fm resolved
+
         for t in resolved:
             if isinstance(t, dict) and t.get("id"):
                 tid = str(t["id"])
@@ -583,7 +616,7 @@ async def api_wave(request):
                     seen.add(tid)
                     unique_tracks.append(t)
 
-    # ── 4. ФОЛЛБЭК: чарты / рандомные запросы ────────────────────────────────
+
     if len(unique_tracks) < limit:
         need = limit - len(unique_tracks)
         charts = await music_engine.get_charts(limit=need + 5, offset=offset)
@@ -598,8 +631,10 @@ async def api_wave(request):
                 if len(unique_tracks) >= limit:
                     break
 
+
     random.shuffle(unique_tracks)
     return cors(web.json_response(unique_tracks[:limit]))
+
 
 async def api_fav_add(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -612,14 +647,14 @@ async def api_fav_add(request):
         logger.warning(f"api_fav_add: {e}")
     return cors(web.json_response({"error": "bad req"}, status=400))
 
+
 async def api_ytdlp_update(request):
-    """Кнопка «Обновить сейчас» в карточке статуса профиля."""
     verify(request.headers.get("Authorization", ""))
     result = await music_engine.update_yt_dlp(reason="manual", force=True)
     return cors(web.json_response(result))
 
+
 async def api_playlist_import(request):
-    """Импорт плейлиста YouTube/SoundCloud по ссылке (см. gx-import-sheet)."""
     verify(request.headers.get("Authorization", ""))
     try:
         body = await request.json()
@@ -632,8 +667,8 @@ async def api_playlist_import(request):
     status = 200 if "tracks" in result else 422
     return cors(web.json_response(result, status=status))
 
+
 async def api_fav_sync(request):
-    """Слияние очереди офлайн-операций клиента с избранным на сервере."""
     user = verify(request.headers.get("Authorization", ""))
     try:
         body = await request.json()
@@ -646,8 +681,8 @@ async def api_fav_sync(request):
     favs = sync_music_favs(user["id"], ops)
     return cors(web.json_response({"ok": True, "favs": favs}))
 
+
 async def api_fav_remove(request):
-    """Удалить трек из избранного по track_id."""
     user = verify(request.headers.get("Authorization", ""))
     try:
         body = await request.json()
@@ -659,30 +694,26 @@ async def api_fav_remove(request):
         logger.warning(f"api_fav_remove: {e}")
     return cors(web.json_response({"error": "bad req"}, status=400))
 
+
 async def api_history_clear(request):
-    """Полная очистка истории прослушиваний."""
     user = verify(request.headers.get("Authorization", ""))
     clear_history(user["id"])
     return cors(web.json_response({"ok": True}))
 
 
+
+
 # ── СИНХРОНИЗАЦИЯ ВОСПРОИЗВЕДЕНИЯ МЕЖДУ УСТРОЙСТВАМИ ────────────────────
 async def api_playback_sync(request):
-    """
-    Устройство периодически (раз в ~10-15 сек, на паузе/смене трека) шлёт сюда
-    свою позицию. Хранится последнее состояние на пользователя — если он
-    откроет приложение на другом устройстве, оно увидит: "продолжить с Y:XX?".
-    """
     user = verify(request.headers.get("Authorization", ""))
     try:
         body = await request.json()
         track_data = body.get("track_data")
         device_id = str(body.get("device_id", "unknown"))[:64]
         position_sec = float(body.get("position_sec", 0))
-        queue_data = body.get("queue")  # опционально — чтобы на другом устройстве не терять очередь
+        queue_data = body.get("queue")
         if not track_data or not track_data.get("id"):
             return cors(web.json_response({"error": "track_data required"}, status=400))
-        # Не тащим огромную очередь в БД бесконечно — разумный кап
         if isinstance(queue_data, list) and len(queue_data) > 200:
             queue_data = queue_data[:200]
         save_playback_state(user["id"], device_id, track_data, position_sec, queue_data)
@@ -692,14 +723,9 @@ async def api_playback_sync(request):
         return cors(web.json_response({"error": "bad req"}, status=400))
 
 
+
+
 async def api_playback_state(request):
-    """
-    Отдаёт последнее сохранённое состояние воспроизведения пользователя.
-    Клиент передаёт свой device_id — если состояние пришло с ДРУГОГО
-    устройства, показывает предложение продолжить; если это его же
-    устройство (например, после перезагрузки страницы) — можно просто
-    восстановиться молча.
-    """
     user = verify(request.headers.get("Authorization", ""))
     device_id = str(request.rel_url.query.get("device_id", ""))
     state = get_playback_state(user["id"])
@@ -709,22 +735,39 @@ async def api_playback_state(request):
     return cors(web.json_response({"state": state}))
 
 
-# --- НОВЫЕ API: ДИЗЛАЙКИ И ТЕКСТЫ ---
+
+
+# ── ДИЗЛАЙКИ, ТЕКСТЫ (С КЭШЕМ SQLITE) И ИИ-ПЕРЕВОД ──────────────────────
 async def api_dislike(request):
     user = verify(request.headers.get("Authorization", ""))
     try:
         body = await request.json()
         add_dislike(user["id"], body["track_id"])
         return cors(web.json_response({"ok": True}))
-    except Exception: return cors(web.json_response({"error": "bad req"}, status=400))
+    except Exception:
+        return cors(web.json_response({"error": "bad req"}, status=400))
+
 
 async def api_lyrics(request):
-    title = request.rel_url.query.get("title", "")
-    artist = request.rel_url.query.get("artist", "")
-    import re as _re
-    clean_title = _re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
-    
-    # Try lrclib /api/get first (exact match), then /api/search
+    title = request.rel_url.query.get("title", "").strip()
+    artist = request.rel_url.query.get("artist", "").strip()
+    clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
+    if not clean_title and not artist:
+        return cors(web.json_response({"lyrics": None, "synced": None, "translated": None}))
+
+
+    # 1. Проверяем локальный кэш SQLite
+    cached = get_cached_lyrics(artist, clean_title)
+    if cached and (cached.get("plain") or cached.get("synced")):
+        return cors(web.json_response({
+            "lyrics": cached["plain"] or None,
+            "synced": cached["synced"] or None,
+            "translated": cached.get("translated") or None,
+            "cached": True,
+        }))
+
+
+    # 2. Ищем в LRCLIB
     endpoints = [
         f"https://lrclib.net/api/get?track_name={urllib.parse.quote(clean_title)}&artist_name={urllib.parse.quote(artist)}",
         f"https://lrclib.net/api/search?q={urllib.parse.quote(artist + ' ' + clean_title)}",
@@ -735,21 +778,308 @@ async def api_lyrics(request):
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        # /api/search returns list, /api/get returns object
                         if isinstance(data, list):
                             data = data[0] if data else {}
                         synced = data.get("syncedLyrics") or ""
                         plain = data.get("plainLyrics") or ""
                         if synced or plain:
+                            save_cached_lyrics(artist, clean_title, plain, synced)
                             return cors(web.json_response({
                                 "lyrics": plain,
                                 "synced": synced,
+                                "translated": None,
                             }))
     except Exception as e:
         logger.error(f"Lyrics err: {e}")
-    return cors(web.json_response({"lyrics": None, "synced": None}))
+    return cors(web.json_response({"lyrics": None, "synced": None, "translated": None}))
 
-# -----------------------------------
+
+
+
+async def api_lyrics_translate(request):
+    """
+    Построчный перевод текста песни на русский язык (с сохранением количества
+    строк для синхронного отображения под строками караоке) + кэш в SQLite.
+    """
+    verify(request.headers.get("Authorization", ""))
+    try:
+        body = await request.json()
+        artist = str(body.get("artist", "")).strip()
+        title = str(body.get("title", "")).strip()
+        lines = body.get("lines") or []
+    except Exception:
+        return cors(web.json_response({"error": "bad req"}, status=400))
+
+
+    clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', title).strip()
+    if not isinstance(lines, list) or not lines:
+        return cors(web.json_response({"error": "no lines"}, status=400))
+
+
+    cached = get_cached_lyrics(artist, clean_title)
+    if cached and cached.get("translated"):
+        try:
+            tr_list = json.loads(cached["translated"])
+            if isinstance(tr_list, list) and len(tr_list) == len(lines):
+                return cors(web.json_response({"translated": tr_list, "cached": True}))
+        except Exception:
+            pass
+
+
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    translated_lines = []
+
+
+    if gemini_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=gemini_key)
+            numbered = "\n".join(f"{i}: {line}" for i, line in enumerate(lines[:160]))
+            prompt = (
+                "Переведи построчно текст песни на русский язык. "
+                "Верни ТОЛЬКО валидный JSON-массив строк ровно той же длины, что и входной список "
+                "(пустые строки оставь пустыми строками \"\"). Без markdown-обёрток.\n\n"
+                f"Входные строки ({len(lines[:160])} шт.):\n{numbered}"
+            )
+            resp = await client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+            raw = (resp.text or "").strip().replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                translated_lines = [str(x) for x in parsed]
+        except Exception as e:
+            logger.warning(f"Gemini lyrics translate failed, trying fallback: {e}")
+
+
+    # Fallback через бесплатный публичный переводчик, если нет GEMINI_API_KEY
+    if not translated_lines:
+        try:
+            joined = "\n".join(line if line.strip() else "---" for line in lines[:120])
+            url = "https://translate.googleapis.com/translate_a/single"
+            params = {"client": "gtx", "sl": "auto", "tl": "ru", "dt": "t", "q": joined}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        full_tr = "".join(seg[0] for seg in (data[0] or []) if seg and seg[0])
+                        raw_lines = full_tr.split("\n")
+                        translated_lines = ["" if l.strip() == "---" else l.strip() for l in raw_lines]
+        except Exception as e:
+            logger.warning(f"Fallback lyrics translate error: {e}")
+
+
+    if not translated_lines:
+        return cors(web.json_response({"error": "translation_unavailable"}, status=503))
+
+
+    # Подгоняем длину под исходный массив строк
+    while len(translated_lines) < len(lines):
+        translated_lines.append("")
+    translated_lines = translated_lines[:len(lines)]
+
+
+    save_cached_lyrics_translation(artist, clean_title, json.dumps(translated_lines, ensure_ascii=False))
+    return cors(web.json_response({"translated": translated_lines}))
+
+
+
+
+# ── ОТПРАВКА MP3 В ЛИЧКУ БОТА ПРЯМО ИЗ MINI APP ─────────────────────────
+async def api_send_to_chat(request):
+    """
+    Отправляет выбранный трек MP3-файлом пользователю в личный чат с ботом.
+    Если file_id уже есть в таблице cache — отправляет мгновенно за 0.1 сек.
+    """
+    user = verify(request.headers.get("Authorization", ""))
+    uid = str(user.get("id", ""))
+    if not BOT_TOKEN:
+        return cors(web.json_response({"error": "bot_token_missing"}, status=503))
+
+
+    try:
+        body = await request.json()
+        track_id = str(body.get("track_id", "")).strip()
+    except Exception:
+        return cors(web.json_response({"error": "bad req"}, status=400))
+
+
+    if not track_id:
+        return cors(web.json_response({"error": "track_id required"}, status=400))
+
+
+    track = await music_engine.get_track_details(track_id)
+    if not track or not track.get("stream_url"):
+        return cors(web.json_response({"error": "stream_not_found"}, status=404))
+
+
+    cached_fid = get_cached_file_id(track_id)
+    tg_api = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
+    caption = f"🎧 {track.get('artist', '')} — {track.get('title', '')}"
+
+
+    async with aiohttp.ClientSession() as session:
+        # 1. Быстрый путь по закэшированному Telegram file_id
+        if cached_fid:
+            try:
+                async with session.post(tg_api, json={
+                    "chat_id": uid,
+                    "audio": cached_fid,
+                    "caption": caption,
+                    "performer": track.get("artist", ""),
+                    "title": track.get("title", ""),
+                }, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status == 200:
+                        return cors(web.json_response({"ok": True, "cached": True}))
+            except Exception as e:
+                logger.warning(f"sendAudio cached file_id failed: {e}")
+
+
+        # 2. Полная загрузка + вшивание ID3-тегов и обложки
+        cover_url = await music_engine.fetch_itunes_cover(track.get("artist", ""), track.get("title", "")) or track.get("artwork_url")
+        audio_bytes, cover_bytes = await asyncio.gather(
+            music_engine.download_file(track["stream_url"]),
+            music_engine.download_file(cover_url) if cover_url else asyncio.sleep(0, result=None),
+        )
+        if not audio_bytes:
+            return cors(web.json_response({"error": "download_failed"}, status=502))
+
+
+        tagged_bytes = add_id3_tags(audio_bytes, track.get("title", ""), track.get("artist", ""), cover_bytes)
+        form = aiohttp.FormData()
+        form.add_field("chat_id", uid)
+        form.add_field("performer", track.get("artist", ""))
+        form.add_field("title", track.get("title", ""))
+        form.add_field("caption", caption)
+        form.add_field("audio", tagged_bytes, filename=f"{track.get('title', 'track')}.mp3", content_type="audio/mpeg")
+        if cover_bytes:
+            form.add_field("thumbnail", cover_bytes, filename="cover.jpg", content_type="image/jpeg")
+
+
+        try:
+            async with session.post(tg_api, data=form, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                data = await r.json()
+                if r.status == 200 and data.get("ok"):
+                    fid = (data.get("result") or {}).get("audio", {}).get("file_id")
+                    if fid:
+                        save_cached_file_id(track_id, fid)
+                    return cors(web.json_response({"ok": True, "cached": False}))
+                return cors(web.json_response({"error": data.get("description", "tg_error")}, status=502))
+        except Exception as e:
+            logger.error(f"api_send_to_chat error: {e}")
+            return cors(web.json_response({"error": str(e)}, status=502))
+
+
+
+
+# ── ГЕНЕРАЦИЯ ВЕРТИКАЛЬНОЙ КАРТОЧКИ ДЛЯ TELEGRAM STORIES ─────────────────
+def _render_story_image(mode: str, user_name: str, favs: list, hist: list, listen_sec: int, track: dict | None) -> bytes:
+    W, H = 1080, 1920
+    img = Image.new("RGB", (W, H), (12, 10, 24))
+    draw = ImageDraw.Draw(img)
+
+
+    for y in range(H):
+        t = y / H
+        r = int(48 * (1 - t) + 10 * t)
+        g = int(18 * (1 - t) + 10 * t)
+        b = int(88 * (1 - t) + 22 * t)
+        draw.line([(0, y), (W, y)], fill=(r, g, b))
+
+
+    font_dir = os.path.join(BASE_DIR, "fonts")
+    try:
+        f_hero = ImageFont.truetype(os.path.join(font_dir, "DejaVuSans-Bold.ttf"), 68)
+        f_big = ImageFont.truetype(os.path.join(font_dir, "DejaVuSans-Bold.ttf"), 46)
+        f_med = ImageFont.truetype(os.path.join(font_dir, "DejaVuSans-Bold.ttf"), 34)
+        f_small = ImageFont.truetype(os.path.join(font_dir, "DejaVuSans.ttf"), 28)
+    except Exception:
+        f_hero = f_big = f_med = f_small = ImageFont.load_default()
+
+
+    if mode == "track" and track:
+        draw.text((W // 2, 220), "СЕЙЧАС В ПЛЕЕРЕ", font=f_med, fill=(255, 204, 0), anchor="mm")
+        draw.rounded_rectangle([(140, 340), (W - 140, 1140)], radius=48, fill=(28, 24, 46), outline=(255, 204, 0), width=3)
+        draw.text((W // 2, 740), "🎵", font=f_hero, fill=(255, 204, 0), anchor="mm")
+        title_s = (track.get("title") or "Трек")[:36]
+        artist_s = (track.get("artist") or "Исполнитель")[:36]
+        draw.text((W // 2, 1280), title_s, font=f_big, fill=(255, 255, 255), anchor="mm")
+        draw.text((W // 2, 1360), artist_s, font=f_med, fill=(190, 180, 220), anchor="mm")
+        draw.text((W // 2, 1460), f"Источник: {track.get('source', 'SoundCloud')}", font=f_small, fill=(140, 130, 170), anchor="mm")
+    else:
+        total_tracks = len(hist)
+        mins = max(1, listen_sec // 60) if listen_sec else total_tracks * 3
+        artists = {}
+        for t in (hist + favs):
+            a = (t.get("artist") or "").strip()
+            if a:
+                artists[a] = artists.get(a, 0) + 1
+        top_artists = sorted(artists.items(), key=lambda x: x[1], reverse=True)[:5]
+
+
+        draw.text((W // 2, 160), "МОЯ МУЗЫКАЛЬНАЯ АУРА", font=f_big, fill=(255, 204, 0), anchor="mm")
+        draw.text((W // 2, 230), f"@{user_name}", font=f_med, fill=(190, 175, 230), anchor="mm")
+
+
+        draw.rounded_rectangle([(90, 310), (W - 90, 620)], radius=36, fill=(26, 20, 44), outline=(90, 70, 140), width=2)
+        draw.text((150, 370), "Прослушано треков", font=f_small, fill=(180, 175, 205))
+        draw.text((150, 430), str(total_tracks), font=f_hero, fill=(255, 255, 255))
+        draw.text((600, 370), "Время с музыкой", font=f_small, fill=(180, 175, 205))
+        draw.text((600, 430), f"{mins} мин", font=f_hero, fill=(255, 204, 0))
+        draw.text((150, 540), f"В избранном: {len(favs)} треков", font=f_small, fill=(200, 190, 230))
+
+
+        draw.text((100, 710), "👑 Топ исполнителей", font=f_big, fill=(255, 255, 255))
+        y = 800
+        for idx, (art, cnt) in enumerate(top_artists):
+            draw.rounded_rectangle([(90, y), (W - 90, y + 110)], radius=24, fill=(24, 20, 40))
+            draw.text((135, y + 35), f"#{idx + 1}  {art[:28]}", font=f_med, fill=(255, 255, 255))
+            draw.text((W - 135, y + 40), f"{cnt} тр.", font=f_small, fill=(255, 204, 0), anchor="ra")
+            y += 135
+
+
+    draw.text((W // 2, H - 110), f"Telegram Music Mini App • {datetime.now().strftime('%d.%m.%Y')}", font=f_small, fill=(140, 130, 175), anchor="mm")
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+
+
+async def api_story_card(request):
+    """
+    Отдаёт готовую вертикальную JPEG-карточку 1080x1920 для публикации
+    в Telegram Stories (tg.shareToStory) или скачивания.
+    """
+    qs = request.rel_url.query
+    mode = qs.get("mode", "wrapped")
+    uid = qs.get("uid", "").strip()
+    user_name = qs.get("name", "meloman").strip()
+    auth_hdr = request.headers.get("Authorization", "")
+    if auth_hdr:
+        try:
+            u = verify(auth_hdr)
+            uid = str(u.get("id", uid))
+            user_name = u.get("username") or u.get("first_name") or user_name
+        except Exception:
+            pass
+
+
+    track = None
+    if mode == "track":
+        tid = qs.get("track_id", "").strip()
+        if tid:
+            track = await music_engine.get_track_details(tid)
+
+
+    favs = get_music_favs(uid) if uid else []
+    hist = get_user_history(uid) if uid else []
+    listen_sec = get_total_listen_seconds(uid) if uid else 0
+
+
+    jpg_bytes = await asyncio.to_thread(_render_story_image, mode, user_name, favs, hist, listen_sec, track)
+    return cors(web.Response(body=jpg_bytes, content_type="image/jpeg", headers={"Cache-Control": "no-store"}))
+
+
+
 
 async def api_history_add(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -777,11 +1107,13 @@ async def api_pl_add(request):
         return cors(web.json_response({"ok": True}))
     except Exception: return cors(web.json_response({"error": "bad"}, status=400))
 
+
 async def api_pl_rename(request):
     user = verify(request.headers.get("Authorization", ""))
     data = await request.json()
     rename_playlist(user["id"], data["old_name"], data["new_name"])
     return cors(web.json_response({"ok": True}))
+
 
 async def api_pl_remove_track(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -789,54 +1121,52 @@ async def api_pl_remove_track(request):
     remove_track_from_playlist(user["id"], data["name"], data["track_id"])
     return cors(web.json_response({"ok": True}))
 
+
 async def api_pl_delete(request):
     user = verify(request.headers.get("Authorization", ""))
     data = await request.json()
     delete_playlist_db(user["id"], data["name"])
     return cors(web.json_response({"ok": True}))
 
+
 async def api_pl_create(request):
-    # Пустой плейлист существует только в localStorage на клиенте.
-    # В БД запись появится при первом api/playlist/add.
-    # Этот эндпоинт нужен только чтобы фронт не получал 404.
     try:
         await request.json()
     except Exception:
         pass
     return cors(web.json_response({"ok": True}))
 
+
 async def api_stream_track(request):
     tid = request.match_info["track_id"]
-
-    # ReplayGain / EBU R128 через ffmpeg — только для первичных запросов (без Range)
-    normalize = request.rel_url.query.get("norm", "1") != "0"
+    norm_param = request.rel_url.query.get("norm", "auto")
     rng = request.headers.get("Range", "")
 
-    # Уже нормализовали этот трек раньше — отдаём готовый файл с диска и не
-    # трогаем ffmpeg вообще. web.FileResponse сам умеет Range-запросы, так что
-    # перемотка внутри уже играющего трека тоже пойдёт из кэша, а не с источника.
-    if normalize:
-        cached_path = _normalized_cache_path(tid)
-        if not os.path.exists(cached_path) and _prefetch_state.get(tid) == "running":
-            # Этот же трек прямо сейчас досчитывается в фоне (предзагрузка) —
-            # подождём до 20 секунд вместо второго параллельного транскода.
-            for _ in range(40):
-                await asyncio.sleep(0.5)
-                if os.path.exists(cached_path) or _prefetch_state.get(tid) != "running":
-                    break
-        if os.path.exists(cached_path):
-            resp = web.FileResponse(cached_path, headers={"X-Audio-Norm": "cached"})
-            return cors(resp)
 
-    # Две попытки: если закэшированная ссылка на аудио протухла (403/404/410 от
-    # источника или ffmpeg не смог её открыть) — сбрасываем кэш и берём свежую.
+    # 1. Если трек УЖЕ нормализован и лежит на диске — отдаём его сразу через
+    # FileResponse (он нативно поддерживает Range-запросы и перемотку с 0% CPU).
+    cached_path = _normalized_cache_path(tid)
+    if norm_param != "0" and os.path.exists(cached_path):
+        resp = web.FileResponse(cached_path, headers={"X-Audio-Norm": "cached"})
+        return cors(resp)
+
+
+    # 2. Если файла ещё нет в norm_cache, запускаем фоновую нормализацию для
+    # будущих прослушиваний, а прямо сейчас отдаём быстрый passthrough с поддержкой
+    # Range, чтобы звук стартовал мгновенно и перемотка не ломала поток.
+    if norm_param != "0" and tid not in _prefetch_state and len(_prefetch_state) < 6 and _ID_RE.match(tid):
+        _prefetch_state[tid] = "queued"
+        asyncio.create_task(_prefetch_track(tid))
+
+
+    force_live_norm = (norm_param == "1" and not rng)
+
+
     for attempt in (0, 1):
         track = await music_engine.get_track_details(tid, fresh=(attempt == 1))
         if not track: return cors(web.Response(status=404, text="Stream not found"))
 
-        # У YouTube-треков track["stream_url"] — служебный маркер вида "yt_...",
-        # а не http-адрес (его понимает только download_file, см. music_engine.py).
-        # Реальный проксируемый адрес аудио-CDN лежит в direct_stream_url.
+
         if tid.startswith("yt_"):
             source_url = track.get("direct_stream_url")
             extra_headers = track.get("stream_headers") or {}
@@ -845,17 +1175,19 @@ async def api_stream_track(request):
             extra_headers = {}
         if not source_url: return cors(web.Response(status=404, text="Stream not found"))
 
-        if normalize and not rng:
+
+        if force_live_norm:
             try:
                 result = await _stream_normalized(request, source_url, tid)
             except Exception as e:
                 logger.warning(f"ffmpeg loudnorm failed ({e}), passthrough")
                 result = None
-            if result is False and attempt == 0:   # источник не отдал ни байта
+            if result is False and attempt == 0:
                 music_engine.invalidate_details(tid)
                 continue
             if result:
                 return result
+
 
         hdrs = {"User-Agent": "Mozilla/5.0", **extra_headers}
         if rng: hdrs["Range"] = rng
@@ -878,16 +1210,19 @@ async def api_stream_track(request):
                     return resp
         except Exception as e:
             if started:
-                return resp  # клиент отвалился посреди трека — повторять нечего
+                return resp
             if attempt == 0:
                 music_engine.invalidate_details(tid)
                 continue
             return cors(web.Response(status=502, text=str(e)))
     return cors(web.Response(status=502, text="Stream unavailable"))
 
+
 NORM_CACHE_DIR = os.path.join(os.path.dirname(DB_PATH), "norm_cache")
 os.makedirs(NORM_CACHE_DIR, exist_ok=True)
 NORM_CACHE_MAX_BYTES = int(os.getenv("NORM_CACHE_MAX_MB", "500")) * 1024 * 1024
+
+
 
 
 def _normalized_cache_path(track_id: str) -> str:
@@ -895,10 +1230,9 @@ def _normalized_cache_path(track_id: str) -> str:
     return os.path.join(NORM_CACHE_DIR, f"{safe_id}.mp3")
 
 
+
+
 def _prune_norm_cache():
-    """Простая эвикция по размеру: удаляем самые давно использованные файлы,
-    пока суммарный размер кэша не впишется в лимит. Диск на bothost обычно
-    ограничен, поэтому кэш не должен расти бесконечно."""
     try:
         entries = []
         total = 0
@@ -914,7 +1248,7 @@ def _prune_norm_cache():
             total += st.st_size
         if total <= NORM_CACHE_MAX_BYTES:
             return
-        entries.sort(key=lambda e: e[0])  # старые по atime — первыми на удаление
+        entries.sort(key=lambda e: e[0])
         for atime, size, fpath in entries:
             if total <= NORM_CACHE_MAX_BYTES:
                 break
@@ -925,6 +1259,8 @@ def _prune_norm_cache():
                 pass
     except Exception as e:
         logger.warning(f"_prune_norm_cache: {e}")
+
+
 
 
 def _ffmpeg_loudnorm_cmd(source_url: str, output: str) -> list:
@@ -939,25 +1275,16 @@ def _ffmpeg_loudnorm_cmd(source_url: str, output: str) -> list:
     return cmd
 
 
-async def _stream_normalized(request, source_url: str, track_id: str):
-    """
-    Проксирует аудио через ffmpeg loudnorm EBU R128 (-14 LUFS), одновременно
-    отдавая поток клиенту и записывая его во временный файл на диске.
-    По завершении без ошибок временный файл атомарно переименовывается в
-    постоянный кэш — следующий запрос этого трека уже не тронет ffmpeg.
 
-    Возвращает: StreamResponse — успех; None — ffmpeg не установлен (играем
-    напрямую); False — ffmpeg не получил от источника ни байта (ссылка мертва).
-    Заголовки клиенту уходят только после первого куска данных, поэтому при
-    мёртвой ссылке вызывающий код ещё может сделать повторную попытку.
-    """
+
+async def _stream_normalized(request, source_url: str, track_id: str):
     if not shutil.which("ffmpeg"):
-        return None  # ffmpeg не установлен — тихий fallback
+        return None
+
 
     cache_path = _normalized_cache_path(track_id)
-    # Уникальный суффикс: два одновременных первых запроса одного трека не
-    # должны писать в один и тот же временный файл.
     tmp_path = f"{cache_path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+
 
     proc = await asyncio.create_subprocess_exec(
         *_ffmpeg_loudnorm_cmd(source_url, "pipe:1"),
@@ -1000,8 +1327,6 @@ async def _stream_normalized(request, source_url: str, track_id: str):
             try: proc.kill()
             except Exception: pass
             await proc.wait()
-        # Кэшируем, только если ffmpeg реально доработал до конца (rc==0) —
-        # иначе в кэше мог бы осесть оборванный/битый файл.
         if completed_ok and os.path.exists(tmp_path):
             try:
                 os.replace(tmp_path, cache_path)
@@ -1016,15 +1341,16 @@ async def _stream_normalized(request, source_url: str, track_id: str):
     return resp
 
 
+
+
 # ═══════════════════════════════════════════════════════════════
 # ПРЕДЗАГРУЗКА СЛЕДУЮЩИХ ТРЕКОВ
 # ═══════════════════════════════════════════════════════════════
-# Пока играет текущий трек, клиент просит подготовить следующие 1-2: сервер
-# заранее получает ссылку на аудио и нормализует трек в кэш. Когда очередь
-# доходит до него, файл отдаётся с диска мгновенно (и с нормой громкости).
-_prefetch_state: dict[str, str] = {}      # track_id -> "queued" | "running"
-_prefetch_sem = asyncio.Semaphore(1)      # один ffmpeg за раз — хостинг слабый
+_prefetch_state: dict[str, str] = {}
+_prefetch_sem = asyncio.Semaphore(1)
 _ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+
 
 
 async def _normalize_to_cache(source_url: str, track_id: str) -> bool:
@@ -1032,7 +1358,7 @@ async def _normalize_to_cache(source_url: str, track_id: str) -> bool:
     tmp_path = f"{cache_path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
     cmd = _ffmpeg_loudnorm_cmd(source_url, tmp_path)
     if shutil.which("nice"):
-        cmd = ["nice", "-n", "10", *cmd]  # не отнимаем CPU у самого бота
+        cmd = ["nice", "-n", "10", *cmd]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     try:
@@ -1056,13 +1382,15 @@ async def _normalize_to_cache(source_url: str, track_id: str) -> bool:
     return ok
 
 
+
+
 async def _prefetch_track(tid: str):
     try:
         async with _prefetch_sem:
             if os.path.exists(_normalized_cache_path(tid)):
                 return
             _prefetch_state[tid] = "running"
-            track = await music_engine.get_track_details(tid)   # заодно прогревает кэш ссылок
+            track = await music_engine.get_track_details(tid)
             if not track:
                 return
             src = track.get("direct_stream_url") if tid.startswith("yt_") else track.get("stream_url")
@@ -1073,6 +1401,8 @@ async def _prefetch_track(tid: str):
         logger.debug(f"prefetch {tid}: {e}")
     finally:
         _prefetch_state.pop(tid, None)
+
+
 
 
 async def api_prefetch(request):
@@ -1094,9 +1424,221 @@ async def api_prefetch(request):
             queued.append(tid)
     return cors(web.json_response({"queued": queued, "cached": cached}))
 
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# REAL-TIME PARTY MODE (WebSocket Jam)
+# ═══════════════════════════════════════════════════════════════
+_party_rooms: dict[str, dict] = {}
+
+
+
+
+def _get_party_room(room_id: str) -> dict:
+    room = _party_rooms.get(room_id)
+    if not room:
+        room = {
+            "id": room_id,
+            "clients": set(),
+            "members": {},          # uid -> {user_id, name, avatar}
+            "host_id": None,
+            "now_playing": None,
+            "position_sec": 0.0,
+            "is_playing": False,
+            "updated_at": time.monotonic(),
+            "skip_votes": set(),
+        }
+        _party_rooms[room_id] = room
+    return room
+
+
+
+
+def _party_snapshot(room: dict) -> dict:
+    elapsed = (time.monotonic() - room["updated_at"]) if room["is_playing"] else 0.0
+    pos = max(0.0, room["position_sec"] + elapsed)
+    return {
+        "type": "room_state",
+        "room_id": room["id"],
+        "host_id": room["host_id"],
+        "now_playing": room["now_playing"],
+        "position_sec": round(pos, 2),
+        "is_playing": room["is_playing"],
+        "members": list(room["members"].values()),
+        "skip_votes": list(room["skip_votes"]),
+        "skip_needed": max(1, (len(room["members"]) + 1) // 2),
+    }
+
+
+
+
+async def _party_broadcast(room: dict, payload: dict):
+    dead = []
+    msg_str = json.dumps(payload, ensure_ascii=False)
+    for ws in list(room["clients"]):
+        try:
+            await ws.send_str(msg_str)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        room["clients"].discard(ws)
+
+
+
+
+async def api_party_ws(request):
+    """
+    WebSocket-комната для синхронного совместного прослушивания (Party Mode).
+    Поддерживает мгновенную синхронизацию play/pause/seek/смены трека и голосования за скип.
+    """
+    room_id = request.match_info.get("room_id", "").strip()
+    auth_qs = request.rel_url.query.get("auth", "") or request.headers.get("Authorization", "")
+    try:
+        user = verify(auth_qs)
+    except Exception:
+        user = {"id": "guest_" + uuid.uuid4().hex[:6], "first_name": "Гость"}
+
+
+    uid = str(user.get("id", "guest"))
+    first = user.get("first_name", "")
+    last = user.get("last_name", "")
+    uname = (first + " " + last).strip() or user.get("username") or "Участник"
+    uavatar = user.get("photo_url", "")
+
+
+    ws = web.WebSocketResponse(heartbeat=25)
+    await ws.prepare(request)
+
+
+    room = _get_party_room(room_id)
+    room["clients"].add(ws)
+    room["members"][uid] = {"user_id": uid, "name": uname, "avatar": uavatar}
+    if not room["host_id"]:
+        room["host_id"] = uid
+
+
+    await _party_broadcast(room, _party_snapshot(room))
+
+
+    try:
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            try:
+                data = json.loads(msg.data)
+            except Exception:
+                continue
+            mtype = data.get("type")
+
+
+            if mtype == "sync_playback":
+                # Обновление текущего трека/позиции/паузы
+                if data.get("track") is not None:
+                    old_id = (room["now_playing"] or {}).get("id")
+                    new_id = (data.get("track") or {}).get("id")
+                    room["now_playing"] = data.get("track")
+                    if old_id != new_id:
+                        room["skip_votes"].clear()
+                if "position_sec" in data:
+                    room["position_sec"] = float(data.get("position_sec") or 0.0)
+                if "is_playing" in data:
+                    room["is_playing"] = bool(data.get("is_playing"))
+                room["updated_at"] = time.monotonic()
+                await _party_broadcast(room, {**_party_snapshot(room), "sender_id": uid})
+
+
+            elif mtype == "vote_skip":
+                if uid in room["skip_votes"]:
+                    room["skip_votes"].discard(uid)
+                else:
+                    room["skip_votes"].add(uid)
+                needed = max(1, (len(room["members"]) + 1) // 2)
+                if len(room["skip_votes"]) >= needed:
+                    room["skip_votes"].clear()
+                    await _party_broadcast(room, {"type": "skip_triggered", "room_id": room_id})
+                else:
+                    await _party_broadcast(room, _party_snapshot(room))
+
+
+            elif mtype == "queue_updated":
+                await _party_broadcast(room, {"type": "queue_updated", "room_id": room_id, "sender_id": uid})
+
+
+    finally:
+        room["clients"].discard(ws)
+        room["members"].pop(uid, None)
+        room["skip_votes"].discard(uid)
+        if room["host_id"] == uid:
+            room["host_id"] = next(iter(room["members"].keys()), None)
+        if room["clients"]:
+            await _party_broadcast(room, _party_snapshot(room))
+        else:
+            _party_rooms.pop(room_id, None)
+
+
+    return ws
+
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# ФОНОВЫЙ РАДАР РЕЛИЗОВ (уведомления о новых треках подписок)
+# ═══════════════════════════════════════════════════════════════
+async def release_radar_loop():
+    """
+    Каждые 6 часов проверяет свежие треки всех артистов из artist_subscriptions
+    и рассылает уведомления 'new_release' подписчикам при появлении новых треков.
+    """
+    await asyncio.sleep(60)
+    while True:
+        try:
+            artists = get_all_subscribed_artists()
+            for artist in artists:
+                try:
+                    tracks = await music_engine.search_sc(artist, limit=5)
+                    artist_l = artist.lower().strip()
+                    matched = [t for t in tracks if artist_l in (t.get("artist") or "").lower()]
+                    if not matched:
+                        continue
+                    seen = get_artist_seen_track_ids(artist)
+                    current_ids = [str(t["id"]) for t in matched if t.get("id")]
+                    if not seen:
+                        # Первичная инициализация базы для артиста — запоминаем без спама
+                        mark_artist_tracks_seen(artist, current_ids)
+                        continue
+                    new_tracks = [t for t in matched if str(t.get("id")) not in seen]
+                    if new_tracks:
+                        mark_artist_tracks_seen(artist, [str(t["id"]) for t in new_tracks])
+                        subs = get_artist_subscribers(artist)
+                        fresh = new_tracks[0]
+                        for uid in subs:
+                            add_notification(
+                                uid,
+                                "new_release",
+                                f"🎵 Новый релиз — {artist}",
+                                f"Вышел трек «{fresh.get('title', 'Без названия')}»",
+                                {
+                                    "artist": artist,
+                                    "track_id": str(fresh["id"]),
+                                    "track_title": fresh.get("title", ""),
+                                    "artwork_url": fresh.get("artwork_url", ""),
+                                },
+                            )
+                except Exception as e:
+                    logger.debug(f"release_radar artist '{artist}' error: {e}")
+                await asyncio.sleep(3)
+        except Exception as e:
+            logger.warning(f"release_radar_loop error: {e}")
+        await asyncio.sleep(6 * 3600)
+
+
+
+
 # ═══════════════════════════════════════════════════════════════
 # ARTIST SUBSCRIPTIONS
 # ═══════════════════════════════════════════════════════════════
+
 
 async def api_artist_subscribe(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -1106,7 +1648,7 @@ async def api_artist_subscribe(request):
         artist = body.get("artist", "").strip()
         if not artist:
             return cors(web.json_response({"error": "no artist"}, status=400))
-        action = body.get("action", "subscribe")  # subscribe | unsubscribe
+        action = body.get("action", "subscribe")
         if action == "unsubscribe":
             unsubscribe_artist(uid, artist)
             return cors(web.json_response({"ok": True, "subscribed": False}))
@@ -1114,6 +1656,7 @@ async def api_artist_subscribe(request):
         return cors(web.json_response({"ok": ok, "subscribed": True}))
     except Exception as e:
         return cors(web.json_response({"error": str(e)}, status=400))
+
 
 async def api_artist_status(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -1124,15 +1667,18 @@ async def api_artist_status(request):
     subscribed = is_subscribed_artist(uid, artist)
     return cors(web.json_response({"subscribed": subscribed}))
 
+
 async def api_subscribed_artists(request):
     user = verify(request.headers.get("Authorization", ""))
     uid = str(user["id"])
     artists = get_subscribed_artists(uid)
     return cors(web.json_response({"artists": artists}))
 
+
 # ═══════════════════════════════════════════════════════════════
 # FRIENDS
 # ═══════════════════════════════════════════════════════════════
+
 
 async def api_users_search(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -1141,10 +1687,10 @@ async def api_users_search(request):
     if len(q) < 2:
         return cors(web.json_response([]))
     results = search_users(q, uid)
-    # Добавляем статус дружбы к каждому
     for r in results:
         r["friend_status"] = get_friend_status(uid, r["user_id"])
     return cors(web.json_response(results))
+
 
 async def api_friend_request(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -1159,7 +1705,6 @@ async def api_friend_request(request):
         if not to_id or to_id == uid:
             return cors(web.json_response({"error": "invalid"}, status=400))
         result = send_friend_request(uid, my_name, my_avatar, to_id)
-        # Уведомление получателю
         if result in ('sent', 'accepted'):
             ntype = "friend_accepted" if result == 'accepted' else "friend_request"
             nbody = f"{my_name} принял(а) запрос" if result == 'accepted' else f"{my_name} хочет добавить тебя в друзья"
@@ -1169,6 +1714,7 @@ async def api_friend_request(request):
         return cors(web.json_response({"ok": True, "result": result}))
     except Exception as e:
         return cors(web.json_response({"error": str(e)}, status=400))
+
 
 async def api_friend_accept(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -1181,12 +1727,12 @@ async def api_friend_accept(request):
         body = await request.json()
         from_id = str(body.get("from_user_id", "")).strip()
         accept_friend_request(from_id, uid, my_name, my_avatar)
-        # Уведомление отправителю запроса
         add_notification(from_id, "friend_accepted", "👥 Друзья", f"{my_name} принял(а) твой запрос в друзья 🎉",
                          {"from_user_id": uid, "from_user_name": my_name, "from_user_avatar": my_avatar})
         return cors(web.json_response({"ok": True}))
     except Exception as e:
         return cors(web.json_response({"error": str(e)}, status=400))
+
 
 async def api_friends_list(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -1195,12 +1741,11 @@ async def api_friends_list(request):
     incoming = get_friend_requests_incoming(uid)
     return cors(web.json_response({"friends": friends, "incoming": incoming}))
 
+
 async def api_friend_tracks(request):
-    """Треки друга (избранное + история)."""
     user = verify(request.headers.get("Authorization", ""))
     uid = str(user["id"])
     friend_id = request.match_info["friend_id"]
-    # Проверяем что реально друзья
     status = get_friend_status(uid, friend_id)
     if status != 'friends':
         return cors(web.json_response({"error": "not friends"}, status=403))
@@ -1209,9 +1754,11 @@ async def api_friend_tracks(request):
     history = get_friend_history(friend_id)
     return cors(web.json_response({"profile": profile, "favs": favs, "history": history}))
 
+
 # ═══════════════════════════════════════════════════════════════
 # NOTIFICATIONS
 # ═══════════════════════════════════════════════════════════════
+
 
 async def api_notifications_get(request):
     user = verify(request.headers.get("Authorization", ""))
@@ -1220,11 +1767,91 @@ async def api_notifications_get(request):
     unread = get_unread_notifications_count(uid)
     return cors(web.json_response({"notifications": notifs, "unread": unread}))
 
+
 async def api_notifications_read(request):
     user = verify(request.headers.get("Authorization", ""))
     uid = str(user["id"])
     mark_notifications_read(uid)
     return cors(web.json_response({"ok": True}))
+
+
+
+
+# ═══════════════════════════════════════════════════════════
+# КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ — API
+# ═══════════════════════════════════════════════════════════
+
+
+def _tg_user_info(request) -> tuple[str, str, str]:
+    user = verify(request.headers.get("Authorization", ""))
+    uid = str(user.get("id", "unknown"))
+    first = user.get("first_name", "")
+    last = user.get("last_name", "")
+    name = (first + " " + last).strip() or user.get("username") or "Участник"
+    avatar = user.get("photo_url", "")
+    return uid, name, avatar
+
+
+async def api_collab_create(request):
+    uid, name, avatar = _tg_user_info(request)
+    try:
+        body = await request.json()
+        pl_name = body.get("name", "Коллаб-плейлист")[:80]
+    except Exception:
+        pl_name = "Коллаб-плейлист"
+    cid = collab_create(uid, name, avatar, pl_name)
+    return cors(web.json_response({"ok": True, "id": cid}))
+
+
+async def api_collab_get(request):
+    verify(request.headers.get("Authorization", ""))
+    cid = request.match_info["cid"]
+    meta = collab_get_meta(cid)
+    if not meta:
+        return cors(web.json_response({"error": "not found"}, status=404))
+    tracks = collab_get_tracks(cid)
+    return cors(web.json_response({"meta": meta, "tracks": tracks}))
+
+
+async def api_collab_add_track(request):
+    uid, name, avatar = _tg_user_info(request)
+    cid = request.match_info["cid"]
+    if not collab_get_meta(cid):
+        return cors(web.json_response({"error": "not found"}, status=404))
+    try:
+        body = await request.json()
+        track = body["track_data"]
+    except Exception:
+        return cors(web.json_response({"error": "bad request"}, status=400))
+    ok = collab_add_track(cid, track, uid, name, avatar)
+    return cors(web.json_response({"ok": ok}))
+
+
+async def api_collab_remove_track(request):
+    uid, _, _ = _tg_user_info(request)
+    cid = request.match_info["cid"]
+    meta = collab_get_meta(cid)
+    if not meta:
+        return cors(web.json_response({"error": "not found"}, status=404))
+    try:
+        body = await request.json()
+        track_id = body["track_id"]
+    except Exception:
+        return cors(web.json_response({"error": "bad request"}, status=400))
+    collab_remove_track(cid, track_id, uid, meta["owner_id"])
+    return cors(web.json_response({"ok": True}))
+
+
+async def api_collab_delete(request):
+    uid, _, _ = _tg_user_info(request)
+    cid = request.match_info["cid"]
+    meta = collab_get_meta(cid)
+    if not meta or meta["owner_id"] != uid:
+        return cors(web.json_response({"error": "forbidden"}, status=403))
+    collab_delete(cid, uid)
+    return cors(web.json_response({"ok": True}))
+
+
 
 
 async def start_web_server():
@@ -1234,6 +1861,7 @@ async def start_web_server():
     app.router.add_get("/api/metrics", api_metrics)
     app.router.add_get("/sw.js", handle_sw)
     app.router.add_get("/api/tracks", api_get_tracks)
+    app.router.add_get("/api/track/{track_id}", api_track_get)
     app.router.add_get("/api/search", api_search)
     app.router.add_get("/api/suggest", api_suggest)
     app.router.add_get("/api/resolve", api_resolve)
@@ -1242,9 +1870,12 @@ async def start_web_server():
     app.router.add_post("/api/fav/sync", api_fav_sync)
     app.router.add_post("/api/ytdlp/update", api_ytdlp_update)
     app.router.add_post("/api/playlist/import", api_playlist_import)
+    app.router.add_post("/api/send_to_chat", api_send_to_chat)
+    app.router.add_get("/api/story_card", api_story_card)
     app.router.add_get("/api/wave", api_wave)
     app.router.add_get("/api/radio", api_radio)
     app.router.add_get("/api/lyrics", api_lyrics)
+    app.router.add_post("/api/lyrics/translate", api_lyrics_translate)
     app.router.add_post("/api/dislike", api_dislike)
     app.router.add_post("/api/fav", api_fav_add)
     app.router.add_post("/api/fav/remove", api_fav_remove)
@@ -1258,6 +1889,8 @@ async def start_web_server():
     app.router.add_post("/api/playlist/remove_track", api_pl_remove_track)
     app.router.add_post("/api/playlist/delete", api_pl_delete)
     app.router.add_get("/api/stream/{track_id}", api_stream_track)
+    # Party Mode WebSocket
+    app.router.add_get("/api/party/{room_id}/ws", api_party_ws)
     # Коллаборативные плейлисты
     app.router.add_post("/api/collab/create", api_collab_create)
     app.router.add_get("/api/collab/{cid}", api_collab_get)
@@ -1279,80 +1912,13 @@ async def start_web_server():
     app.router.add_post("/api/notifications/read", api_notifications_read)
     app.router.add_options("/{path_info:.*}", lambda r: cors(web.Response()))
 
+
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 8080))
     await web.TCPSite(runner, "0.0.0.0", port).start()
     logger.info(f"🌐 Web server on :{port}")
 
-    # Не блокирует старт: раз в сутки проверяет PyPI и обновляет yt-dlp сам
-    # (отключается переменной YTDLP_AUTOUPDATE=0).
+
     asyncio.create_task(yt_dlp_maintenance_loop())
-
-# ═══════════════════════════════════════════════════════════
-# КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ — API
-# ═══════════════════════════════════════════════════════════
-
-def _tg_user_info(request) -> tuple[str, str, str]:
-    """Возвращает (user_id, display_name, photo_url) из initData."""
-    user = verify(request.headers.get("Authorization", ""))
-    uid = str(user.get("id", "unknown"))
-    first = user.get("first_name", "")
-    last = user.get("last_name", "")
-    name = (first + " " + last).strip() or user.get("username") or "Участник"
-    avatar = user.get("photo_url", "")
-    return uid, name, avatar
-
-async def api_collab_create(request):
-    uid, name, avatar = _tg_user_info(request)
-    try:
-        body = await request.json()
-        pl_name = body.get("name", "Коллаб-плейлист")[:80]
-    except Exception:
-        pl_name = "Коллаб-плейлист"
-    cid = collab_create(uid, name, avatar, pl_name)
-    return cors(web.json_response({"ok": True, "id": cid}))
-
-async def api_collab_get(request):
-    cid = request.match_info["cid"]
-    meta = collab_get_meta(cid)
-    if not meta:
-        return cors(web.json_response({"error": "not found"}, status=404))
-    tracks = collab_get_tracks(cid)
-    return cors(web.json_response({"meta": meta, "tracks": tracks}))
-
-async def api_collab_add_track(request):
-    uid, name, avatar = _tg_user_info(request)
-    cid = request.match_info["cid"]
-    if not collab_get_meta(cid):
-        return cors(web.json_response({"error": "not found"}, status=404))
-    try:
-        body = await request.json()
-        track = body["track_data"]
-    except Exception:
-        return cors(web.json_response({"error": "bad request"}, status=400))
-    ok = collab_add_track(cid, track, uid, name, avatar)
-    return cors(web.json_response({"ok": ok}))
-
-async def api_collab_remove_track(request):
-    uid, _, _ = _tg_user_info(request)
-    cid = request.match_info["cid"]
-    meta = collab_get_meta(cid)
-    if not meta:
-        return cors(web.json_response({"error": "not found"}, status=404))
-    try:
-        body = await request.json()
-        track_id = body["track_id"]
-    except Exception:
-        return cors(web.json_response({"error": "bad request"}, status=400))
-    collab_remove_track(cid, track_id, uid, meta["owner_id"])
-    return cors(web.json_response({"ok": True}))
-
-async def api_collab_delete(request):
-    uid, _, _ = _tg_user_info(request)
-    cid = request.match_info["cid"]
-    meta = collab_get_meta(cid)
-    if not meta or meta["owner_id"] != uid:
-        return cors(web.json_response({"error": "forbidden"}, status=403))
-    collab_delete(cid, uid)
-    return cors(web.json_response({"ok": True}))
+    asyncio.create_task(release_radar_loop())

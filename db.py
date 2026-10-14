@@ -1,10 +1,14 @@
-import sqlite3
+﻿import sqlite3
 import os
 import logging
 import time
+import re
+import secrets
+
 
 logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 # ── PERSISTENT STORAGE ────────────────────────────────────────────────────────
 # BotHost монтирует /data как постоянный том (не сбрасывается при редеплое).
@@ -21,7 +25,6 @@ def _resolve_db_path() -> str:
             continue
         try:
             os.makedirs(path, exist_ok=True)
-            # Проверяем возможность записи
             test = os.path.join(path, ".write_test")
             with open(test, "w") as f:
                 f.write("ok")
@@ -30,10 +33,12 @@ def _resolve_db_path() -> str:
             return os.path.join(path, "music.db")
         except Exception:
             continue
-    # Абсолютный fallback
     return os.path.join(BASE_DIR, "music.db")
 
+
 DB_PATH = _resolve_db_path()
+
+
 
 
 def _db_connect() -> sqlite3.Connection:
@@ -41,26 +46,21 @@ def _db_connect() -> sqlite3.Connection:
     Открывает соединение с БД с настройками, устойчивыми к конкурентной
     записи (друзья, коллаб-плейлисты, история, уведомления пишут часто
     и одновременно). WAL включается один раз на файл БД в init_db(), но
-    busy_timeout нужно проставлять на КАЖДОЕ соединение отдельно — иначе
-    конкурентная запись сразу падает с 'database is locked' вместо того,
-    чтобы подождать и повторить попытку.
+    busy_timeout нужно проставлять на КАЖДОЕ соединение отдельно.
     """
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
 
+
+
 def init_db():
     conn = _db_connect()
     c = conn.cursor()
-    # WAL — читатели больше не блокируют писателей (и наоборот), что
-    # критично при множестве одновременных запросов на bothost.
-    # synchronous=NORMAL — безопасно вместе с WAL и заметно быстрее FULL.
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
     c.execute('''CREATE TABLE IF NOT EXISTS favorites (user_id TEXT, track_id TEXT, title TEXT, artist TEXT)''')
-    # «Надгробия» удалений избранного: без них устройство, бывшее офлайн, при
-    # синхронизации воскресило бы трек, который другое устройство уже убрало.
     c.execute('''CREATE TABLE IF NOT EXISTS fav_tombstones (
         user_id TEXT NOT NULL, track_id TEXT NOT NULL, deleted_at INTEGER NOT NULL,
         PRIMARY KEY (user_id, track_id)
@@ -71,6 +71,13 @@ def init_db():
         artist_name TEXT NOT NULL,
         subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(user_id, artist_name)
+    )''')
+    # Уже известные треки артистов (для фонового Радара Релизов)
+    c.execute('''CREATE TABLE IF NOT EXISTS artist_seen_tracks (
+        artist_name TEXT NOT NULL,
+        track_id TEXT NOT NULL,
+        seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (artist_name, track_id)
     )''')
     # Дружба (двусторонняя — запись создаётся при взаимной подписке)
     c.execute('''CREATE TABLE IF NOT EXISTS friend_requests (
@@ -104,6 +111,17 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS history (user_id TEXT, track_id TEXT, title TEXT, artist TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS cache (track_id TEXT PRIMARY KEY, file_id TEXT)''')
 
+
+    # Кэш текстов песен и ИИ-переводов (LRCLIB + Gemini)
+    c.execute('''CREATE TABLE IF NOT EXISTS lyrics_cache (
+        track_key TEXT PRIMARY KEY,
+        plain TEXT,
+        synced TEXT,
+        translated TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+
+
     # Синхронизация позиции воспроизведения между устройствами
     c.execute('''CREATE TABLE IF NOT EXISTS playback_state (
         user_id TEXT PRIMARY KEY,
@@ -114,12 +132,15 @@ def init_db():
         queue_json TEXT,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
-    
-    # Новая таблица: ЧЕРНЫЙ СПИСОК
+
+
+    # ЧЕРНЫЙ СПИСОК
     c.execute('''CREATE TABLE IF NOT EXISTS blacklist (user_id TEXT, track_id TEXT, UNIQUE(user_id, track_id))''')
-    
+
+
     # Плейлисты
     c.execute("""CREATE TABLE IF NOT EXISTS playlists (user_id TEXT, name TEXT, track_id TEXT, title TEXT, artist TEXT, source TEXT, UNIQUE(user_id, name, track_id))""")
+
 
     # ── АНИМЕ (Anixart) ──────────────────────────────────────────────────────
     c.execute('''CREATE TABLE IF NOT EXISTS anime_favorites (
@@ -131,22 +152,18 @@ def init_db():
         user_id TEXT, release_id INTEGER, title TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
-    # Подписки на новые серии (last_episodes — сколько серий было при подписке/последней проверке)
     c.execute('''CREATE TABLE IF NOT EXISTS anime_subscriptions (
         user_id TEXT, release_id INTEGER, title TEXT, last_episodes INTEGER DEFAULT 0,
         subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(user_id, release_id)
     )''')
-    # Привязанный личный аккаунт Anixart (хранится ТОЛЬКО токен, не пароль)
     c.execute('''CREATE TABLE IF NOT EXISTS anixart_accounts (
         user_id TEXT PRIMARY KEY, anixart_token TEXT, anixart_login TEXT,
         linked_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
-    
-    # Миграция старых колонок (если их не было).
-    # Ловим именно sqlite3.OperationalError ("duplicate column") — это
-    # ожидаемая ошибка при повторном запуске; любая другая ошибка (например,
-    # опечатка в SQL или отсутствие самой таблицы) должна быть видна в логах.
+
+
+    # Миграция старых колонок
     for stmt in (
         "ALTER TABLE favorites ADD COLUMN artwork_url TEXT",
         "ALTER TABLE favorites ADD COLUMN source TEXT",
@@ -155,24 +172,42 @@ def init_db():
         "ALTER TABLE history ADD COLUMN source TEXT",
         "ALTER TABLE playlists ADD COLUMN artwork_url TEXT",
         "ALTER TABLE history ADD COLUMN duration_sec INTEGER DEFAULT 0",
+        "ALTER TABLE lyrics_cache ADD COLUMN translated TEXT",
     ):
         try:
             c.execute(stmt)
         except sqlite3.OperationalError:
-            pass  # колонка уже существует — это нормально
+            pass
         except Exception as e:
             logger.error(f"Миграция БД неожиданно упала на '{stmt}': {e}")
 
-    # Старым записям избранного проставляем «время добавления» по порядку вставки
-    # (rowid ≪ миллисекундных меток новых записей — порядок сохраняется).
+
     try:
         c.execute("UPDATE favorites SET added_at = rowid WHERE added_at IS NULL OR added_at = 0")
     except sqlite3.OperationalError:
         pass
 
+
+    # ── ИНДЕКСЫ ДЛЯ БЫСТРЫХ ЗАПРОСОВ И КОЛЛАБОРАТИВНОЙ ФИЛЬТРАЦИИ ────────────
+    for idx_stmt in (
+        "CREATE INDEX IF NOT EXISTS idx_fav_user ON favorites(user_id, added_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_fav_track ON favorites(track_id)",
+        "CREATE INDEX IF NOT EXISTS idx_hist_user_ts ON history(user_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_pl_user ON playlists(user_id, name)",
+        "CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, is_read, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_art_sub_artist ON artist_subscriptions(artist_name)",
+        "CREATE INDEX IF NOT EXISTS idx_friend_req_to ON friend_requests(to_user_id, status)",
+    ):
+        try:
+            c.execute(idx_stmt)
+        except Exception as e:
+            logger.warning(f"Не удалось создать индекс '{idx_stmt}': {e}")
+
+
     conn.commit()
     conn.close()
-    logger.info("🟢 SQLite БД обновлена (добавлен blacklist)")
+    logger.info("🟢 SQLite БД обновлена (индексы, lyrics_cache, artist_seen_tracks)")
+
 
 # --- БАЗОВЫЕ ФУНКЦИИ ---
 def get_cached_file_id(track_id):
@@ -183,6 +218,7 @@ def get_cached_file_id(track_id):
     conn.close()
     return res[0] if res else None
 
+
 def save_cached_file_id(track_id, file_id):
     conn = _db_connect()
     c = conn.cursor()
@@ -190,9 +226,60 @@ def save_cached_file_id(track_id, file_id):
     conn.commit()
     conn.close()
 
+
+# --- КЭШ ТЕКСТОВ И ПЕРЕВОДОВ ---
+def _lyrics_key(artist: str, title: str) -> str:
+    clean_t = re.sub(r"\(.*?\)|\[.*?\]", "", title or "").strip().lower()
+    clean_a = (artist or "").strip().lower()
+    return f"{clean_a}::{clean_t}"
+
+
+def get_cached_lyrics(artist: str, title: str) -> dict | None:
+    key = _lyrics_key(artist, title)
+    conn = _db_connect()
+    row = conn.execute(
+        "SELECT plain, synced, translated FROM lyrics_cache WHERE track_key=?", (key,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"plain": row[0] or "", "synced": row[1] or "", "translated": row[2] or ""}
+
+
+def save_cached_lyrics(artist: str, title: str, plain: str, synced: str):
+    key = _lyrics_key(artist, title)
+    conn = _db_connect()
+    conn.execute("""
+        INSERT INTO lyrics_cache (track_key, plain, synced, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(track_key) DO UPDATE SET
+            plain = excluded.plain,
+            synced = excluded.synced,
+            updated_at = CURRENT_TIMESTAMP
+    """, (key, plain or "", synced or ""))
+    conn.commit()
+    conn.close()
+
+
+def save_cached_lyrics_translation(artist: str, title: str, translated: str):
+    key = _lyrics_key(artist, title)
+    conn = _db_connect()
+    conn.execute("""
+        INSERT INTO lyrics_cache (track_key, plain, synced, translated, updated_at)
+        VALUES (?, '', '', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(track_key) DO UPDATE SET
+            translated = excluded.translated,
+            updated_at = CURRENT_TIMESTAMP
+    """, (key, translated or ""))
+    conn.commit()
+    conn.close()
+
+
 # --- ИЗБРАННОЕ И ИСТОРИЯ ---
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
 
 
 def save_music_fav(user_id, track_info, added_at=None):
@@ -209,6 +296,7 @@ def save_music_fav(user_id, track_info, added_at=None):
     conn.close()
     return True
 
+
 def remove_music_fav(user_id, track_id):
     """Удалить трек из избранного (и запомнить удаление для синхронизации)."""
     conn = _db_connect()
@@ -219,11 +307,13 @@ def remove_music_fav(user_id, track_id):
     conn.close()
     return True
 
+
 def _fetch_favs(c, user_id):
     c.execute("SELECT track_id, title, artist, artwork_url, source, added_at FROM favorites "
               "WHERE user_id=? ORDER BY added_at DESC, rowid DESC", (str(user_id),))
     return [{"id": r[0], "title": r[1], "artist": r[2], "artwork_url": r[3], "source": r[4], "added_at": r[5]}
             for r in c.fetchall()]
+
 
 def get_music_favs(user_id):
     conn = _db_connect()
@@ -231,6 +321,7 @@ def get_music_favs(user_id):
         return _fetch_favs(conn.cursor(), user_id)
     finally:
         conn.close()
+
 
 def sync_music_favs(user_id, ops):
     """
@@ -253,9 +344,10 @@ def sync_music_favs(user_id, ops):
             ts = int(op.get("ts") or now)
         except (TypeError, ValueError):
             ts = now
-        ts = min(ts, now + 60_000)  # часы клиента не могут «убежать» в будущее и выиграть навсегда
+        ts = min(ts, now + 60_000)
         if tid not in latest or ts >= latest[tid][0]:
             latest[tid] = (ts, kind, track)
+
 
     conn = _db_connect()
     try:
@@ -268,7 +360,7 @@ def sync_music_favs(user_id, ops):
             tomb_ts = tomb[0] if tomb else 0
             if kind == "add":
                 if tomb_ts >= ts:
-                    continue  # на другом устройстве трек убрали позже
+                    continue
                 if row is None and track:
                     c.execute("INSERT INTO favorites (user_id, track_id, title, artist, artwork_url, source, added_at) "
                               "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -276,9 +368,9 @@ def sync_music_favs(user_id, ops):
                                str(track.get("artwork_url", ""))[:600], str(track.get("source", "SoundCloud"))[:40], ts))
                 if row is not None or track:
                     c.execute("DELETE FROM fav_tombstones WHERE user_id=? AND track_id=?", (uid, tid))
-            else:  # remove
+            else:
                 if row is not None and (row[0] or 0) > ts:
-                    continue  # трек добавили позже этого удаления
+                    continue
                 c.execute("DELETE FROM favorites WHERE user_id=? AND track_id=?", (uid, tid))
                 c.execute("REPLACE INTO fav_tombstones (user_id, track_id, deleted_at) VALUES (?, ?, ?)",
                           (uid, tid, max(ts, tomb_ts)))
@@ -286,6 +378,7 @@ def sync_music_favs(user_id, ops):
         return _fetch_favs(c, uid)
     finally:
         conn.close()
+
 
 def log_track_history(user_id, track_info):
     conn = _db_connect()
@@ -305,6 +398,7 @@ def clear_history(user_id):
     conn.commit()
     conn.close()
 
+
 def get_user_history(user_id):
     conn = _db_connect()
     c = conn.cursor()
@@ -312,6 +406,7 @@ def get_user_history(user_id):
     rows = c.fetchall()
     conn.close()
     return [{"id": r[0], "title": r[1], "artist": r[2], "artwork_url": r[3], "source": r[4], "duration_sec": r[5]} for r in rows]
+
 
 def get_total_listen_seconds(user_id):
     conn = _db_connect()
@@ -335,6 +430,7 @@ def get_playlists(user_id) -> dict:
         result.setdefault(name, []).append({"id": tid, "title": title, "artist": artist, "source": source or "SoundCloud", "artwork_url": artwork_url})
     return result
 
+
 def save_playlist_track(user_id, name, track_info):
     conn = _db_connect()
     c = conn.cursor()
@@ -349,12 +445,14 @@ def save_playlist_track(user_id, name, track_info):
     conn.close()
     return ok
 
+
 def rename_playlist(user_id, old_name, new_name):
     conn = _db_connect()
     c = conn.cursor()
     c.execute("UPDATE playlists SET name=? WHERE user_id=? AND name=?", (new_name, str(user_id), old_name))
     conn.commit()
     conn.close()
+
 
 def remove_track_from_playlist(user_id, playlist_name, track_id):
     conn = _db_connect()
@@ -363,6 +461,7 @@ def remove_track_from_playlist(user_id, playlist_name, track_id):
     conn.commit()
     conn.close()
 
+
 def delete_playlist_db(user_id, playlist_name):
     conn = _db_connect()
     c = conn.cursor()
@@ -370,7 +469,8 @@ def delete_playlist_db(user_id, playlist_name):
     conn.commit()
     conn.close()
 
-# --- BLACKLIST (НОВОЕ) ---
+
+# --- BLACKLIST ---
 def add_dislike(user_id, track_id):
     conn = _db_connect()
     c = conn.cursor()
@@ -378,6 +478,7 @@ def add_dislike(user_id, track_id):
     c.execute("DELETE FROM favorites WHERE user_id=? AND track_id=?", (str(user_id), str(track_id)))
     conn.commit()
     conn.close()
+
 
 def get_blacklist(user_id):
     conn = _db_connect()
@@ -387,9 +488,11 @@ def get_blacklist(user_id):
     conn.close()
     return {r[0] for r in rows}
 
+
 # ═══════════════════════════════════════════════════════════════
 # ПРОФИЛИ ПОЛЬЗОВАТЕЛЕЙ
 # ═══════════════════════════════════════════════════════════════
+
 
 def upsert_user_profile(user_id: str, display_name: str, username: str, avatar_url: str):
     conn = _db_connect()
@@ -404,6 +507,7 @@ def upsert_user_profile(user_id: str, display_name: str, username: str, avatar_u
     """, (str(user_id), display_name, username, avatar_url))
     conn.commit(); conn.close()
 
+
 def get_user_profile(user_id: str) -> dict | None:
     conn = _db_connect()
     row = conn.execute(
@@ -413,6 +517,7 @@ def get_user_profile(user_id: str) -> dict | None:
     conn.close()
     if not row: return None
     return {"user_id": row[0], "display_name": row[1], "username": row[2], "avatar_url": row[3]}
+
 
 def search_users(query: str, exclude_user_id: str) -> list:
     conn = _db_connect()
@@ -425,9 +530,11 @@ def search_users(query: str, exclude_user_id: str) -> list:
     conn.close()
     return [{"user_id": r[0], "display_name": r[1], "username": r[2], "avatar_url": r[3]} for r in rows]
 
+
 # ═══════════════════════════════════════════════════════════════
-# ПОДПИСКИ НА АРТИСТОВ
+# ПОДПИСКИ НА АРТИСТОВ И РАДАР РЕЛИЗОВ
 # ═══════════════════════════════════════════════════════════════
+
 
 def subscribe_artist(user_id: str, artist_name: str) -> bool:
     conn = _db_connect()
@@ -436,8 +543,9 @@ def subscribe_artist(user_id: str, artist_name: str) -> bool:
                      (str(user_id), artist_name))
         conn.commit(); conn.close()
         return True
-    except Exception as e:
+    except Exception:
         conn.close(); return False
+
 
 def unsubscribe_artist(user_id: str, artist_name: str) -> bool:
     conn = _db_connect()
@@ -445,6 +553,7 @@ def unsubscribe_artist(user_id: str, artist_name: str) -> bool:
                  (str(user_id), artist_name))
     conn.commit(); conn.close()
     return True
+
 
 def get_subscribed_artists(user_id: str) -> list:
     conn = _db_connect()
@@ -455,6 +564,7 @@ def get_subscribed_artists(user_id: str) -> list:
     conn.close()
     return [r[0] for r in rows]
 
+
 def is_subscribed_artist(user_id: str, artist_name: str) -> bool:
     conn = _db_connect()
     row = conn.execute(
@@ -463,6 +573,7 @@ def is_subscribed_artist(user_id: str, artist_name: str) -> bool:
     ).fetchone()
     conn.close()
     return row is not None
+
 
 def get_artist_subscribers(artist_name: str) -> list:
     """Все user_id кто подписан на артиста (для рассылки уведомлений)."""
@@ -473,20 +584,49 @@ def get_artist_subscribers(artist_name: str) -> list:
     conn.close()
     return [r[0] for r in rows]
 
+
+def get_all_subscribed_artists() -> list[str]:
+    """Список всех уникальных артистов, на которых подписан хотя бы 1 пользователь."""
+    conn = _db_connect()
+    rows = conn.execute("SELECT DISTINCT artist_name FROM artist_subscriptions").fetchall()
+    conn.close()
+    return [r[0] for r in rows if r[0]]
+
+
+def get_artist_seen_track_ids(artist_name: str) -> set[str]:
+    conn = _db_connect()
+    rows = conn.execute(
+        "SELECT track_id FROM artist_seen_tracks WHERE artist_name=?", (artist_name,)
+    ).fetchall()
+    conn.close()
+    return {str(r[0]) for r in rows}
+
+
+def mark_artist_tracks_seen(artist_name: str, track_ids: list[str]):
+    if not track_ids:
+        return
+    conn = _db_connect()
+    conn.executemany(
+        "INSERT OR IGNORE INTO artist_seen_tracks (artist_name, track_id) VALUES (?, ?)",
+        [(artist_name, str(tid)) for tid in track_ids]
+    )
+    conn.commit()
+    conn.close()
+
+
 # ═══════════════════════════════════════════════════════════════
 # ДРУЖБА
 # ═══════════════════════════════════════════════════════════════
 
+
 def send_friend_request(from_id: str, from_name: str, from_avatar: str, to_id: str) -> str:
-    """Отправить запрос в друзья. Возвращает 'sent'|'already'|'accepted' (если уже есть встречный запрос)."""
+    """Отправить запрос в друзья. Возвращает 'sent'|'already'|'accepted'."""
     conn = _db_connect()
-    # Проверяем встречный запрос
     row = conn.execute(
         "SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
         (str(to_id), str(from_id))
     ).fetchone()
     if row and row[0] == 'pending':
-        # Встречный запрос — сразу принимаем оба
         conn.execute("UPDATE friend_requests SET status='accepted' WHERE from_user_id=? AND to_user_id=?",
                      (str(to_id), str(from_id)))
         conn.execute("""INSERT OR REPLACE INTO friend_requests (from_user_id, from_user_name, from_user_avatar, to_user_id, status)
@@ -494,7 +634,6 @@ def send_friend_request(from_id: str, from_name: str, from_avatar: str, to_id: s
                      (str(from_id), from_name, from_avatar, str(to_id)))
         conn.commit(); conn.close()
         return 'accepted'
-    # Проверяем существующий
     existing = conn.execute(
         "SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
         (str(from_id), str(to_id))
@@ -508,19 +647,19 @@ def send_friend_request(from_id: str, from_name: str, from_avatar: str, to_id: s
     conn.commit(); conn.close()
     return 'sent'
 
+
 def accept_friend_request(from_id: str, to_id: str, to_name: str, to_avatar: str) -> bool:
     conn = _db_connect()
     conn.execute("UPDATE friend_requests SET status='accepted' WHERE from_user_id=? AND to_user_id=?",
                  (str(from_id), str(to_id)))
-    # Создаём встречную запись тоже accepted
     conn.execute("""INSERT OR REPLACE INTO friend_requests (from_user_id, from_user_name, from_user_avatar, to_user_id, status)
                     VALUES (?, ?, ?, ?, 'accepted')""",
                  (str(to_id), to_name, to_avatar, str(from_id)))
     conn.commit(); conn.close()
     return True
 
+
 def get_friends(user_id: str) -> list:
-    """Список принятых друзей (пользователей с двусторонним accepted)."""
     conn = _db_connect()
     rows = conn.execute("""
         SELECT r.to_user_id, p.display_name, p.username, p.avatar_url
@@ -531,8 +670,8 @@ def get_friends(user_id: str) -> list:
     conn.close()
     return [{"user_id": r[0], "display_name": r[1] or "Пользователь", "username": r[2], "avatar_url": r[3]} for r in rows]
 
+
 def get_friend_requests_incoming(user_id: str) -> list:
-    """Входящие запросы в друзья (pending)."""
     conn = _db_connect()
     rows = conn.execute("""
         SELECT r.from_user_id, r.from_user_name, r.from_user_avatar, r.created_at
@@ -543,13 +682,11 @@ def get_friend_requests_incoming(user_id: str) -> list:
     conn.close()
     return [{"user_id": r[0], "display_name": r[1] or "Пользователь", "avatar_url": r[2], "created_at": r[3]} for r in rows]
 
+
 def get_friend_status(user_id: str, other_id: str) -> str:
-    """none | pending_sent | pending_received | friends"""
     conn = _db_connect()
-    # Проверяем мою запись к другому
     r1 = conn.execute("SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
                       (str(user_id), str(other_id))).fetchone()
-    # Проверяем его запись ко мне
     r2 = conn.execute("SELECT status FROM friend_requests WHERE from_user_id=? AND to_user_id=?",
                       (str(other_id), str(user_id))).fetchone()
     conn.close()
@@ -561,15 +698,19 @@ def get_friend_status(user_id: str, other_id: str) -> str:
         return 'pending_received'
     return 'none'
 
+
 def get_friend_favs(friend_id: str) -> list:
     return get_music_favs(friend_id)
+
 
 def get_friend_history(friend_id: str) -> list:
     return get_user_history(friend_id)
 
+
 # ═══════════════════════════════════════════════════════════════
 # УВЕДОМЛЕНИЯ
 # ═══════════════════════════════════════════════════════════════
+
 
 def add_notification(user_id: str, ntype: str, title: str, body: str, payload: dict | None = None):
     import json as _json
@@ -577,11 +718,11 @@ def add_notification(user_id: str, ntype: str, title: str, body: str, payload: d
     conn.execute("""INSERT INTO notifications (user_id, type, title, body, payload)
                     VALUES (?, ?, ?, ?, ?)""",
                  (str(user_id), ntype, title, body, _json.dumps(payload or {})))
-    # Оставляем только последние 50 уведомлений на пользователя
     conn.execute("""DELETE FROM notifications WHERE user_id=? AND id NOT IN (
         SELECT id FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50
     )""", (str(user_id), str(user_id)))
     conn.commit(); conn.close()
+
 
 def get_notifications(user_id: str, limit: int = 30) -> list:
     import json as _json
@@ -595,17 +736,19 @@ def get_notifications(user_id: str, limit: int = 30) -> list:
     result = []
     for r in rows:
         try: payload = _json.loads(r[4] or '{}')
-        except: payload = {}
+        except Exception: payload = {}
         result.append({
             "id": r[0], "type": r[1], "title": r[2], "body": r[3],
             "payload": payload, "is_read": bool(r[5]), "created_at": r[6]
         })
     return result
 
+
 def mark_notifications_read(user_id: str):
     conn = _db_connect()
     conn.execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (str(user_id),))
     conn.commit(); conn.close()
+
 
 def get_unread_notifications_count(user_id: str) -> int:
     conn = _db_connect()
@@ -616,7 +759,10 @@ def get_unread_notifications_count(user_id: str) -> int:
 
 
 
-import secrets
+# ═══════════════════════════════════════════════════════════════
+# КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ
+# ═══════════════════════════════════════════════════════════════
+
 
 def _init_collab_tables(conn):
     c = conn.cursor()
@@ -645,9 +791,9 @@ def _init_collab_tables(conn):
     """)
     conn.commit()
 
+
 def collab_create(owner_id: str, owner_name: str, owner_avatar: str, name: str) -> str:
-    """Создаёт коллаб-плейлист. Возвращает его короткий ID."""
-    cid = secrets.token_urlsafe(8)   # 8 байт = ~11 символов, URL-safe
+    cid = secrets.token_urlsafe(8)
     conn = _db_connect()
     _init_collab_tables(conn)
     conn.execute(
@@ -656,6 +802,7 @@ def collab_create(owner_id: str, owner_name: str, owner_avatar: str, name: str) 
     )
     conn.commit(); conn.close()
     return cid
+
 
 def collab_get_meta(cid: str) -> dict | None:
     conn = _db_connect()
@@ -666,6 +813,7 @@ def collab_get_meta(cid: str) -> dict | None:
     conn.close()
     if not row: return None
     return {"id": row[0], "owner_id": row[1], "owner_name": row[2], "owner_avatar": row[3], "name": row[4]}
+
 
 def collab_get_tracks(cid: str) -> list:
     conn = _db_connect()
@@ -682,10 +830,16 @@ def collab_get_tracks(cid: str) -> list:
         "added_by": r[5], "added_by_name": r[6], "added_by_avatar": r[7]
     } for r in rows]
 
+
 def collab_add_track(cid: str, track: dict, user_id: str, user_name: str, user_avatar: str) -> bool:
     conn = _db_connect()
     _init_collab_tables(conn)
     try:
+        # Ограничиваем размер одного коллаб-плейлиста 300 треками
+        cnt = conn.execute("SELECT COUNT(*) FROM collab_tracks WHERE collab_id=?", (cid,)).fetchone()
+        if cnt and cnt[0] >= 300:
+            conn.close()
+            return False
         conn.execute("""
             INSERT OR IGNORE INTO collab_tracks
                 (collab_id, track_id, title, artist, artwork_url, source,
@@ -696,12 +850,12 @@ def collab_add_track(cid: str, track: dict, user_id: str, user_name: str, user_a
               user_id, user_name, user_avatar))
         conn.commit(); conn.close()
         return True
-    except Exception as e:
+    except Exception:
         conn.close()
         return False
 
+
 def collab_remove_track(cid: str, track_id: str, user_id: str, owner_id: str) -> bool:
-    """Удалить трек может тот, кто добавил, или владелец плейлиста."""
     conn = _db_connect()
     _init_collab_tables(conn)
     conn.execute("""
@@ -712,6 +866,7 @@ def collab_remove_track(cid: str, track_id: str, user_id: str, owner_id: str) ->
     conn.commit(); conn.close()
     return True
 
+
 def collab_delete(cid: str, owner_id: str) -> bool:
     conn = _db_connect()
     _init_collab_tables(conn)
@@ -719,6 +874,8 @@ def collab_delete(cid: str, owner_id: str) -> bool:
     conn.execute("DELETE FROM collab_meta WHERE id=? AND owner_id=?", (cid, owner_id))
     conn.commit(); conn.close()
     return True
+
+
 
 
 # --- АНИМЕ (Anixart): избранное, история, подписки, привязка аккаунта ---
@@ -735,12 +892,14 @@ def save_anime_fav(user_id, release: dict) -> bool:
     conn.commit(); conn.close()
     return True
 
+
 def remove_anime_fav(user_id, release_id) -> bool:
     conn = _db_connect()
     conn.execute("DELETE FROM anime_favorites WHERE user_id=? AND release_id=?",
                  (str(user_id), int(release_id)))
     conn.commit(); conn.close()
     return True
+
 
 def is_anime_fav(user_id, release_id) -> bool:
     conn = _db_connect()
@@ -750,6 +909,7 @@ def is_anime_fav(user_id, release_id) -> bool:
     res = c.fetchone(); conn.close()
     return bool(res)
 
+
 def get_anime_favs(user_id) -> list:
     conn = _db_connect()
     c = conn.cursor()
@@ -757,6 +917,7 @@ def get_anime_favs(user_id) -> list:
               (str(user_id),))
     rows = c.fetchall(); conn.close()
     return [{"id": r[0], "title": r[1], "poster": r[2]} for r in rows]
+
 
 def log_anime_history(user_id, release: dict):
     conn = _db_connect()
@@ -770,6 +931,7 @@ def log_anime_history(user_id, release: dict):
               (str(user_id), str(user_id)))
     conn.commit(); conn.close()
 
+
 def get_anime_history(user_id, limit=20) -> list:
     conn = _db_connect()
     c = conn.cursor()
@@ -777,6 +939,7 @@ def get_anime_history(user_id, limit=20) -> list:
               (str(user_id), limit))
     rows = c.fetchall(); conn.close()
     return [{"id": r[0], "title": r[1], "timestamp": r[2]} for r in rows]
+
 
 def subscribe_anime(user_id, release: dict) -> bool:
     conn = _db_connect()
@@ -792,12 +955,14 @@ def subscribe_anime(user_id, release: dict) -> bool:
     conn.commit(); conn.close()
     return True
 
+
 def unsubscribe_anime(user_id, release_id) -> bool:
     conn = _db_connect()
     conn.execute("DELETE FROM anime_subscriptions WHERE user_id=? AND release_id=?",
                  (str(user_id), int(release_id)))
     conn.commit(); conn.close()
     return True
+
 
 def is_anime_subscribed(user_id, release_id) -> bool:
     conn = _db_connect()
@@ -807,6 +972,7 @@ def is_anime_subscribed(user_id, release_id) -> bool:
     res = c.fetchone(); conn.close()
     return bool(res)
 
+
 def get_anime_subscriptions(user_id) -> list:
     conn = _db_connect()
     c = conn.cursor()
@@ -815,13 +981,14 @@ def get_anime_subscriptions(user_id) -> list:
     rows = c.fetchall(); conn.close()
     return [{"id": r[0], "title": r[1], "last_episodes": r[2]} for r in rows]
 
+
 def get_all_anime_subscriptions() -> list:
-    """Все подписки всех пользователей — используется кроном проверки новых серий."""
     conn = _db_connect()
     c = conn.cursor()
     c.execute("SELECT user_id, release_id, title, last_episodes FROM anime_subscriptions")
     rows = c.fetchall(); conn.close()
     return [{"user_id": r[0], "id": r[1], "title": r[2], "last_episodes": r[3]} for r in rows]
+
 
 def update_anime_sub_episodes(user_id, release_id, episodes: int):
     conn = _db_connect()
@@ -830,11 +997,9 @@ def update_anime_sub_episodes(user_id, release_id, episodes: int):
     conn.commit(); conn.close()
 
 
+
+
 # ── СИНХРОНИЗАЦИЯ ПОЗИЦИИ ВОСПРОИЗВЕДЕНИЯ МЕЖДУ УСТРОЙСТВАМИ ────────────
-# Позволяет продолжить трек с той же секунды на другом устройстве
-# (Telegram Desktop ↔ Mobile) — каждое устройство периодически шлёт своё
-# состояние, при заходе на другом устройстве оно сверяет device_id и
-# updated_at, чтобы понять, есть ли более свежая сессия с другого места.
 def save_playback_state(user_id, device_id: str, track_data: dict, position_sec: float, queue_data: list | None = None):
     import json as _json
     conn = _db_connect()
@@ -857,6 +1022,8 @@ def save_playback_state(user_id, device_id: str, track_data: dict, position_sec:
     conn.close()
 
 
+
+
 def get_playback_state(user_id) -> dict | None:
     import json as _json
     conn = _db_connect()
@@ -877,12 +1044,13 @@ def get_playback_state(user_id) -> dict | None:
         "position_sec": row[3], "queue": queue, "updated_at": row[5],
     }
 
+
 def save_anixart_token(user_id, token: str, login: str):
-    """Сохраняет только токен привязанного аккаунта Anixart. Пароль здесь никогда не хранится."""
     conn = _db_connect()
     conn.execute("REPLACE INTO anixart_accounts (user_id, anixart_token, anixart_login) VALUES (?, ?, ?)",
                  (str(user_id), token, login))
     conn.commit(); conn.close()
+
 
 def get_anixart_token(user_id):
     conn = _db_connect()
@@ -890,6 +1058,7 @@ def get_anixart_token(user_id):
     c.execute("SELECT anixart_token, anixart_login FROM anixart_accounts WHERE user_id=?", (str(user_id),))
     res = c.fetchone(); conn.close()
     return {"token": res[0], "login": res[1]} if res else None
+
 
 def remove_anixart_token(user_id) -> bool:
     conn = _db_connect()
