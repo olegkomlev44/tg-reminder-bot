@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -27,6 +27,7 @@
 }
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 
+
 /* ── Визуальный fallback тактильной отдаче ────────────────────────────
    haptic() вызывается почти на каждом тапе, но на десктопе и части старых
    Android-устройств вибрации нет — нажатие остаётся без всякой обратной
@@ -50,6 +51,7 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 .page { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; padding-bottom: calc(var(--nav-height) + var(--mini-player-height) + 20px); opacity: 0; pointer-events: none; transform: translateX(20px); transition: all 0.3s ease; }
 .page.on { opacity: 1; pointer-events: all; transform: translateX(0); }
 .page.slide-left { transform: translateX(-20px); }
+
 
 /* ── PROFILE ── */
 #page-profile { padding-bottom: calc(var(--nav-height) + var(--mini-player-height) + 20px); }
@@ -75,6 +77,7 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 }
 .prof-hero-particles::before { width: 300px; height: 300px; top: -80px; right: -60px; }
 .prof-hero-particles::after  { width: 200px; height: 200px; bottom: 20px; left: -40px; }
+
 
 .prof-hero-content {
   position: relative; z-index: 2;
@@ -105,6 +108,7 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
   padding: 3px 10px; font-size: 11px; font-weight: 600;
 }
 
+
 .prof-stats-row {
   display: flex; gap: 0;
   background: var(--surface);
@@ -121,7 +125,9 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 .prof-stat-num { font-size: 20px; font-weight: 800; color: var(--text); line-height: 1; }
 .prof-stat-lbl { font-size: 11px; color: var(--text-sec); margin-top: 4px; text-align: center; }
 
+
 .prof-section { padding: 20px 16px 8px; font-size: 17px; font-weight: 700; color: var(--text); }
+
 
 .prof-recent-scroll {
   display: flex; gap: 12px; padding: 4px 16px 16px;
@@ -144,7 +150,9 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 .prof-recent-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prof-recent-artist { font-size: 11px; color: var(--text-sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 
+
 .prof-divider { height: 1px; background: var(--border); margin: 0 16px; }
+
 
 /* ── NOW PLAYING STATUS ── */
 .prof-now-playing {
@@ -177,6 +185,7 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
   max-width: 180px;
 }
 
+
 /* ── TOP ARTISTS ── */
 .prof-artists-scroll {
   display: flex; gap: 18px; padding: 4px 16px 16px;
@@ -205,6 +214,7 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
   color: var(--text);
 }
 .prof-artist-count { font-size: 10px; color: var(--text-sec); margin-top: 1px; }
+
 
 /* ── PLAYLISTS CAROUSEL ── */
 .prof-pls-scroll {
@@ -241,6 +251,7 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 }
 .prof-pls-count { font-size: 11px; color: var(--text-sec); margin-top: 2px; }
 
+
 /* ── STATS ENHANCED ── */
 .prof-listen-time {
   display: flex; align-items: center; gap: 10px;
@@ -254,10 +265,12 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 .prof-listen-time-big { font-size: 20px; font-weight: 800; color: var(--accent); }
 .prof-listen-time-sub { font-size: 12px; color: var(--text-sec); margin-top: 2px; }
 
+
 @keyframes profFadeIn {
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
 
 /* ── BOTTOM TABS ── */
 .tabs { position: absolute; bottom: 0; width: 100%; height: var(--nav-height); background: var(--surface-alpha); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--border); display: flex; justify-content: space-around; align-items: center; z-index: 20; }
@@ -277,6 +290,7 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 }
 .tab.on::before { transform: translateX(-50%) scale(1); }
 
+
 /* ── UI ELEMENTS ── */
 .sec { padding: 20px 16px 10px; font-size: 22px; font-weight: 700; display: flex; align-items: center; }
 .search-bar { padding: 16px; position: sticky; top: 0; background: var(--bg); z-index: 10; display: flex; gap: 10px;}
@@ -284,10 +298,12 @@ body, html { height: 100%; width: 100%; overflow: hidden; background-color: var(
 .search-bar input:focus { border-color: rgba(var(--accent-rgb),0.5); }
 .search-bar button { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; color: var(--text); padding: 0 16px; cursor: pointer; display: flex; align-items: center; }
 
+
 ul { list-style: none; }
 .track { display: flex; align-items: center; gap: 12px; padding: 10px 16px; cursor: pointer; transition: background 0.2s; border-radius: 12px; margin: 0 8px; }
 .track:active { background: rgba(255, 255, 255, 0.05); }
 .track.now .ttitle { color: var(--accent); }
+
 
 /* ── Очередь воспроизведения (drag-n-drop reorder) ── */
 .queue-item { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-radius: 12px; touch-action: none; background: var(--surface); }
@@ -305,6 +321,7 @@ ul { list-style: none; }
 .src-badge { position: absolute; bottom: 2px; right: 2px; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid rgba(0,0,0,0.5); z-index: 2; }
 .src-badge.src-sc { background: #ff5500; }
 .src-badge.src-yt { background: #ff0000; }
+
 
 /* ── "Сейчас играет" — анимированный эквалайзер поверх обложки ──────────
    Раньше активный трек в списке отличался только цветом текста заголовка —
@@ -324,8 +341,10 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .ttitle { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); transition: color 0.2s;}
 .tartist { font-size: 13px; color: var(--text-sec); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+
 .tright { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .tdur { font-size: 12px; color: var(--text-sec); font-variant-numeric: tabular-nums; }
+
 
 .fav-btn { background: none; border: none; color: var(--text-sec); padding: 8px; cursor: pointer; transition: transform 0.2s; display: flex; align-items: center; }
 .fav-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; transition: 0.2s; }
@@ -334,8 +353,10 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .del-btn { background: none; border: none; color: var(--red); padding: 8px; cursor: pointer; opacity: 0.7; transition: 0.2s; }
 .del-btn:active { opacity: 1; transform: scale(0.9); }
 
+
 /* ── WAVE STATES ── */
 #wave-idle { display: block; }
+
 
 /* --- НОВЫЙ HERO В СТИЛЕ ЯНДЕКС МУЗЫКИ --- */
 .wave-hero {
@@ -389,6 +410,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .wave-hero-canvas-wrap { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 #wave-hero-canvas { width: 100%; height: 100%; display: block; opacity: 0.55; }
 
+
 /* Визуализатор — за обложкой (обложка z-index:4) */
 #wa-sinusoidal-canvas {
   position: absolute; inset: 0; width: 100%; height: 100%;
@@ -410,6 +432,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .wa-huge-artist { z-index: 4 !important; }
 .wa-pulse-glow { z-index: 3 !important; }
 .wa-top { z-index: 10 !important; }
+
 
 .wave-hero-content {
   position: relative; z-index: 3;
@@ -440,6 +463,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .wave-btn svg { width: 20px; height: 20px; fill: #000; }
 .wave-btn:active { transform: scale(0.95); box-shadow: 0 4px 16px rgba(var(--accent-rgb),0.3); }
 
+
 /* ── HERO GREETING + BUTTON ROW ── */
 .wave-hero-greeting {
   font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.45);
@@ -459,6 +483,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .wave-btn-party svg { width: 18px; height: 18px; fill: currentColor; }
 .wave-btn-party:active { transform: scale(0.95); background: rgba(255,255,255,0.2); }
+
 
 /* ── БЫСТРЫЙ ДОСТУП (сетка 2×2) ── */
 .home-quick-grid {
@@ -498,6 +523,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .home-quick-item:active .home-quick-play { background: rgba(var(--accent-rgb),0.25); }
 .home-quick-play svg { width: 14px; height: 14px; fill: var(--accent); margin-left: 1px; }
 
+
 /* ══ PARTY MODE ══════════════════════════════════════════════════ */
 #party-overlay {
   position: fixed; inset: 0; z-index: 500;
@@ -508,6 +534,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   overflow: hidden;
 }
 #party-overlay.vis { transform: translateY(0); }
+
 
 .party-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -528,6 +555,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 @keyframes partyPulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.7); } }
 
+
 .party-room-id {
   font-size: 11px; color: var(--text-sec); font-weight: 600;
   background: var(--surface); border: 1px solid var(--border);
@@ -540,6 +568,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   display: flex; align-items: center; justify-content: center; cursor: pointer;
 }
 .party-close-btn svg { width: 20px; height: 20px; fill: currentColor; }
+
 
 /* Текущий трек в party */
 .party-now {
@@ -567,6 +596,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .party-now-info { flex: 1; min-width: 0; }
 .party-now-title { font-size: 16px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .party-now-artist { font-size: 13px; color: var(--text-sec); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 
 /* Skip vote bar */
 .party-skip-bar { margin-top: 14px; }
@@ -596,6 +626,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .party-skip-btn:active { transform: scale(0.97); }
 .party-skip-btn svg { width: 18px; height: 18px; fill: currentColor; }
 
+
 /* Очередь */
 .party-queue-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -611,6 +642,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .party-add-btn:active { background: rgba(var(--accent-rgb),0.22); }
 .party-add-btn svg { width: 16px; height: 16px; fill: currentColor; }
+
 
 .party-queue-list {
   flex: 1; overflow-y: auto; padding: 0 8px 120px;
@@ -636,6 +668,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .party-queue-del { background: none; border: none; color: rgba(255,255,255,0.25); padding: 8px; cursor: pointer; }
 .party-queue-del svg { width: 18px; height: 18px; fill: currentColor; }
 
+
 /* Участники */
 .party-members { display: flex; gap: -6px; padding: 0 16px 12px; flex-shrink: 0; }
 .party-member-av {
@@ -647,6 +680,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .party-member-av:first-child { margin-left: 0; }
 .party-member-av img { width: 100%; height: 100%; object-fit: cover; }
 .party-members-count { font-size: 12px; color: var(--text-sec); align-self: center; margin-left: 8px; }
+
 
 /* Открытый picker треков для party */
 .party-add-sheet {
@@ -672,6 +706,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .party-add-results { flex: 1; overflow-y: auto; padding: 0 8px 20px; }
 
+
 /* --- РЕКОМЕНДАЦИИ В СТИЛЕ ЯМ --- */
 .wave-recs-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -679,6 +714,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .wave-recs-header h2 { font-size: 20px; font-weight: 800; }
 .wave-recs-header span { font-size: 13px; color: var(--text-sec); cursor: pointer; }
+
 
 /* Большие карточки (горизонтальный скролл) сверху */
 .wave-big-cards {
@@ -728,6 +764,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+
 /* Секция "Все треки" — обычный список, но в новом стиле */
 .wave-list-header {
   display: flex; align-items: center;
@@ -741,21 +778,26 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   color: var(--text-sec); white-space: nowrap;
 }
 
+
 #wave-active { display: none; flex-direction: column; align-items: center; justify-content: flex-start; position: absolute; inset: 0; padding-bottom: var(--nav-height); background-color: var(--bg); overflow: hidden; }
 .wa-bg-color { position: absolute; inset: -30%; z-index: 1; background: radial-gradient(circle at 50% 50%, var(--cover-color) 0%, var(--bg) 70%); opacity: 0.85; transition: background 1s ease; }
 .wa-bg { position: absolute; inset: -50px; background-size: cover; background-position: center; filter: blur(90px) brightness(0.5); z-index: 2; transition: background-image 0.8s ease; }
 .wa-top { position: absolute; top: 20px; left: 20px; right: 20px; display: flex; justify-content: space-between; align-items: center; z-index: 10; font-weight: 700; font-size: 16px; color: rgba(255,255,255,0.8); }
 
+
 /* Огромное имя артиста с переносом строк */
 .wa-huge-artist { position: relative; z-index: 4; width: 90%; margin-top: 15vh; text-align: center; font-size: 17vw; font-weight: 900; color: #fff; text-transform: uppercase; line-height: 0.95; letter-spacing: -2px; text-shadow: 0 10px 40px rgba(0,0,0,0.4); word-wrap: break-word; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 
+
 /* Пульсирующее свечение под обложкой */
 .wa-pulse-glow { position: absolute; top: 52%; left: 50%; transform: translate(-50%, -50%); width: 45vw; max-width: 220px; aspect-ratio: 1; border-radius: 50%; background: var(--cover-color); filter: blur(50px); opacity: 0.6; z-index: 3; pointer-events: none; transition: background 1s ease; }
+
 
 /* Уменьшенная обложка по центру */
 .wa-cover-container { position: relative; z-index: 4; width: 45vw; max-width: 220px; aspect-ratio: 1; border-radius: 24px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.6); margin-top: auto; margin-bottom: 5vh; cursor: pointer; background: var(--surface); transition: transform 0.05s ease-out; }
 .wa-cover-container:active { transform: scale(0.95) !important; }
 .wa-cover-container img { width: 100%; height: 100%; object-fit: cover; }
+
 
 /* Капсула управления в стиле Яндекс Музыки */
 .wa-pill { position: relative; z-index: 4; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.12); backdrop-filter: blur(40px); -webkit-backdrop-filter: blur(40px); border: 1px solid rgba(255,255,255,0.08); border-radius: 100px; padding: 6px; width: 85vw; max-width: 400px; box-shadow: 0 15px 40px rgba(0,0,0,0.3); margin-bottom: 5vh; cursor: pointer; overflow: hidden; }
@@ -769,6 +811,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .wa-pill .fav-btn { width: 54px; height: 54px; background: rgba(0,0,0,0.2); border-radius: 50%; display: flex; align-items: center; justify-content: center; }
 .wa-pill .fav-btn svg { width: 26px; height: 26px; }
 
+
 /* ── PLAYLIST CHIPS ── */
 .pl-chips { display: flex; gap: 8px; padding: 8px 16px; overflow-x: auto; scrollbar-width: none; }
 .pl-chips::-webkit-scrollbar { display: none; }
@@ -777,6 +820,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .pl-actions { display: flex; gap: 8px; }
 .pl-action-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; font-weight: 600; color: var(--text-sec); cursor: pointer; font-size: 13px; }
 .pl-action-btn.danger { color: var(--red); border-color: rgba(239, 68, 68, 0.3); }
+
 
 /* ── MINI PLAYER ── */
 #mini-player { position: absolute; bottom: calc(var(--nav-height) + 8px); left: 8px; right: 8px; height: var(--mini-player-height); background: rgba(30, 30, 35, 0.95); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; display: flex; align-items: center; padding: 0 12px; gap: 12px; z-index: 30; box-shadow: 0 8px 20px rgba(0,0,0,0.6); cursor: pointer; transform: translateY(200%); transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1); }
@@ -792,6 +836,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .mi-play svg { width: 24px; height: 24px; fill: var(--text); }
 .mi-play { background: none; border: none; padding: 10px; cursor: pointer; display: flex; align-items: center; }
 
+
 /* ── FULL SCREEN PLAYER ── */
 #full-player { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; transform: translateY(100%); transition: transform 0.42s cubic-bezier(0.22, 1, 0.36, 1); background: #0f0f15; overflow: hidden; }
 #full-player.vis { transform: translateY(0); }
@@ -803,9 +848,11 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .fp-icon-btn svg { width: 26px; height: 26px; fill: currentColor; opacity: 0.8; }
 .fp-icon-btn:active { transform: scale(0.8); }
 
+
 /* Visualizer Overlay */
 #vis-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 5; border-radius: 12px; pointer-events: none; opacity: 0; transition: opacity 0.3s; }
 #vis-canvas.active { opacity: 1; }
+
 
 .fp-cover-wrap { flex: 1; display: flex; align-items: center; justify-content: center; padding: 10px 30px; perspective: 1000px; position: relative;}
 .fp-cover { width: 100%; max-width: 400px; aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: var(--surface); box-shadow: 0 20px 50px rgba(0,0,0,0.6); transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.4s ease; display: flex; align-items: center; justify-content: center; position: relative; }
@@ -818,6 +865,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .fp-cover img { width: 100%; height: 100%; object-fit: cover; transition: opacity 0.3s;}
 .fp-cover.vis-on img { opacity: 0.2; }
 
+
 .fp-info { padding: 0 30px 20px; display: flex; justify-content: space-between; align-items: center;}
 .fp-info-left { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
 .fp-small-avatar { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; background: var(--surface); flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1); display: none; }
@@ -826,11 +874,13 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .fp-artist { font-size: 15px; color: rgba(255,255,255,0.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fp-actions { display: flex; align-items: center; gap: 4px; }
 
+
 .fp-prog-area { padding: 15px 30px 5px; cursor: pointer; touch-action: none; } 
 .fp-prog { height: 4px; background: rgba(255,255,255,0.2); border-radius: 2px; position: relative; pointer-events: none;}
 .fp-prog-fill { height: 100%; background: #fff; border-radius: 2px; width: 0%; pointer-events: none; }
 .fp-thumb { position: absolute; width: 14px; height: 14px; background: #fff; border-radius: 50%; top: -5px; transform: translateX(-50%); pointer-events: none; box-shadow: 0 2px 5px rgba(0,0,0,0.5); }
 .fp-times { display: flex; justify-content: space-between; font-size: 12px; color: rgba(255,255,255,0.5); margin-top: 10px; padding: 0 30px; font-variant-numeric: tabular-nums;}
+
 
 .fp-ctrl { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px 20px; }
 .fp-ctrl-btn { position: relative; background: none; border: none; color: var(--text); cursor: pointer; padding: 10px; display: flex; align-items: center; transition: transform 0.2s; }
@@ -846,6 +896,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .fp-bottom-banner { margin: 0 20px 30px; padding: 12px; border-radius: 12px; text-align: center; background: linear-gradient(90deg, rgba(255,255,255,0.05), rgba(255,255,255,0.1)); font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.8); cursor: pointer; }
 .fp-bottom-banner span { color: #fff; font-weight: 700; }
 
+
 /* ── Мини-превью очереди в full-player ── */
 .fp-upnext { margin: 4px 20px 24px; padding: 12px 14px; border-radius: 14px; background: rgba(255,255,255,0.05); cursor: pointer; }
 .fp-upnext:active { background: rgba(255,255,255,0.08); }
@@ -857,6 +908,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .fp-upnext-title { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fp-upnext-artist { font-size: 11px; color: var(--text-sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+
 /* ── MODALS ── */
 .sheet-modal { position: fixed; bottom: 0; left: 0; right: 0; background: var(--surface); border-radius: 24px 24px 0 0; padding: 24px; z-index: 200; transform: translateY(100%); transition: transform 0.38s cubic-bezier(0.22, 1, 0.36, 1); box-shadow: 0 -10px 40px rgba(0,0,0,0.8); display: flex; flex-direction: column; max-height: 85vh;}
 .sheet-modal.vis { transform: translateY(0); }
@@ -866,12 +918,15 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .close-modal { background: none; border: none; color: var(--text-sec); font-size: 28px; cursor: pointer; line-height: 1; }
 .modal-grabber { width: 36px; height: 4px; border-radius: 3px; background: rgba(255,255,255,0.25); margin: 0 auto 14px; cursor: grab; touch-action: none; }
 
+
 .eq-presets { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 16px; scrollbar-width: none; }
 .eq-presets::-webkit-scrollbar { display: none; }
+
 
 /* ── Живая визуализация спектра (реальные данные AnalyserNode) ── */
 .eq-visualizer { display: flex; gap: 2px; align-items: flex-end; height: 60px; margin-bottom: 18px; padding: 0 2px; border-radius: 10px; overflow: hidden; background: rgba(255,255,255,0.03); }
 .eq-viz-bar { flex: 1; min-width: 2px; background: linear-gradient(to top, var(--accent), rgba(var(--accent-rgb),0.35)); border-radius: 2px 2px 0 0; height: 2%; transition: height 0.06s linear; }
+
 
 .eq-bars { 
   display: flex; gap: 6px; align-items: flex-end; 
@@ -893,6 +948,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .eq-label { font-size: 11px; color: var(--text-sec); margin-top: 8px; font-weight: 600; }
 
+
 /* Бонус: Улучшенные паддинги для контейнера текстов песен */
 .fp-lyrics-view {
   padding: 15px; /* Даем пространство самому контейнеру */
@@ -902,6 +958,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   padding: 40px 40px 100px; /* Много воздуха вокруг текста для красивого скролла */
 }
 
+
   
 #pl-list-modal { overflow-y: auto; margin-bottom: 16px; }
 .pl-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
@@ -909,6 +966,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .pl-new-wrap { display: flex; gap: 10px; }
 .pl-new-wrap input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px; color: var(--text); font-size: 16px; outline: none; }
 .pl-new-wrap button { background: var(--accent); color: #000; font-weight: 700; border: none; border-radius: 12px; padding: 0 20px; cursor: pointer; }
+
 
 /* ── ARTIST CARD ── */
 #artist-card {
@@ -920,6 +978,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   overflow: hidden;
 }
 #artist-card.vis { transform: translateY(0); }
+
 
 .ac-hero {
   position: relative;
@@ -943,6 +1002,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .ac-back svg { width: 22px; height: 22px; fill: currentColor; }
 
+
 .ac-header {
   padding: 0 20px 16px; flex-shrink: 0;
   background: var(--bg);
@@ -953,6 +1013,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   margin-bottom: 4px;
 }
 .ac-meta { font-size: 13px; color: var(--text-sec); margin-bottom: 18px; }
+
 
 .ac-actions {
   display: flex; align-items: center; gap: 14px;
@@ -976,11 +1037,13 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .ac-shuffle-btn svg { width: 18px; height: 18px; fill: currentColor; }
 
+
 .ac-section-title {
   font-size: 17px; font-weight: 700;
   padding: 4px 20px 10px;
   flex-shrink: 0;
 }
+
 
 .ac-tracks {
   flex: 1; overflow-y: auto; overflow-x: hidden;
@@ -988,6 +1051,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   -webkit-overflow-scrolling: touch;
 }
 .ac-tracks::-webkit-scrollbar { display: none; }
+
 
 .ac-track {
   display: flex; align-items: center; gap: 14px;
@@ -1029,8 +1093,10 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .ac-empty { text-align: center; padding: 40px 20px; color: var(--text-sec); font-size: 15px; }
 
+
 /* make artist name + avatar in fp-info tappable */
 .fp-info-left { cursor: pointer; }
+
 
 /* ── ARTIST SUBSCRIBE BUTTON ────────────────────────────────── */
 .ac-subscribe-btn {
@@ -1047,6 +1113,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .ac-subscribe-btn:active { transform: scale(0.95); }
 .ac-subscribe-btn svg { width: 16px; height: 16px; fill: currentColor; }
+
 
 /* ── ARTIST CARD EXPANDED ───────────────────────────────────── */
 .ac-stats-row {
@@ -1079,6 +1146,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .ac-scroll-body::-webkit-scrollbar { display: none; }
 
+
 .ac-stats-row {
   display: flex; gap: 12px; padding: 0 20px 20px;
 }
@@ -1091,6 +1159,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .ac-stat-num { font-size: 20px; font-weight: 800; color: var(--accent); }
 .ac-stat-label { font-size: 11px; color: var(--text-sec); margin-top: 2px; }
 
+
 .ac-section {
   padding: 0 20px 20px;
   animation: acFadeUp 0.45s ease both;
@@ -1101,6 +1170,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   display: flex; align-items: center; gap: 8px;
 }
 .ac-section-hdr-emoji { font-size: 18px; }
+
 
 /* Биография */
 .ac-bio {
@@ -1116,6 +1186,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   font-size: 12px; color: var(--accent); margin-top: 6px; cursor: pointer;
   padding: 4px 0;
 }
+
 
 /* Горизонтальный скролл альбомов/релизов */
 .ac-albums-scroll {
@@ -1143,6 +1214,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   color: var(--text);
 }
 .ac-album-year { font-size: 11px; color: var(--text-sec); margin-top: 2px; }
+
 
 /* Видеоклипы */
 .ac-videos-scroll {
@@ -1172,6 +1244,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   color: var(--text);
 }
 .ac-video-views { font-size: 11px; color: var(--text-sec); margin-top: 2px; }
+
 
 /* Популярные треки обновлённые */
 .ac-tracks-section {
@@ -1217,6 +1290,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .ac-track-more:active { opacity: 1; }
 .ac-track-more svg { width: 18px; height: 18px; fill: currentColor; }
 
+
 .ac-show-more {
   display: block; width: calc(100% - 40px); margin: 8px 20px 0;
   background: var(--surface); border: 1px solid var(--border);
@@ -1226,10 +1300,12 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 }
 .ac-show-more:active { opacity: 0.7; }
 
+
 @keyframes acFadeUp {
   from { opacity: 0; transform: translateY(16px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+
 
 /* Hero parallax blur on scroll */
 .ac-hero { transition: filter 0.1s ease; }
@@ -1244,6 +1320,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   opacity: 0; transition: opacity 0.2s;
 }
 .notif-badge.vis { opacity: 1; }
+
 
 #notif-panel {
   position: fixed; inset: 0; z-index: 200;
@@ -1287,6 +1364,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   color: var(--text-sec); font-size: 15px;
 }
 .notif-empty-ico { font-size: 48px; margin-bottom: 16px; }
+
 
 /* ── FRIENDS PANEL ──────────────────────────────────────────── */
 #friends-panel {
@@ -1356,6 +1434,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   font-weight: 500;
 }
 
+
 /* ── FRIEND TRACKS VIEW ─────────────────────────────────────── */
 #friend-tracks-panel {
   position: fixed; inset: 0; z-index: 210;
@@ -1396,14 +1475,18 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .ft-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 .ft-list { flex: 1; overflow-y: auto; padding: 8px 0; }
 
+
 .fp-info-left:active { opacity: 0.7; }
+
 
 .timer-btn { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 16px; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; margin-bottom: 8px; transition: 0.2s; }
 .timer-btn:active { background: var(--accent); color: #000; }
 
+
 .spin { display: flex; justify-content: center; padding: 40px; }
 .spin::after { content: ''; width: 30px; height: 30px; border: 3px solid rgba(255,255,255,0.1); border-top-color: var(--accent); border-radius: 50%; animation: sp 0.8s linear infinite; }
 @keyframes sp { to { transform: rotate(360deg); } }
+
 
 /* ── Skeleton-загрузка списков треков (вместо крутилки) ──────────────── */
 /* Форма повторяет реальную карточку .track — момент подмены на реальные
@@ -1416,17 +1499,20 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
 .skeleton-track .skeleton-line-artist { height: 11px; width: 38%; border-radius: 4px; }
 @keyframes skeleton-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 
+
 .empty { text-align: center; padding: 60px 20px; color: var(--text-sec); }
 .empty-ico { font-size: 48px; margin-bottom: 16px; filter: grayscale(1); opacity: 0.5; }
 .empty-cta { margin-top: 18px; background: var(--accent); color: #000; border: none; border-radius: 50px; padding: 11px 22px; font-size: 14px; font-weight: 700; cursor: pointer; }
 .empty-cta:active { opacity: 0.85; }
 .hist-empty .empty-cta { margin-top: 18px; }
 
+
 #toast { position: fixed; top: 20px; left: 50%; transform: translate(-50%, -20px); background: var(--surface); color: var(--text); padding: 12px 24px; border-radius: 20px; font-size: 14px; font-weight: 500; opacity: 0; pointer-events: none; transition: 0.3s; z-index: 300; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); border-left: 3px solid transparent; white-space: nowrap; }
 #toast.toast-success { border-left-color: var(--success); }
 #toast.toast-warning { border-left-color: var(--warning); }
 #toast.toast-error { border-left-color: var(--danger); }
 #toast.toast-info { border-left-color: var(--info); }
+
 
 /* ── Плашка "продолжить с другого устройства" ── */
 .continue-playback-bar { position: fixed; left: 12px; right: 12px; bottom: calc(var(--nav-height) + var(--mini-player-height) + 12px); background: var(--surface); border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; z-index: 250; box-shadow: 0 10px 30px rgba(0,0,0,0.5); transform: translateY(20px); opacity: 0; pointer-events: none; transition: 0.3s; }
@@ -1446,6 +1532,7 @@ audio {
   z-index: -100;
 }
 
+
 /* ── LYRICS VIEW (внутри fp-cover-wrap) ── */
 .fp-lyrics-view {
   position: absolute; 
@@ -1460,6 +1547,7 @@ audio {
 }
 .fp-lyrics-view.active { display: flex; }
 
+
 .fp-lyrics-scroll {
   flex: 1;
   overflow-y: auto;
@@ -1469,7 +1557,9 @@ audio {
   -webkit-overflow-scrolling: touch;
 }
 
+
 .fp-lyrics-scroll::-webkit-scrollbar { display: none; }
+
 
 .fp-lyrics-placeholder {
   display: flex; align-items: center; justify-content: center;
@@ -1484,6 +1574,7 @@ audio {
   animation: sp 0.8s linear infinite;
   margin: 0 auto;
 }
+
 
 /* Строчки текста */
 .lyr-line {
@@ -1506,6 +1597,7 @@ audio {
   color: rgba(255,255,255,0.55);
 }
 .lyr-line:empty { height: 14px; }
+
 
 /* ── SUB-ROW (текст / не нравится / поделиться) ── */
 .fp-sub-row {
@@ -1530,6 +1622,7 @@ audio {
 .fp-sub-btn:active { background: rgba(255,255,255,0.18); color: #fff; }
 .fp-sub-btn.active { background: rgba(var(--accent-rgb),0.15); border-color: rgba(var(--accent-rgb),0.3); color: var(--accent); }
 
+
 /* ── MORE MENU ── */
 .more-menu-btn {
   display: flex; align-items: center; gap: 14px;
@@ -1546,6 +1639,7 @@ audio {
 .more-menu-btn:last-child { border-bottom: none; }
 .more-menu-btn:active { opacity: 0.6; }
 .more-menu-btn svg { flex-shrink: 0; opacity: 0.8; }
+
 
 /* ═══════════════════════════════════════════
    SEARCH TAB — new design
@@ -1585,6 +1679,7 @@ audio {
 }
 .srch-clear:active { color: #fff; }
 
+
 .srch-section-head {
   display: flex; justify-content: space-between; align-items: center;
   padding: 16px 16px 8px;
@@ -1598,6 +1693,7 @@ audio {
   font-size: 13px; font-weight: 600; cursor: pointer; padding: 0;
 }
 
+
 .srch-recent-tags { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 8px; }
 .srch-recent-tag {
   display: flex; align-items: center; gap: 6px;
@@ -1609,6 +1705,7 @@ audio {
 }
 .srch-recent-tag:active { background: rgba(255,255,255,0.16); }
 .srch-recent-tag svg { fill: rgba(255,255,255,0.35); flex-shrink: 0; }
+
 
 .srch-genres {
   display: grid; grid-template-columns: 1fr 1fr;
@@ -1637,11 +1734,13 @@ audio {
 .sgc-emoji { font-size: 28px; flex-shrink: 0; }
 .sgc-label { font-size: 15px; font-weight: 700; color: #fff; }
 
+
 .srch-results-meta {
   padding: 4px 16px 8px;
   font-size: 12px; color: rgba(255,255,255,0.4);
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px;
 }
+
 
 /* Track list entry animation */
 @keyframes fadeSlideUp {
@@ -1655,6 +1754,7 @@ audio {
 #search-list li.track:nth-child(4)  { animation-delay: 0.11s; }
 #search-list li.track:nth-child(5)  { animation-delay: 0.14s; }
 #search-list li.track:nth-child(n+6){ animation-delay: 0.16s; }
+
 
 /* ═══════════════════════════════════════════
    PLAYLISTS TAB — new design
@@ -1678,6 +1778,7 @@ audio {
   box-shadow: 0 4px 16px rgba(var(--accent-rgb),0.35);
 }
 .pls-new-fab:active { transform: scale(0.95); box-shadow: 0 2px 8px rgba(var(--accent-rgb),0.2); }
+
 
 .pls-create-form { padding: 0 16px 16px; }
 .pls-create-inner {
@@ -1707,6 +1808,7 @@ audio {
   border-radius: 10px; color: #000;
   font-size: 15px; font-weight: 700; padding: 11px; cursor: pointer;
 }
+
 
 /* Playlist grid */
 .pls-grid {
@@ -1757,6 +1859,7 @@ audio {
 }
 .pls-grid-empty-ico { font-size: 44px; margin-bottom: 12px; opacity: 0.5; }
 .pls-grid-empty p { font-size: 15px; }
+
 
 /* Playlist detail view */
 .pls-detail { display: flex; flex-direction: column; }
@@ -1818,6 +1921,7 @@ audio {
 }
 .pls-detail-more:active { background: rgba(255,255,255,0.2); }
 
+
 /* ═══════════════════════════════════════════
    HISTORY TAB — new design
 ═══════════════════════════════════════════ */
@@ -1844,6 +1948,7 @@ audio {
 }
 .hist-sort-btn:active { background: rgba(255,255,255,0.14); }
 
+
 /* Timeline groups */
 .hist-group { margin-bottom: 4px; }
 .hist-group-label {
@@ -1858,11 +1963,14 @@ audio {
   background: rgba(255,255,255,0.07);
 }
 
+
 /* Animated history items */
 .hist-group li { animation: fadeSlideUp 0.2s ease both; }
 
+
 /* History item animation via class */
 .hist-anim { animation: fadeSlideUp 0.2s ease both; }
+
 
 /* History clear btn */
 .hist-clear-row {
@@ -1877,6 +1985,7 @@ audio {
 }
 .hist-clear-btn:active { background: rgba(239,68,68,0.1); }
 
+
 /* History empty */
 .hist-empty {
   text-align: center; padding: 60px 20px;
@@ -1884,6 +1993,7 @@ audio {
 }
 .hist-empty-ico { font-size: 50px; margin-bottom: 14px; opacity: 0.45; filter: grayscale(0.5); }
 .hist-empty p { font-size: 15px; }
+
 
 /* ═══════════════════════════════════════════
    КОЛЛАБОРАТИВНЫЕ ПЛЕЙЛИСТЫ — стили
@@ -1897,6 +2007,7 @@ audio {
 }
 .pls-share-btn:active { background: rgba(255,255,255,0.2); }
 
+
 /* Аватарки добавивших в треке плейлиста */
 .track-adder {
   width: 22px; height: 22px; border-radius: 50%;
@@ -1907,6 +2018,7 @@ audio {
   overflow: hidden;
 }
 .track-adder img { width: 100%; height: 100%; object-fit: cover; }
+
 
 /* Шторка-шара коллаб-плейлиста */
 .collab-sheet {
@@ -1921,6 +2033,7 @@ audio {
 }
 .collab-sheet.vis { transform: translateY(0); }
 
+
 .collab-sheet-handle {
   width: 36px; height: 4px; border-radius: 2px;
   background: rgba(255,255,255,0.2); margin: 12px auto 0;
@@ -1933,6 +2046,7 @@ audio {
   font-size: 13px; color: var(--text-sec);
   padding: 0 20px 16px; text-align: center; line-height: 1.5;
 }
+
 
 .collab-link-box {
   margin: 0 16px; padding: 14px 16px;
@@ -1953,6 +2067,7 @@ audio {
 }
 .collab-link-copy:active { transform: scale(0.96); }
 
+
 .collab-send-tg {
   margin: 12px 16px 0;
   background: rgba(41,182,246,0.15);
@@ -1965,6 +2080,7 @@ audio {
 }
 .collab-send-tg:active { background: rgba(41,182,246,0.25); }
 
+
 .collab-sheet-close {
   margin: 12px 16px 24px;
   background: rgba(255,255,255,0.07);
@@ -1975,6 +2091,7 @@ audio {
   transition: background 0.15s;
 }
 .collab-sheet-close:active { background: rgba(255,255,255,0.15); }
+
 
 /* Коллаб-баннер внутри плейлиста */
 .collab-banner {
@@ -1995,6 +2112,7 @@ audio {
   cursor: pointer; white-space: nowrap; flex-shrink: 0;
 }
 
+
 /* Значок коллаба на карточке плейлиста в гриде */
 .pls-collab-badge {
   font-size: 10px; background: rgba(var(--accent-rgb),0.2);
@@ -2002,6 +2120,7 @@ audio {
   padding: 2px 6px; font-weight: 700; display: inline-block;
   margin-top: 3px;
 }
+
 
 /* Инпут создания коллаб-плейлиста */
 .collab-name-row {
@@ -2020,6 +2139,8 @@ audio {
   padding: 12px 18px; font-size: 14px; font-weight: 700;
   cursor: pointer;
 }
+
+
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -2049,8 +2170,10 @@ body::before {
 @media (prefers-reduced-motion: reduce) { body::before { animation: none; } }
 #app { z-index: 1; }
 
+
 /* Бегущий блик по стеклу */
 @keyframes glassShine { from { background-position: 200% 0; } to { background-position: -100% 0; } }
+
 
 /* ── Нижняя навигация: плавающая стеклянная капсула ── */
 .tabs {
@@ -2074,6 +2197,7 @@ body::before {
 :root { --nav-offset: 12px; }
 .page { padding-bottom: calc(var(--nav-height) + var(--mini-player-height) + 44px); }
 
+
 /* ── Мини-плеер ── */
 #mini-player {
   bottom: calc(var(--nav-height) + max(8px, env(safe-area-inset-bottom)) + 8px);
@@ -2089,6 +2213,7 @@ body::before {
   border: 1px solid rgba(255,255,255,0.18);
 }
 
+
 /* Индикатор буферизации: кольцо вокруг кнопки play */
 body.buffering .mi-play::after, body.buffering .fp-play::after {
   content: ''; position: absolute; inset: -4px; border-radius: 50%;
@@ -2096,6 +2221,7 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
   animation: spinRing 0.8s linear infinite; pointer-events: none;
 }
 @keyframes spinRing { to { transform: rotate(360deg); } }
+
 
 /* ── Поиск ── */
 .srch-header { background: linear-gradient(to bottom, rgba(8,8,13,0.85) 60%, transparent); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
@@ -2117,6 +2243,7 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
   -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
 }
 
+
 /* ── Треки: стеклянные строки ── */
 .track { border-radius: 18px; margin: 3px 10px; padding: 9px 12px; border: 1px solid transparent; }
 .track:active { background: rgba(255,255,255,0.08); }
@@ -2130,6 +2257,7 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
 .fav-btn.loved svg { filter: drop-shadow(0 0 6px var(--accent-glow)); }
 .sec { letter-spacing: -0.3px; }
 .skeleton-block { background: linear-gradient(100deg, rgba(255,255,255,0.05) 30%, rgba(255,255,255,0.14) 50%, rgba(255,255,255,0.05) 70%); background-size: 200% 100%; animation: glassShine 1.6s linear infinite; }
+
 
 /* ── Полноэкранный плеер ── */
 #full-player { background: #0a0a10; }
@@ -2153,6 +2281,7 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
 }
 .fp-sub-btn { -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
 
+
 /* ── Шторки, модалки, тосты ── */
 .modal-overlay { background: rgba(0,0,0,0.45); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
 .sheet-modal {
@@ -2172,6 +2301,7 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
   top: max(20px, env(safe-area-inset-top));
 }
 
+
 /* ── Профиль и прочее ── */
 .prof-stats-row, .prof-listen-time {
   background: var(--glass-bg); border: 1px solid var(--glass-border);
@@ -2183,6 +2313,7 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
 .prof-recent-cover { border-radius: 18px; }
 .empty-cta { background: linear-gradient(145deg, var(--accent-light), var(--accent-dark)); box-shadow: 0 8px 24px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.5); }
 
+
 /* Слабые устройства: тяжёлый blur заменяем облегчённым */
 @media (max-width: 380px), (prefers-reduced-transparency: reduce) {
   :root { --glass-blur: blur(14px) saturate(150%); }
@@ -2192,11 +2323,14 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
 }
 
 
+
+
 /* ═══════════════════════════════════════════════════════════════════
    GLASS UX PACK — волна, меню по долгому тапу, караоке, акцент,
    сворачивающиеся шапки, раскрытие плеера, живая обложка, empty-states
 ═══════════════════════════════════════════════════════════════════ */
 #toast { z-index: 1000; }
+
 
 /* ── 1. Волновой прогресс ── */
 .fp-prog-area { padding: 12px 30px 2px; }
@@ -2213,6 +2347,7 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
   box-shadow: 0 0 12px rgba(var(--accent-rgb),0.9), 0 0 0 1px rgba(255,255,255,0.4); }
 .fp-prog-area.scrubbing .wf { transform: scaleY(1.22); }
 .fp-prog-area.scrubbing .fp-thumb { height: 64px; top: -9px; }
+
 
 /* ── 2. Меню по долгому тапу ── */
 li.track { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
@@ -2242,6 +2377,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-mi.acc svg { fill: var(--accent); opacity: 1; }
 .gx-mi.danger { color: #ff7b7b; }
 
+
 /* ── 4. Караоке ── */
 .lyr-line { transition: color 0.35s, transform 0.4s cubic-bezier(0.22,1,0.36,1), filter 0.35s, opacity 0.35s;
   filter: blur(calc(var(--d, 0) * 0.55px)); opacity: calc(1 - var(--d, 0) * 0.1); }
@@ -2254,6 +2390,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     -webkit-background-clip: text; background-clip: text;
   }
 }
+
 
 /* ── 5. Оформление (акцент) ── */
 .gx-card { margin: 0 16px 16px; padding: 16px 16px 6px; border-radius: 24px; background: var(--glass-bg);
@@ -2277,6 +2414,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-switch.on { background: var(--accent); border-color: transparent; }
 .gx-switch.on i { transform: translateX(22px); }
 
+
 /* ── 6. Сворачивающиеся шапки ── */
 .pls-page-header, .hist-page-header, .srch-header { isolation: isolate; background: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
 .pls-page-header, .hist-page-header { min-height: 68px; }
@@ -2290,6 +2428,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-collapsed .pls-page-title, .gx-collapsed .hist-page-title { transform: scale(0.78) translateY(2px); }
 .hist-page-sub { transition: opacity 0.25s, max-height 0.3s; max-height: 24px; overflow: hidden; }
 .gx-collapsed .hist-page-sub { opacity: 0; max-height: 0; }
+
 
 /* ── 7. Раскрытие плеера ── */
 @keyframes gxRise { from { opacity: 0; transform: translateY(14px) scale(0.985); filter: blur(2px); } to { opacity: 1; transform: none; filter: blur(0); } }
@@ -2309,6 +2448,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 #full-player.fp-opening .fp-sub-row { animation-delay: 0.16s; }
 #full-player.fp-opening .fp-upnext { animation-delay: 0.19s; }
 
+
 /* ── 8. Живая обложка ── */
 .fp-glow { position: absolute; left: 50%; top: 50%; width: min(78%, 370px); aspect-ratio: 1; border-radius: 50%;
   background: var(--cover-color); filter: blur(48px); pointer-events: none; z-index: 0;
@@ -2317,6 +2457,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .fp-cover::after { content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 2; border-radius: inherit;
   background: radial-gradient(120% 90% at calc(50% + var(--tx, 0) * 40%) calc(18% + var(--ty, 0) * 40%), rgba(255,255,255,0.24), transparent 55%);
   mix-blend-mode: soft-light; }
+
 
 /* ── 9. Красивые пустые состояния ── */
 @keyframes gxFloat { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
@@ -2344,10 +2485,13 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 }
 
 
+
+
 /* ═══════════════════════════════════════════════════════════════════
    RELIABILITY PACK — подсказки, подгрузка при скролле, запасной
    источник, предзагрузка, офлайн-очередь избранного, статус источников
 ═══════════════════════════════════════════════════════════════════ */
+
 
 /* ── 1. Автоподсказки ── */
 .gx-suggest {
@@ -2371,15 +2515,18 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-sg-loading { display: flex; justify-content: center; padding: 14px; }
 .gx-spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.18); border-top-color: var(--accent); animation: spinRing 0.8s linear infinite; }
 
+
 /* ── 2. Подгрузка при скролле ── */
 .gx-more-spin { display: flex; justify-content: center; padding: 18px 0 26px; }
 .gx-more-spin .gx-spin { width: 24px; height: 24px; border-width: 3px; }
 .gx-end-note { text-align: center; color: var(--text-sec); font-size: 12px; padding: 10px 0 26px; }
 
+
 /* ── 3. Восстановление трека (fallback / resume) ── */
 .gx-resume-note { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-sec);
   padding: 6px 14px 0; }
 .gx-resume-note .gx-spin { width: 13px; height: 13px; border-width: 2px; }
+
 
 /* ── network banner (оффлайн / переподключение) ── */
 #gx-net-banner {
@@ -2391,6 +2538,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 }
 #gx-net-banner.vis { transform: translateY(0); }
 #gx-net-banner.ok { background: linear-gradient(160deg, rgba(52,211,153,0.92), rgba(16,150,105,0.92)); }
+
 
 /* ── 10. Карточка статуса источников ── */
 .gx-status-body { display: flex; flex-direction: column; }
@@ -2405,10 +2553,13 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-status-btn:disabled { opacity: 0.5; }
 
 
+
+
 /* ═══════════════════════════════════════════════════════════════════
    EXTRA PACK — круговой таймер сна, импорт плейлиста, подтверждения,
    частицы у лайка, pull-to-refresh
 ═══════════════════════════════════════════════════════════════════ */
+
 
 /* ── Круговой таймер сна ── */
 #gx-timer-idle, #gx-timer-active { padding: 6px 4px 22px; display: flex; flex-direction: column; align-items: center; }
@@ -2430,6 +2581,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   color: #000; font-size: 16px; font-weight: 700; box-shadow: 0 8px 24px var(--accent-glow); }
 .gx-dial-stop { background: linear-gradient(145deg, #ff6b6b, #e03131); color: #fff; box-shadow: 0 8px 24px rgba(224,49,49,0.35); }
 
+
 /* ── Импорт плейлиста по ссылке ── */
 .gx-import-fab { width: 44px; padding: 0; justify-content: center; margin-right: 8px; }
 #gx-import-sheet { padding-bottom: max(22px, env(safe-area-inset-bottom)); }
@@ -2440,6 +2592,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 .gx-import-input::placeholder { color: var(--text-sec); }
 .gx-import-status { margin-top: 14px; font-size: 13px; color: var(--text-sec); text-align: center; min-height: 18px; }
 .gx-import-status.err { color: #ff8a8a; }
+
 
 /* ── Подтверждающая шторка (дубли в избранном и т.п.) ── */
 #gx-confirm-ov { position: fixed; inset: 0; z-index: 920; background: rgba(0,0,0,0.5); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
@@ -2458,6 +2611,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   color: var(--text); font-size: 14px; font-weight: 600; }
 .gx-confirm-btns .gx-confirm-ok { background: linear-gradient(145deg, var(--accent-light), var(--accent-dark)); color: #000; border: none; }
 
+
 /* ── Частицы у сердечка ── */
 .gx-heart-particles { position: absolute; inset: 0; pointer-events: none; overflow: visible; z-index: 5; }
 .gx-hp { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
@@ -2469,6 +2623,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 }
 @media (prefers-reduced-motion: reduce) { .gx-hp { animation: none; display: none; } }
 
+
 /* ── Pull-to-refresh ── */
 .gx-ptr { position: absolute; left: 50%; top: 0; transform: translate(-50%, -140%); width: 38px; height: 38px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center; z-index: 30; pointer-events: none;
@@ -2476,6 +2631,8 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
 .gx-ptr svg { width: 18px; height: 18px; stroke: var(--accent); fill: none; stroke-width: 2.4; stroke-linecap: round; transform-origin: center; }
 .gx-ptr.spin svg { animation: spinRing 0.7s linear infinite; }
+
+
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -2489,12 +2646,14 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.4s ease, box-shadow 0.6s ease, border-color 0.6s ease;
 }
 
+
 /* Источник трека: тонкие линии-разделители + иконка вместо голого текста */
 .fp-top-title { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 7px; }
 .fp-top-line { flex: 1 1 auto; max-width: 30px; height: 1px; min-width: 10px;
   background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), 0.55), transparent); }
 .fp-top-ico { width: 14px; height: 14px; fill: var(--accent); flex-shrink: 0; filter: drop-shadow(0 0 4px var(--accent-glow)); }
 #fp-top-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 
 /* Heart/3-точки у названия трека — тонкое свечение по акценту даже без лайка */
 .fp-actions .fav-btn, #fp-more-btn {
@@ -2505,6 +2664,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   border-color: rgba(var(--accent-rgb), 0.55);
   box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.12), 0 6px 20px rgba(var(--accent-rgb), 0.32);
 }
+
 
 /* Декоративные акценты над панелью управления (сердечко слева, искры справа) */
 .fp-ctrl { position: relative; overflow: visible; margin-top: 16px; }
@@ -2520,10 +2680,84 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 }
 @keyframes gxCtrlDecoPulse { 0%, 100% { transform: scale(1); opacity: 0.75; } 50% { transform: scale(1.18); opacity: 1; } }
 
+
+
+
+/* ── ДОПОЛНИТЕЛЬНЫЕ СТИЛИ: ФИЛЬТРЫ ПОИСКА, ПЕРЕВОД КАРАОКЕ, BLEND, STORIES ── */
+.srch-source-chips {
+  display: flex; gap: 8px; padding: 10px 2px 2px; overflow-x: auto; scrollbar-width: none;
+}
+.srch-source-chips::-webkit-scrollbar { display: none; }
+.srch-src-chip {
+  background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12);
+  color: var(--text-sec); border-radius: 18px; padding: 6px 14px;
+  font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s;
+}
+.srch-src-chip.on {
+  background: rgba(var(--accent-rgb), 0.2); border-color: var(--accent);
+  color: var(--accent); box-shadow: 0 4px 14px rgba(var(--accent-rgb), 0.18);
+}
+.srch-src-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+
+/* Кнопка перевода в окне караоке + подстрочник перевода */
+.fp-lyrics-toolbar {
+  position: absolute; top: 10px; right: 12px; z-index: 15;
+  display: flex; gap: 6px;
+}
+.fp-lyr-tool-btn {
+  background: rgba(20,20,30,0.75); border: 1px solid rgba(255,255,255,0.18);
+  color: rgba(255,255,255,0.85); border-radius: 16px; padding: 5px 12px;
+  font-size: 12px; font-weight: 700; cursor: pointer;
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  transition: all 0.2s;
+}
+.fp-lyr-tool-btn.on {
+  background: var(--accent); color: #000; border-color: var(--accent);
+}
+.lyr-sub-tr {
+  display: block; font-size: 13px; font-weight: 500;
+  color: rgba(255, 255, 255, 0.55); margin-top: 2px; line-height: 1.35;
+}
+.lyr-line.active .lyr-sub-tr {
+  color: var(--accent-light); font-weight: 600;
+}
+
+
+/* Карточка совместимости вкусов с другом (Blend) */
+.ft-blend-card {
+  margin: 10px 20px 6px; padding: 14px 16px; border-radius: 18px;
+  background: linear-gradient(135deg, rgba(var(--accent-rgb),0.18), rgba(96,165,250,0.12));
+  border: 1px solid rgba(var(--accent-rgb),0.32);
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.ft-blend-score {
+  font-size: 26px; font-weight: 900; color: var(--accent); line-height: 1;
+}
+.ft-blend-meta { flex: 1; min-width: 0; }
+.ft-blend-title { font-size: 14px; font-weight: 700; color: #fff; }
+.ft-blend-sub { font-size: 11px; color: var(--text-sec); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ft-blend-btn {
+  background: var(--accent); color: #000; border: none; border-radius: 20px;
+  padding: 8px 14px; font-size: 12px; font-weight: 800; cursor: pointer; flex-shrink: 0;
+}
+
+
+/* Кнопка Stories в профиле */
+.prof-story-btn {
+  background: linear-gradient(135deg, var(--accent), #ff5c9a);
+  color: #000; border: none; border-radius: 20px; padding: 4px 12px;
+  font-size: 11px; font-weight: 800; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(var(--accent-rgb), 0.3);
+}
+
+
 </style>
 </head>
 <body>
 <div id="app">
+
 
 <div class="pages" id="pages">
   <div class="page on" id="page-wave">
@@ -2559,10 +2793,12 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
         </div>
       </div>
 
+
       <!-- ── БЫСТРЫЙ ДОСТУП (сетка 2×2 как у ЯМ) ── -->
       <div class="home-quick-grid" id="home-quick-grid">
         <!-- заполняется JS из истории -->
       </div>
+
 
       <!-- ── РЕКОМЕНДАЦИИ: БОЛЬШИЕ КАРТОЧКИ ── -->
       <div class="wave-recs-header">
@@ -2572,6 +2808,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <div class="wave-big-cards" id="wave-big-cards">
         <!-- заполняется JS -->
       </div>
+
 
       <!-- ── ВСЕ ТРЕКИ (список) ── -->
       <div class="wave-list-header">
@@ -2590,16 +2827,20 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
         <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" onclick="haptic();nav('search');"><path d="M15.5 14h-.79l-.28-.27A6.5 6.5 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14"/></svg>
       </div>
 
+
       <!-- Имя артиста (теперь в несколько строк) -->
       <div class="wa-huge-artist" id="wa-huge-artist">ARTIST</div>
 
+
       <!-- Свечение, которое будет пульсировать под бит -->
       <div class="wa-pulse-glow" id="wa-pulse-glow"></div>
+
 
       <!-- Обложка -->
       <div class="wa-cover-container" onclick="openFull()">
         <img id="wa-cover" src="" crossorigin="anonymous">
       </div>
+
 
       <!-- Капсула управления как в Яндексе -->
       <div class="wa-pill" onclick="openFull()">
@@ -2615,6 +2856,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     </div>
   </div>
 
+
   <div class="page" id="page-search">
     <!-- Sticky search header -->
     <div class="srch-header">
@@ -2625,8 +2867,14 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
         </button>
       </div>
+      <div class="srch-source-chips" id="srch-source-chips">
+        <button class="srch-src-chip on" data-src="all" onclick="haptic();setSearchSource('all')">🌐 Все источники</button>
+        <button class="srch-src-chip" data-src="sc" onclick="haptic();setSearchSource('sc')"><span class="srch-src-dot" style="background:#ff5500"></span>SoundCloud</button>
+        <button class="srch-src-chip" data-src="yt" onclick="haptic();setSearchSource('yt')"><span class="srch-src-dot" style="background:#ff0000"></span>YouTube Music</button>
+      </div>
       <div id="gx-suggest" class="gx-suggest"></div>
     </div>
+
 
     <!-- Empty state: categories + recent searches -->
     <div id="srch-empty-state">
@@ -2638,6 +2886,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
         </div>
         <div id="srch-recent-list" class="srch-recent-tags"></div>
       </div>
+
 
       <!-- Browse categories -->
       <div class="srch-section-head" style="margin-top:8px"><span>Искать по жанру</span></div>
@@ -2669,12 +2918,14 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       </div>
     </div>
 
+
     <!-- Results -->
     <div id="srch-results" style="display:none">
       <div class="srch-results-meta" id="srch-results-meta"></div>
       <ul id="search-list"></ul>
     </div>
   </div>
+
 
   <div class="page" id="page-playlists">
     <!-- Page header -->
@@ -2689,6 +2940,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       </button>
     </div>
 
+
     <div id="gx-import-ov" class="modal-overlay"></div>
     <div class="sheet-modal" id="gx-import-sheet">
       <div class="modal-grabber"></div>
@@ -2701,6 +2953,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       </div>
     </div>
 
+
     <!-- Create playlist inline form (hidden by default) -->
     <div id="pls-create-form" class="pls-create-form" style="display:none">
       <div class="pls-create-inner">
@@ -2712,8 +2965,10 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       </div>
     </div>
 
+
     <!-- Grid of playlists -->
     <div id="pls-grid" class="pls-grid"></div>
+
 
     <!-- Selected playlist view -->
     <div id="pls-detail" class="pls-detail" style="display:none">
@@ -2741,10 +2996,12 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <ul id="pl-list"></ul>
     </div>
 
+
     <!-- Old chips kept for compat (hidden) -->
     <div class="pl-chips" id="pl-chips" style="display:none"></div>
     <div id="pl-header" style="display:none"></div>
   </div>
+
 
   <div class="page" id="page-history">
     <!-- Header -->
@@ -2761,12 +3018,15 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       </div>
     </div>
 
+
     <!-- Timeline groups -->
     <div id="hist-groups"></div>
+
 
     <!-- flat list (hidden, kept for compat) -->
     <ul id="hist-list" style="display:none"></ul>
   </div>
+
 
   <div class="page" id="page-profile">
     <!-- Hero banner -->
@@ -2800,10 +3060,12 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
           <div class="prof-badges" style="margin-top:8px;">
             <div class="prof-badge">🎵 Меломан</div>
             <div class="prof-badge" id="prof-badge-streak">🔥 Новичок</div>
+            <button class="prof-story-btn" onclick="haptic();shareWrappedStory()">✨ Итоги в Stories</button>
           </div>
         </div>
       </div>
     </div>
+
 
     <!-- Stats row -->
     <div class="gx-card" id="gx-status-card">
@@ -2811,10 +3073,12 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <div id="gx-status-body" class="gx-status-body"><div class="gx-status-row"><span class="gx-status-dot" style="--c:#888"></span><span>Загрузка…</span></div></div>
     </div>
 
+
     <div class="gx-card" id="gx-playback-card">
       <div class="gx-card-title">Воспроизведение</div>
       <div class="gx-row" style="margin-top:0;border-top:none;padding-top:2px;"><div><div class="gx-row-t">Автопродолжение</div><div class="gx-row-s">Когда треки в очереди кончаются — подмешиваю похожие</div></div><button class="gx-switch" id="gx-sw-autocontinue" role="switch" aria-checked="true"><i></i></button></div>
     </div>
+
 
     <div class="prof-stats-row">
       <div class="prof-stat-item">
@@ -2831,6 +3095,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       </div>
     </div>
 
+
     <!-- Listen time block -->
     <div class="prof-listen-time" id="prof-listen-time" style="display:none;">
       <div class="prof-listen-time-ico">🎧</div>
@@ -2839,6 +3104,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
         <div class="prof-listen-time-sub">музыки за всё время</div>
       </div>
     </div>
+
 
     <!-- Appearance -->
     <div class="gx-card" id="gx-appearance">
@@ -2849,23 +3115,29 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <div class="gx-row"><div><div class="gx-row-t">Пульс свечения</div><div class="gx-row-s">Подсветка обложки бьётся в такт басам</div></div><button class="gx-switch" id="gx-sw-pulse" role="switch" aria-checked="true"><i></i></button></div>
     </div>
 
+
     <!-- Top Artists -->
     <div class="prof-section" id="prof-artists-title" style="display:none;">Любимые артисты</div>
     <div class="prof-artists-scroll" id="prof-artists-scroll"></div>
+
 
     <!-- Playlists carousel -->
     <div class="prof-section" id="prof-pls-title" style="display:none;">Мои плейлисты</div>
     <div class="prof-pls-scroll" id="prof-pls-scroll"></div>
 
+
     <!-- Recently played horizontal scroll -->
     <div class="prof-section" id="prof-recent-title" style="display:none">Недавно слушал</div>
     <div class="prof-recent-scroll" id="prof-recent-scroll"></div>
 
+
     <div class="prof-divider"></div>
+
 
     <!-- Favs list -->
     <div class="prof-section">Мне нравится</div>
     <ul id="favs-list"></ul>
+
 
     <!-- Offline downloads -->
     <div class="prof-section" id="offline-title" style="display:none;">
@@ -2873,6 +3145,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     </div>
     <ul id="offline-list"></ul>
   </div>
+
 
 <div class="tabs" id="tabs">
   <div class="tab on" onclick="haptic();nav('wave')">
@@ -2892,6 +3165,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   </div>
 </div>
 
+
 <div id="mini-player">
   <div class="mini-body" id="mini-body">
     <div class="mi-cover" id="mini-cover">🎵</div>
@@ -2900,6 +3174,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
    <button class="mi-play" id="mini-play" onclick="event.stopPropagation(); haptic(); togglePlay();"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
   <div id="mini-prog"><div id="mini-prog-fill"></div></div>
 </div>
+
 
 <div id="full-player">
   <div class="fp-color-bg" id="fp-color-bg"></div>
@@ -2916,6 +3191,9 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <div class="fp-cover paused" id="fp-cover">🎵</div>
     <!-- Lyrics overlay — replaces cover -->
     <div class="fp-lyrics-view" id="fp-lyrics-view">
+      <div class="fp-lyrics-toolbar">
+        <button class="fp-lyr-tool-btn" id="btn-lyr-translate" onclick="event.stopPropagation();haptic();toggleLyricsTranslation()">🌐 Перевод</button>
+      </div>
       <div class="fp-lyrics-scroll" id="fp-lyrics-scroll">
         <div class="fp-lyrics-placeholder" id="fp-lyrics-placeholder">
           <div class="fp-lyrics-loading" id="fp-lyrics-loading" style="display:none">
@@ -2940,6 +3218,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     </div>
   </div>
 
+
   <!-- Progress -->
   <div class="fp-prog-area" id="fp-prog-area"><div class="fp-prog" id="fp-prog"><div class="wf wf-base" id="fp-wf-base"></div><div class="fp-prog-fill" id="fp-fill"><div class="wf wf-lit" id="fp-wf-lit"></div></div><div class="fp-thumb" id="fp-thumb"></div></div></div>
   <div class="fp-times"><span id="fp-cur">0:00</span><span id="fp-dur">0:00</span></div>
@@ -2958,6 +3237,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <button class="fp-ctrl-btn sec-btn" id="btn-rep" onclick="haptic();toggleRepeat()"><svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg><span class="rep-one-badge" id="rep-one-badge">1</span></button>
   </div>
 
+
   <!-- Lyrics toggle button row (как в ЯМ — под кнопками) -->
   <div class="fp-sub-row">
     <button class="fp-sub-btn" id="btn-lyrics-toggle" onclick="haptic();toggleLyricsView()">
@@ -2974,6 +3254,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     </button>
   </div>
 
+
   <!-- Мини-превью очереди: следующие 1-2 трека без открытия модалки —
        тап всё равно открывает полную очередь для перестановки/удаления. -->
   <div class="fp-upnext" id="fp-upnext" onclick="haptic();openQueueModal()" style="display:none">
@@ -2981,9 +3262,12 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <div class="fp-upnext-list" id="fp-upnext-list"></div>
   </div>
 
+
 </div>
 
+
 <div class="modal-overlay" id="overlay" onclick="closeModals()"></div>
+
 
 <div class="sheet-modal" id="eq-panel">
   <div class="modal-grabber"></div>
@@ -2992,6 +3276,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   <div class="eq-presets" id="eq-presets"></div><div class="eq-bars" id="eq-bars"></div>
 </div>
 
+
 <div class="sheet-modal" id="pl-modal">
   <div class="modal-grabber"></div>
   <div class="modal-head"><span>В плейлист</span><button class="close-modal" onclick="closeModals()">✕</button></div>
@@ -2999,9 +3284,11 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   <div class="pl-new-wrap"><input type="text" id="pl-new-name" placeholder="Новый..."><button onclick="haptic();createNewPlaylist()">Создать</button></div>
 </div>
 
+
 <div class="sheet-modal" id="timer-modal">
   <div class="modal-grabber"></div>
   <div class="modal-head"><span>🌙 Таймер сна</span><button class="close-modal" onclick="closeModals()">✕</button></div>
+
 
   <div id="gx-timer-idle">
     <div class="gx-dial-wrap">
@@ -3025,6 +3312,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <button class="gx-dial-start" id="gx-dial-start">Запустить</button>
   </div>
 
+
   <div id="gx-timer-active" style="display:none">
     <div class="gx-dial-wrap">
       <svg viewBox="0 0 220 220">
@@ -3039,6 +3327,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <button class="gx-dial-start gx-dial-stop" id="gx-dial-stop">Остановить</button>
   </div>
 </div>
+
 
 <!-- More menu (три точки) -->
 <div class="sheet-modal" id="more-modal">
@@ -3060,6 +3349,14 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 13h2v-2H3zm0 4h2v-2H3zm0-8h2V7H3zm4 4h14v-2H7zm0 4h14v-2H7zm0-10v2h14V7z"/></svg>
     Добавить в плейлист
   </button>
+  <button class="more-menu-btn" onclick="haptic();closeModals();sendCurrentTrackToChat()">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+    <span>Прислать MP3 файлом в бот</span>
+  </button>
+  <button class="more-menu-btn" onclick="haptic();closeModals();shareTrackStory()">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 2l2.4 7.2H22l-6 4.8 2.4 7.2-6.4-4.8-6.4 4.8 2.4-7.2-6-4.8h7.6z"/></svg>
+    <span>Опубликовать трек в Stories</span>
+  </button>
   <button class="more-menu-btn" id="more-offline-btn" onclick="haptic();closeModals();toggleOfflineCurrentTrack()">
     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" id="more-offline-icon"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
     <span id="more-offline-label">Сохранить офлайн</span>
@@ -3074,6 +3371,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   </button>
 </div>
 
+
 <div class="sheet-modal" id="queue-modal">
   <div class="modal-grabber"></div>
   <div class="modal-head"><span>Очередь (<span id="queue-count">0</span>)</span><button class="close-modal" onclick="closeModals()">✕</button></div>
@@ -3081,6 +3379,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <ul id="queue-list" style="list-style:none;padding:0;margin:0;"></ul>
   </div>
 </div>
+
 
 <div id="artist-card">
   <div class="ac-hero">
@@ -3094,6 +3393,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <div class="ac-meta" id="ac-meta" style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;"></div>
     </div>
   </div>
+
 
   <div class="ac-scroll-body" id="ac-scroll-body">
     <!-- Действия -->
@@ -3114,8 +3414,10 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       </div>
     </div>
 
+
     <!-- Жанр-теги -->
     <div class="ac-genre-tags" id="ac-genre-tags" style="padding:14px 20px 0;"></div>
+
 
     <!-- Статистика -->
     <div class="ac-stats-row" id="ac-stats-row" style="display:none;padding-top:14px;">
@@ -3124,6 +3426,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <div class="ac-stat-box"><div class="ac-stat-num" id="ac-stat-sources">—</div><div class="ac-stat-label">источников</div></div>
     </div>
 
+
     <!-- О артисте -->
     <div class="ac-section" id="ac-bio-section" style="display:none;">
       <div class="ac-section-hdr"><span class="ac-section-hdr-emoji">📖</span> Об артисте</div>
@@ -3131,11 +3434,13 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <div class="ac-bio-more" onclick="let b=this.previousElementSibling;b.classList.toggle('expanded');this.textContent=b.classList.contains('expanded')?'Свернуть ▲':'Подробнее ▼'">Подробнее ▼</div>
     </div>
 
+
     <!-- Видеоклипы -->
     <div class="ac-section" id="ac-videos-section" style="display:none;">
       <div class="ac-section-hdr"><span class="ac-section-hdr-emoji">🎬</span> Видеоклипы</div>
       <div class="ac-videos-scroll" id="ac-videos-scroll"></div>
     </div>
+
 
     <!-- Популярные треки -->
     <div class="ac-tracks-section">
@@ -3144,11 +3449,13 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <button class="ac-show-more" id="ac-show-more" style="display:none;" onclick="haptic();acShowMoreTracks()">Показать ещё треки</button>
     </div>
 
+
     <!-- Альбомы и синглы -->
     <div class="ac-section" id="ac-albums-section" style="display:none;">
       <div class="ac-section-hdr"><span class="ac-section-hdr-emoji">💿</span> Альбомы и синглы</div>
       <div class="ac-albums-scroll" id="ac-albums-scroll"></div>
     </div>
+
 
     <!-- Недавние релизы -->
     <div class="ac-section" id="ac-releases-section" style="display:none;">
@@ -3157,6 +3464,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     </div>
   </div>
 </div>
+
 
 <div id="toast"></div>
 <div id="offline-banner" style="
@@ -3167,6 +3475,8 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 ">📵 Офлайн — играют кэшированные треки</div>
 <audio id="aud" crossorigin="anonymous" preload="auto" controls title="Telegram Music"></audio>
 <audio id="aud-buf" crossorigin="anonymous" preload="auto" style="display:none"></audio>
+
+
 
 
 <!-- ── COLLAB SHARE SHEET ── -->
@@ -3186,6 +3496,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 </div>
 <div id="collab-sheet-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:8999" onclick="closeCollabSheet()"></div>
 
+
 <!-- ══ PARTY MODE ══════════════════════════════════════════════ -->
 <div id="party-overlay">
   <div class="party-header">
@@ -3202,8 +3513,10 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     </div>
   </div>
 
+
   <!-- Участники -->
   <div class="party-members" id="party-members"></div>
+
 
   <!-- Сейчас играет + голосование -->
   <div class="party-now">
@@ -3232,6 +3545,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     </div>
   </div>
 
+
   <!-- Очередь -->
   <div class="party-queue-header">
     <span class="party-queue-label">Очередь</span>
@@ -3242,6 +3556,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   </div>
   <div class="party-queue-list" id="party-queue-list"></div>
 </div>
+
 
 <!-- Шторка поиска трека для party -->
 <div class="party-add-sheet" id="party-add-sheet">
@@ -3255,6 +3570,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 </div>
 <div id="party-add-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:599" onclick="closePartyAddSheet()"></div>
 
+
 <!-- ── NOTIFICATIONS PANEL ─────────────────────────────── -->
 <div id="notif-panel">
   <div class="notif-header">
@@ -3267,6 +3583,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <div class="notif-empty"><div class="notif-empty-ico">🔔</div>Уведомлений пока нет</div>
   </div>
 </div>
+
 
 <!-- ── FRIENDS PANEL ──────────────────────────────────── -->
 <div id="friends-panel">
@@ -3285,6 +3602,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   <div class="friends-list" id="friends-list"></div>
 </div>
 
+
 <!-- ── FRIEND TRACKS PANEL ───────────────────────────── -->
 <div id="friend-tracks-panel">
   <div class="ft-hero">
@@ -3299,12 +3617,14 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
     </button>
   </div>
+  <div id="ft-blend-wrap"></div>
   <div class="ft-tabs">
     <button class="ft-tab active" id="ftt-favs" onclick="switchFriendTab('favs')">❤️ Любимые</button>
     <button class="ft-tab" id="ftt-history" onclick="switchFriendTab('history')">🕐 История</button>
   </div>
   <div class="ft-list" id="ft-list"></div>
 </div>
+
 
 </div><script>
 // ── INIT & UTILS ──
@@ -3313,6 +3633,7 @@ tg.expand(); tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
 function haptic() { try { tg.HapticFeedback.impactOccurred('light'); } catch(e){} }
 const authStr = tg.initData || 'test_mode';
 const aud = document.getElementById('aud');
+
 
 // ── CACHE & STATE ──
 let allData = JSON.parse(localStorage.getItem('music_data')) || { favs: [], history: [], playlists: {} };
@@ -3326,11 +3647,13 @@ let histSortDesc = true;
 let recentSearches = JSON.parse(localStorage.getItem('recent_searches') || '[]');
 let searchT = null;
 
+
 // Метаданные явно сохранённых офлайн-треков (сами аудио-байты лежат в SW-кэше).
 // Объявляем рано, т.к. renderOfflineList() дергается уже в начальном рендере ниже.
 let offlineMeta = {};
 try { offlineMeta = JSON.parse(localStorage.getItem('offline_tracks_meta') || '{}'); } catch (e) { offlineMeta = {}; }
 const offlinePending = new Set(); // id треков, которые сейчас сохраняются (чтобы не дублировать запросы)
+
 
 // Стабильный идентификатор этого устройства/браузера — нужен для синхронизации
 // позиции воспроизведения между устройствами (чтобы отличить "это я же, просто
@@ -3342,6 +3665,7 @@ if (!deviceId) {
 }
 let _lastSyncSentAt = 0;
 
+
 // Лимит треков на одну "порцию" рендера списков (избранное/история/плейлисты) —
 // используется в appendTracksPaged() ниже. Объявлен здесь, ДО renderFavs()/
 // renderHistory()/renderPlaylists(), которые вызываются несколькими строками
@@ -3351,6 +3675,7 @@ let _lastSyncSentAt = 0;
 // который в renderFavs() ничем не пойман и обрывает выполнение ВСЕГО
 // остального скрипта — включая свайпы, клики по вкладкам и плеер.
 const LIST_PAGE_SIZE = 40;
+
 
 // Initial render from Cache
 // Обёрнуто в try/catch как страховка: одна ошибка здесь раньше валила
@@ -3362,6 +3687,7 @@ try { renderPlaylists(); } catch(e) { console.error('renderPlaylists failed', e)
 try { renderOfflineList(); } catch(e) {}
 // Build profile from cache immediately
 try { updateProfileUI(); } catch(e) {}
+
 
 // ── SWIPE LOGIC FOR PAGES ──
 let startX = 0; const pagesEl = document.getElementById('pages'); const tabsOrder = ['wave', 'search', 'playlists', 'history', 'profile'];
@@ -3375,13 +3701,9 @@ pagesEl.addEventListener('touchend', e => {
   }
 }, {passive: true});
 
-  if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js')
-      .then(reg => console.log('Service Worker успешно зарегистрирован!'))
-      .catch(err => console.error('Ошибка регистрации Service Worker:', err));
-  });
-}
+
+// (Service Worker регистрируется единым блоком registerSW ниже)
+
 
   // --- ИНИЦИАЛИЗАЦИЯ ЭКВАЛАЙЗЕРА ---
 const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
@@ -3391,6 +3713,7 @@ let currentPreset = 'Flat';
 let actx = null;
 let srcNode = null;
 
+
 const EQ_PRESETS = {
     'Flat': [0,0,0,0,0,0,0,0,0,0],
     'Bass Boost': [6,5,4,2,0,0,0,0,0,0],
@@ -3399,6 +3722,7 @@ const EQ_PRESETS = {
     'Acoustic': [2,1,0,1,2,3,4,3,2,1],
     'Vibe': [4,3,1,0,-1,1,3,4,3,2] // Фирменный теплый пресет
 };
+
 
 function checkMiniPlayerVis(targetTab) {
   if (qIdx === -1) return; 
@@ -3422,6 +3746,7 @@ function nav(name) {
   checkMiniPlayerVis(name);
 }
 
+
 // ── DATA FETCHING ──
 async function loadData() {
   try {
@@ -3435,12 +3760,14 @@ async function loadData() {
   } catch (e) {}
 }
 
+
 function updateProfileUI() {
   document.getElementById('stat-favs').textContent = allData.favs.length;
   document.getElementById('stat-hist').textContent = allData.history.length;
   const playlists = allData.playlists || {};
   const plCount = Object.keys(playlists).length;
   document.getElementById('stat-pls').textContent = plCount;
+
 
   // Streak badge
   const badge = document.getElementById('prof-badge-streak');
@@ -3449,6 +3776,7 @@ function updateProfileUI() {
   else if (h >= 50) badge.textContent = '🎧 Активный';
   else if (h >= 20) badge.textContent = '🎵 Слушатель';
   else badge.textContent = '🌱 Новичок';
+
 
   // Populate TG user info
   try {
@@ -3469,6 +3797,7 @@ function updateProfileUI() {
     }
   } catch(e) {}
 
+
   // ── NOW PLAYING STATUS ──
   const npEl = document.getElementById('prof-now-playing');
   const npText = document.getElementById('prof-np-text');
@@ -3479,6 +3808,7 @@ function updateProfileUI() {
   } else {
     npEl.classList.remove('vis');
   }
+
 
   // ── LISTEN TIME ──
   const totalSec = allData.listen_seconds || 0;
@@ -3496,6 +3826,7 @@ function updateProfileUI() {
     document.getElementById('prof-listen-time').style.display = 'flex';
   }
 
+
   // ── TOP ARTISTS ──
   const artistCounts = {};
   const artistAvatars = {};
@@ -3508,6 +3839,7 @@ function updateProfileUI() {
   const topArtists = Object.entries(artistCounts)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 12);
+
 
   const artistsScroll = document.getElementById('prof-artists-scroll');
   const artistsTitle = document.getElementById('prof-artists-title');
@@ -3553,6 +3885,7 @@ function updateProfileUI() {
     artistsTitle.style.display = 'none';
   }
 
+
   // ── PLAYLISTS CAROUSEL ──
   const plsScroll = document.getElementById('prof-pls-scroll');
   const plsTitle = document.getElementById('prof-pls-title');
@@ -3589,6 +3922,7 @@ function updateProfileUI() {
   } else {
     plsTitle.style.display = 'none';
   }
+
 
   // ── RECENT TRACKS ──
   const recent = allData.history.slice(0, 12);
@@ -3661,6 +3995,7 @@ function renderWaveBigCards(tracks) {
   });
 }
 
+
 async function loadWave(reset = false) {
   if (waveLoading) return;
   if (reset) { waveOffset = 0; document.getElementById('wave-list').innerHTML = skeletonTracksHTML(6); document.getElementById('wave-big-cards').innerHTML = ''; }
@@ -3683,6 +4018,7 @@ async function loadWave(reset = false) {
   waveLoading = false; document.getElementById('wave-more').style.display = 'none';
 }
 pagesEl.addEventListener('scroll', function(e) { if (e.target.id === 'page-wave' && e.target.scrollTop + e.target.clientHeight >= e.target.scrollHeight - 200) loadWave(); }, true);
+
 
 // ── PLAYLIST APIs ──
 async function renamePlaylist(oldName) {
@@ -3710,8 +4046,10 @@ async function removeFromPlaylist(plName, trackId) {
   } catch (e) {}
 }
 
+
 // ── RENDER ENGINE ──
 function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
 
 // ── Градиентная заглушка обложки (вместо плоской ноты-эмодзи) ───────────
 // У трека без artwork_url раньше везде была одна и та же "🎵" — визуально
@@ -3740,6 +4078,7 @@ function coverImgFallback(imgEl) {
   imgEl.parentElement.innerHTML = coverFallbackHTML(imgEl.dataset.cfTitle, imgEl.dataset.cfArtist);
 }
 
+
 // Skeleton-заглушка списка треков на время загрузки (замена спиннеру) —
 // повторяет реальную разметку .track, поэтому подмена на настоящие данные
 // не дёргает layout.
@@ -3747,6 +4086,7 @@ function skeletonTracksHTML(count) {
   const one = `<li class="skeleton-track"><div class="skeleton-block skeleton-cover"></div><div class="skeleton-lines"><div class="skeleton-block skeleton-line-title"></div><div class="skeleton-block skeleton-line-artist"></div></div></li>`;
   return one.repeat(count || 6);
 }
+
 
 // Мини-превью "Далее" в full-player — следующие 1-2 трека без открытия
 // модалки очереди. Вызывается при каждой смене трека и любой мутации queue.
@@ -3765,6 +4105,7 @@ function renderUpNext() {
 function decodeTrackJson(datasetJson) { return JSON.parse(datasetJson.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'")); }
 function isFav(id) { return allData.favs.some(t => String(t.id) === String(id)); }
 
+
 // Маленький цветной бейдж источника трека на обложке (оранжевый SoundCloud,
 // красный YouTube) — считывается с одного взгляда, без чтения текста.
 function sourceBadgeHTML(source) {
@@ -3772,6 +4113,7 @@ function sourceBadgeHTML(source) {
   if (source === 'SoundCloud') return '<span class="src-badge src-sc" title="SoundCloud"></span>';
   return '';
 }
+
 
 function makeItem(t, ctx) {
   const li = document.createElement('li'); li.className = 'track'; li.dataset.id = t.id;
@@ -3781,11 +4123,13 @@ function makeItem(t, ctx) {
   const badge = sourceBadgeHTML(t.source);
   const durationHtml = t.duration ? `<div class="tdur">${esc(t.duration)}</div>` : '';
 
+
   let rightBtn = ctx === 'playlist' 
     ? `<button class="del-btn" onclick="haptic();event.stopPropagation();removeFromPlaylist('${esc(currentPl)}', '${esc(String(t.id))}')"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg></button>`
     : ctx === 'offline'
     ? `<button class="del-btn" onclick="haptic();event.stopPropagation();removeTrackOffline('${esc(String(t.id))}')"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg></button>`
     : `<button class="fav-btn ${loved ? 'loved' : ''}" onclick="haptic();event.stopPropagation();favToggle(this, '${trackJson}')"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></button>`;
+
 
   li.innerHTML = `<div class="cover">${cover}${badge}<div class="now-eq"><span></span><span></span><span></span><span></span></div></div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><div class="tright">${durationHtml}${rightBtn}</div>`;
   li.addEventListener('click', () => {
@@ -3807,6 +4151,7 @@ function makeItem(t, ctx) {
   return li;
 }
 
+
 // ── ПАГИНИРОВАННЫЙ РЕНДЕР СПИСКОВ ──────────────────────────────────
 // Рендерить сотни треков разом (избранное, история, большие плейлисты)
 // тяжело для DOM на слабых Android-устройствах в Telegram WebView.
@@ -3815,10 +4160,12 @@ function makeItem(t, ctx) {
 // невидимом сентинел-элементе — без пересчёта скролла руками).
 // (LIST_PAGE_SIZE объявлен раньше в файле — см. комментарий там)
 
+
 function appendTracksPaged(tracks, ul, ctx, animBase) {
   let rendered = 0;
   let sentinel = null;
   let observer = null;
+
 
   const renderNext = () => {
     const slice = tracks.slice(rendered, rendered + LIST_PAGE_SIZE);
@@ -3837,6 +4184,7 @@ function appendTracksPaged(tracks, ul, ctx, animBase) {
     }
   };
 
+
   if (tracks.length > LIST_PAGE_SIZE) {
     sentinel = document.createElement('li');
     sentinel.className = 'track-list-sentinel';
@@ -3850,6 +4198,7 @@ function appendTracksPaged(tracks, ul, ctx, animBase) {
   renderNext();
 }
 
+
 function appendTracks(tracks, ul, ctx) { appendTracksPaged(tracks, ul, ctx); }
 function renderList(tracks, ulId, ctx, emptyText, emptyIcon, emptyCta) {
   const ul = document.getElementById(ulId); ul.innerHTML = '';
@@ -3862,13 +4211,16 @@ function renderList(tracks, ulId, ctx, emptyText, emptyIcon, emptyCta) {
 }
 function renderFavs() { renderList(allData.favs, 'favs-list', 'fav', 'Добавляй треки, чтобы они появились здесь.', '🖤', { label: '🔍 Найти музыку', action: "nav('search')" }); if(document.getElementById('stat-favs')) document.getElementById('stat-favs').textContent = allData.favs.length; }
 
+
 // ── HISTORY: timeline grouped render ──
+
 
 function toggleHistSort() {
   histSortDesc = !histSortDesc;
   document.getElementById('hist-sort-label').textContent = histSortDesc ? 'Сначала новые' : 'Сначала старые';
   renderHistory();
 }
+
 
 function renderHistory() {
   const total = (allData.history || []).length;
@@ -3878,11 +4230,13 @@ function renderHistory() {
   if (!container) { renderList(allData.history, 'hist-list', 'history', 'Тут пусто. Послушай что-нибудь.', '🕒', { label: '🔍 Найти музыку', action: "nav('search')" }); return; }
   if (document.getElementById('stat-hist')) document.getElementById('stat-hist').textContent = total;
 
+
   const tracks = histSortDesc ? [...(allData.history || [])] : [...(allData.history || [])].reverse();
   if (!tracks.length) {
     container.innerHTML = `<div class="hist-empty"><div class="hist-empty-ico">🎵</div><p>Послушай что-нибудь,<br>и треки появятся здесь</p><button class="empty-cta" onclick="haptic();nav('search')">🔍 Найти музыку</button></div>`;
     return;
   }
+
 
   // Group by relative day label — we don't have timestamps so group by position
   // Split into Today (first 10), Earlier (rest), or just show "Всё" if small
@@ -3900,6 +4254,7 @@ function renderHistory() {
     groups.push({ label: 'Вся история', tracks });
   }
 
+
   container.innerHTML = '';
   groups.forEach((g, gi) => {
     const sec = document.createElement('div');
@@ -3916,6 +4271,7 @@ function renderHistory() {
     container.appendChild(sec);
   });
 
+
   // Clear history button
   if (tracks.length >= 3) {
     const clearRow = document.createElement('div');
@@ -3924,6 +4280,7 @@ function renderHistory() {
     container.appendChild(clearRow);
   }
 }
+
 
 async function clearHistoryConfirm() {
   if (!confirm('Очистить всю историю прослушивания?')) return;
@@ -3934,6 +4291,7 @@ async function clearHistoryConfirm() {
   try { await fetch('/api/history/clear', { method: 'POST', headers: { Authorization: authStr } }); } catch(e) {}
 }
 
+
 function pluralRu(n, one, few, many) {
   const mod10 = n % 10, mod100 = n % 100;
   if (mod10 === 1 && mod100 !== 11) return one;
@@ -3941,7 +4299,9 @@ function pluralRu(n, one, few, many) {
   return many;
 }
 
+
 // ── PLAYLISTS: grid render ──
+
 
 function showCreatePlaylist() {
   const form = document.getElementById('pls-create-form');
@@ -3961,6 +4321,7 @@ async function createNewPlaylistInline() {
   hideCreatePlaylist();
 }
 
+
 function openPlsDetail(name) {
   plsDetailOpen = true;
   currentPl = name;
@@ -3969,6 +4330,7 @@ function openPlsDetail(name) {
   document.getElementById('pls-detail-name').textContent = name;
   const cnt = tracks.length;
   document.getElementById('pls-detail-count').textContent = cnt + ' ' + pluralRu(cnt, 'трек', 'трека', 'треков');
+
 
   // Cover
   const cgrid = document.getElementById('pls-detail-cover-grid');
@@ -3981,6 +4343,7 @@ function openPlsDetail(name) {
     cgrid.innerHTML = `<div class="pls-detail-cover-emoji">🎵</div>`;
   }
 
+
   const ul = document.getElementById('pl-list');
   ul.innerHTML = '';
   if (!tracks.length) {
@@ -3989,11 +4352,13 @@ function openPlsDetail(name) {
     appendTracks(tracks, ul, 'playlist'); updateAllHeartButtons();
   }
 
+
   document.getElementById('pls-grid').style.display = 'none';
   const plsHdr = document.querySelector('.pls-page-header'); if (plsHdr) plsHdr.style.display = 'none';
   document.getElementById('pls-create-form').style.display = 'none';
   document.getElementById('pls-detail').style.display = 'block';
 }
+
 
 function closePlsDetail() {
   plsDetailOpen = false;
@@ -4002,12 +4367,14 @@ function closePlsDetail() {
   document.querySelector('.pls-page-header').style.display = 'flex';
 }
 
+
 function playPlaylistAll() {
   const tracks = allData.playlists[currentPl] || [];
   if (!tracks.length) return;
   queue = [...tracks]; qIdx = 0; haptic();
   playTrack(queue[0], 1);
 }
+
 
 function showPlsOptions() {
   if (confirm(`Что сделать с «${currentPl}»?\n\nОК = Удалить, Отмена = Переименовать`)) {
@@ -4016,6 +4383,7 @@ function showPlsOptions() {
     renamePlaylist(currentPl);
   }
 }
+
 
 function makePlsCover(tracks) {
   const covers = (tracks || []).filter(t => t.artwork_url).slice(0, 4);
@@ -4027,11 +4395,13 @@ function makePlsCover(tracks) {
   return `<div class="pls-cover-empty">🎵</div>`;
 }
 
+
 function renderPlaylists() {
   const pls = allData.playlists || {}; const names = Object.keys(pls);
   // legacy chips (hidden)
   const chips = document.getElementById('pl-chips'); chips.innerHTML = '';
   const header = document.getElementById('pl-header'); if (header) header.innerHTML = '';
+
 
   if (!plsDetailOpen) {
     const grid = document.getElementById('pls-grid');
@@ -4061,10 +4431,13 @@ function renderPlaylists() {
     openPlsDetail(currentPl);
   }
 
+
   if(document.getElementById('stat-pls')) document.getElementById('stat-pls').textContent = names.length;
 }
 
+
 // ── SEARCH ──
+
 
 function renderRecentSearches() {
   const wrap = document.getElementById('srch-recent-wrap');
@@ -4081,15 +4454,18 @@ function renderRecentSearches() {
   });
 }
 
+
 function clearRecentSearches() {
   recentSearches = []; localStorage.setItem('recent_searches', '[]');
   document.getElementById('srch-recent-wrap').style.display = 'none';
 }
 
+
 function saveRecentSearch(q) {
   recentSearches = [q, ...recentSearches.filter(s => s !== q)].slice(0, 12);
   localStorage.setItem('recent_searches', JSON.stringify(recentSearches));
 }
+
 
 function clearSearch() {
   const inp = document.getElementById('q'); inp.value = '';
@@ -4100,10 +4476,12 @@ function clearSearch() {
   inp.focus();
 }
 
+
 function searchGenre(genre) {
   document.getElementById('q').value = genre;
   doSearch();
 }
+
 
 document.getElementById('q').addEventListener('input', e => {
   const v = e.target.value.trim();
@@ -4116,6 +4494,7 @@ document.getElementById('q').addEventListener('input', e => {
   }
 });
 
+
 // show recent searches on focus if empty
 document.getElementById('q').addEventListener('focus', () => {
   renderRecentSearches();
@@ -4124,6 +4503,17 @@ document.getElementById('q').addEventListener('focus', () => {
     document.getElementById('srch-results').style.display = 'none';
   }
 });
+
+
+let currentSearchSource = 'all';
+function setSearchSource(src) {
+  currentSearchSource = src || 'all';
+  document.querySelectorAll('#srch-source-chips .srch-src-chip').forEach(el => {
+    el.classList.toggle('on', el.dataset.src === currentSearchSource);
+  });
+  if (document.getElementById('q').value.trim().length >= 2) doSearch();
+}
+
 
 async function doSearch() {
   const q = document.getElementById('q').value.trim();
@@ -4135,7 +4525,7 @@ async function doSearch() {
   ul.innerHTML = skeletonTracksHTML(6);
   meta.textContent = '';
   try {
-    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q) + '&source=' + encodeURIComponent(currentSearchSource));
     const tracks = await r.json(); ul.innerHTML = '';
     if (!tracks.length) {
       // Пустой результат может означать не "ничего нет", а то, что источник
@@ -4154,8 +4544,10 @@ async function doSearch() {
   } catch { ul.innerHTML = `<div class="empty"><div class="empty-ico">⚠️</div><p>Ошибка поиска</p></div>`; }
 }
 
+
 // init
 renderRecentSearches();
+
 
 // ── FAVORITES & DISLIKE ──
 async function favToggle(btn, trackJsonStr) {
@@ -4163,11 +4555,15 @@ async function favToggle(btn, trackJsonStr) {
   if (loved) { allData.favs = allData.favs.filter(t => String(t.id) !== trackId); toast('Убрано из любимых'); } else { allData.favs.unshift(track); toast('Добавлено в профиль'); }
   localStorage.setItem('music_data', JSON.stringify(allData));
   renderFavs(); updateAllHeartButtons(); if (qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === trackId) updateFavBtnPlayer();
-  try { await fetch('/api/fav', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr }, body: JSON.stringify({ track_id: trackId, track_data: track }) }); } catch (e) {}
+  try {
+    const endpoint = loved ? '/api/fav/remove' : '/api/fav';
+    await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authStr }, body: JSON.stringify({ track_id: trackId, track_data: track }) });
+  } catch (e) {}
 }
 function updateAllHeartButtons() { document.querySelectorAll('.fav-btn').forEach(btn => { if(btn.id === 'fp-fav' || btn.id === 'wa-fav') return; const li = btn.closest('.track'); if(li) { btn.classList.toggle('loved', isFav(li.dataset.id)); } }); }
 function toggleFavFromPlayer() { if (qIdx < 0 || !queue[qIdx]) return; favToggle(document.getElementById('fp-fav'), esc(JSON.stringify(queue[qIdx]))); }
 function updateFavBtnPlayer() { if (qIdx < 0 || !queue[qIdx]) return; const isLoved = isFav(queue[qIdx].id); document.getElementById('fp-fav').classList.toggle('loved', isLoved); document.getElementById('wa-fav').classList.toggle('loved', isLoved); }
+
 
 async function dislikeTrack() {
   if (qIdx < 0 || !queue[qIdx]) return;
@@ -4176,6 +4572,7 @@ async function dislikeTrack() {
   playNext();
 }
 
+
 // ── SHARE TO TELEGRAM ──
 function shareTrack() {
   if (qIdx < 0 || !queue[qIdx]) return;
@@ -4183,6 +4580,7 @@ function shareTrack() {
   // Показываем шторку с вариантами
   openShareTrackSheet(t);
 }
+
 
 function openShareTrackSheet(t) {
   // Если шторки нет — создаём её динамически
@@ -4195,11 +4593,13 @@ function openShareTrackSheet(t) {
     overlay.onclick = closeShareTrackSheet;
     document.body.appendChild(overlay);
 
+
     sheet = document.createElement('div');
     sheet.id = 'share-track-sheet';
     sheet.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#1a1a22;border-radius:24px 24px 0 0;z-index:700;padding:0 0 env(safe-area-inset-bottom,0) 0;transform:translateY(100%);transition:transform 0.38s cubic-bezier(0.22,1,0.36,1);';
     document.body.appendChild(sheet);
   }
+
 
   const playlists = Object.keys(allData.playlists || {});
   const plHtml = playlists.length > 0
@@ -4212,6 +4612,7 @@ function openShareTrackSheet(t) {
           </div>
         </div>`).join('')
     : '<div style="padding:12px 16px;color:rgba(255,255,255,0.4);font-size:14px">Нет плейлистов — создай первый снизу</div>';
+
 
   sheet.innerHTML = `
     <div style="width:36px;height:4px;background:rgba(255,255,255,0.15);border-radius:2px;margin:12px auto 0"></div>
@@ -4227,12 +4628,14 @@ function openShareTrackSheet(t) {
       </div>
     </div>
 
+
     <div style="padding:12px 16px 6px">
       <button onclick="haptic();tg.switchInlineQuery('share_'+${JSON.stringify(String(t.id))});closeShareTrackSheet();" style="width:100%;background:rgba(var(--accent-rgb),0.12);border:1px solid rgba(var(--accent-rgb),0.3);border-radius:14px;padding:14px;color:var(--accent);font-size:15px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px">
         <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         Поделиться в Telegram
       </button>
     </div>
+
 
     <div style="padding:6px 16px 4px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:rgba(255,255,255,0.4)">Добавить в плейлист</div>
     <div id="share-pl-list" style="max-height:220px;overflow-y:auto;padding:0 8px 6px">${plHtml}</div>
@@ -4242,12 +4645,15 @@ function openShareTrackSheet(t) {
     </div>
   `;
 
+
   // Сохраняем ссылку на трек для функций
   sheet._currentTrack = t;
+
 
   overlay.style.display = 'block';
   requestAnimationFrame(() => { sheet.style.transform = 'translateY(0)'; });
 }
+
 
 function closeShareTrackSheet() {
   const sheet = document.getElementById('share-track-sheet');
@@ -4256,6 +4662,7 @@ function closeShareTrackSheet() {
   if (overlay) overlay.style.display = 'none';
 }
 
+
 async function shareAddToPlaylist(name) {
   const sheet = document.getElementById('share-track-sheet');
   const t = sheet ? sheet._currentTrack : (qIdx >= 0 ? queue[qIdx] : null);
@@ -4263,6 +4670,7 @@ async function shareAddToPlaylist(name) {
   await addToPlaylistByTrack(name, t);
   closeShareTrackSheet();
 }
+
 
 async function shareCreateAndAddPlaylist() {
   const inp = document.getElementById('share-new-pl-input');
@@ -4275,6 +4683,7 @@ async function shareCreateAndAddPlaylist() {
   await addToPlaylistByTrack(name, t);
   closeShareTrackSheet();
 }
+
 
 async function addToPlaylistByTrack(name, track) {
   if (!allData.playlists[name]) allData.playlists[name] = [];
@@ -4295,6 +4704,8 @@ async function addToPlaylistByTrack(name, track) {
 }
 
 
+
+
 // ── COLOR EXTRACTION FOR BREATHE ANIMATION ──
 function applyDominantColor(imgUrl) {
   if (!imgUrl) { document.documentElement.style.setProperty('--cover-color', '#222233'); return; }
@@ -4308,6 +4719,7 @@ function applyDominantColor(imgUrl) {
     } catch(e) { document.documentElement.style.setProperty('--cover-color', '#333344'); }
   }; img.src = imgUrl;
 }
+
 
 // ── MEDIA SESSION API ──
 function updateMediaSession(t) {
@@ -4329,6 +4741,7 @@ function updateMediaSession(t) {
       ]
     });
 
+
     // Привязываем кнопки из шторки уведомлений к нашим функциям
     navigator.mediaSession.setActionHandler('play', () => { aud.play(); setPlayState(true); });
     navigator.mediaSession.setActionHandler('pause', () => { aud.pause(); setPlayState(false); });
@@ -4347,6 +4760,7 @@ function updateMediaSession(t) {
   }
 }
 
+
 // Функция синхронизации времени трека с плеером телефона
 function updatePositionState() {
   if ('mediaSession' in navigator && aud.duration && !isNaN(aud.duration)) {
@@ -4361,6 +4775,8 @@ function updatePositionState() {
 }
 
 
+
+
 // ── PLAYER LOGIC ──
 function playWaveFromStart() {
   const waveList = document.getElementById('wave-list');
@@ -4369,6 +4785,7 @@ function playWaveFromStart() {
   qIdx = 0; playTrack(queue[0], 1); checkMiniPlayerVis('wave');
 }
 
+
 let _playToken = 0;        // защита от гонки при быстрых тапах по трекам
 let _streamFailStreak = 0; // подряд неудачных потоков — чтобы не мотать очередь вечно
 function playTrack(t, dir = 1) {
@@ -4376,10 +4793,12 @@ function playTrack(t, dir = 1) {
   const _tok = ++_playToken;
   document.body.classList.add('buffering');
 
+
   // ── Сброс crossfade gain при ручном переключении ──────────────────
   _xfadeActive = false;
   if (gainMain  && actx) { gainMain.gain.cancelScheduledValues(actx.currentTime);  gainMain.gain.setValueAtTime(1.0, actx.currentTime); }
   if (gainXfade && actx) { gainXfade.gain.cancelScheduledValues(actx.currentTime); gainXfade.gain.setValueAtTime(0.0, actx.currentTime); }
+
 
   const coverEl = document.getElementById('fp-cover');
   coverEl.classList.add(dir > 0 ? 'slide-out-left' : 'slide-out-right');
@@ -4389,6 +4808,7 @@ function playTrack(t, dir = 1) {
     ['mini-title', 'fp-title', 'wa-pill-title'].forEach(id => document.getElementById(id).textContent = t.title);
     ['mini-artist', 'fp-artist', 'wa-huge-artist'].forEach(id => document.getElementById(id).textContent = t.artist);
     // (banner title removed)
+
 
     const imgHtml = t.artwork_url ? `<img src="${esc(t.artwork_url)}">` : coverFallbackHTML(t.title, t.artist);
     document.getElementById('mini-cover').innerHTML = imgHtml; coverEl.innerHTML = imgHtml;
@@ -4402,6 +4822,7 @@ function playTrack(t, dir = 1) {
     const bgUrl = t.artwork_url ? `url('${esc(t.artwork_url)}')` : 'none';
     document.getElementById('fp-bg').style.backgroundImage = bgUrl; document.getElementById('wa-bg').style.backgroundImage = bgUrl;
 
+
     document.querySelectorAll('.track').forEach(li => li.classList.toggle('now', String(li.dataset.id) === String(t.id)));
     updateFavBtnPlayer();
     
@@ -4412,8 +4833,10 @@ function playTrack(t, dir = 1) {
     coverEl.classList.add(dir > 0 ? 'slide-in-right' : 'slide-in-left');
     void coverEl.offsetWidth; coverEl.classList.remove('slide-in-right', 'slide-in-left');
 
+
     // Reset lyrics when track changes
     resetLyricsOnTrackChange();
+
 
     // Update fp-top-title
     const topTitle = document.getElementById('fp-top-title');
@@ -4433,9 +4856,11 @@ function playTrack(t, dir = 1) {
         + '<span class="fp-top-line"></span>';
     }
 
+
     if (_tok !== _playToken) return; // пока ждали анимацию, выбрали другой трек
     aud.src = `/api/stream/${encodeURIComponent(t.id)}`;
     aud.load();
+
 
     // Обновляем шторку/позицию ТОЛЬКО когда звук реально пошёл
     aud.play().then(() => {
@@ -4451,14 +4876,21 @@ function playTrack(t, dir = 1) {
       setPlayState(false);
     });
 
+
     setPlayState(true);
     logHistoryToServer(t);
-    // Инициализация аудио-контекста и запуск пульсации
-    initAudioCtx();
-    if (actx && actx.state === 'suspended') actx.resume();
-    startWavePulse();
+    // Ленивая инициализация AudioContext: не захватываем <audio> через WebAudio,
+    // пока пользователь явно не включил эквалайзер (не Flat) или визуализатор —
+    // благодаря этому на iOS/Android Telegram WebView треки переключаются в фоне без обрывов.
+    if (actx || isVisActive || currentPreset !== 'Flat') {
+      initAudioCtx();
+      if (actx && actx.state === 'suspended') actx.resume();
+      startWavePulse();
+    }
+    if (typeof syncPartyNowPlaying === 'function') syncPartyNowPlaying(t);
   }, 300);
 }
+
 
 async function logHistoryToServer(track) {
   allData.history = allData.history.filter(t => String(t.id) !== String(track.id));
@@ -4476,6 +4908,7 @@ async function logHistoryToServer(track) {
   renderUpNext();
   }
 
+
 function setPlayState(playing) {
   const svgPlay = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; const svgPause = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
   if (!playing && document.getElementById('mini-player').style.transform !== '') { document.getElementById('mini-player').classList.add('vis'); }
@@ -4485,6 +4918,7 @@ function setPlayState(playing) {
   // паузе — иначе полоски "играют" визуально даже когда трек стоит.
   document.body.classList.toggle('audio-paused', !playing);
 }
+
 
 function togglePlay() { aud.paused ? (aud.play(), setPlayState(true)) : (aud.pause(), setPlayState(false)); }
 function playPrev() { if (!queue.length) return; if (aud.currentTime > 3) { aud.currentTime = 0; return; } qIdx = (qIdx - 1 + queue.length) % queue.length; playTrack(queue[qIdx], -1); }
@@ -4498,13 +4932,16 @@ function toggleRepeat() {
   toast(repeatMode === 0 ? 'Повтор выкл' : repeatMode === 1 ? 'Повтор очереди' : 'Повтор трека');
 }
 
+
 // ── РАДИО: бесконечный автоплей по жанру/настроению от текущего трека ──
 // В отличие от "Волны" (использует избранное+историю пользователя целиком),
 // "Радио" отталкивается от ОДНОГО конкретного трека через Last.fm
 // similar-tracks/similar-artists и постоянно дозаполняет очередь дальше.
 let radioMode = false;
 
+
 function toggleRadioMode() { radioMode ? stopRadioMode() : startRadioFromCurrent(); }
+
 
 async function startRadioFromCurrent() {
   if (qIdx < 0 || !queue[qIdx]) { toast('Сначала запусти трек', 'warning'); return; }
@@ -4513,10 +4950,12 @@ async function startRadioFromCurrent() {
   await loadRadioMore(queue[qIdx], true);
 }
 
+
 function stopRadioMode() {
   radioMode = false;
   toast('📻 Радио выключено');
 }
+
 
 async function loadRadioMore(seedTrack, isFirst) {
   const seed = seedTrack || queue[queue.length - 1] || (qIdx >= 0 ? queue[qIdx] : null);
@@ -4537,10 +4976,12 @@ async function loadRadioMore(seedTrack, isFirst) {
   } catch (e) { console.warn('[radio] load failed', e); if (isFirst) toast('Радио временно недоступно', 'warning'); }
 }
 
+
 function updateRadioMenuState() {
   const label = document.getElementById('more-radio-label');
   if (label) label.textContent = radioMode ? 'Выключить радио' : 'Радио по этому треку';
 }
+
 
 // ── ОЧЕРЕДЬ ВОСПРОИЗВЕДЕНИЯ: просмотр + drag-n-drop переупорядочивание ──
 function openQueueModal() {
@@ -4548,6 +4989,7 @@ function openQueueModal() {
   document.getElementById('queue-modal').classList.add('vis');
   document.getElementById('overlay').classList.add('vis');
 }
+
 
 function renderQueueList() {
   const ul = document.getElementById('queue-list');
@@ -4573,6 +5015,7 @@ function renderQueueList() {
   });
 }
 
+
 function removeFromQueue(i) {
   if (i === qIdx) { toast('Нельзя убрать играющий трек'); return; }
   queue.splice(i, 1);
@@ -4581,6 +5024,7 @@ function removeFromQueue(i) {
   renderUpNext();
 }
 
+
 let _qDrag = null;
 function startQueueDrag(e, li) {
   e.preventDefault();
@@ -4588,6 +5032,7 @@ function startQueueDrag(e, li) {
   li.setPointerCapture(e.pointerId);
   li.classList.add('dragging');
   _qDrag = { pointerId: e.pointerId, startY: e.clientY };
+
 
   const onMove = (ev) => {
     if (!_qDrag || ev.pointerId !== _qDrag.pointerId) return;
@@ -4614,6 +5059,7 @@ function startQueueDrag(e, li) {
     document.removeEventListener('pointerup', onUp);
     document.removeEventListener('pointercancel', onUp);
 
+
     // Собираем новый порядок из финального расположения DOM-элементов,
     // каждый из которых хранит свой ИСХОДНЫЙ индекс в dataset.idx.
     const nowPlayingId = queue[qIdx] ? String(queue[qIdx].id) : null;
@@ -4631,6 +5077,7 @@ function startQueueDrag(e, li) {
 }
 function fmt(s){ return isNaN(s) ? '0:00' : `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`; }
 
+
 // ── PROGRESS & PRELOADING ──
 const progArea = document.getElementById('fp-prog-area'); let isScrubbing = false;
 progArea.addEventListener('touchstart', (e) => { e.stopPropagation(); isScrubbing = true; updateScrubPosition(e.touches[0].clientX); }, {passive: true});
@@ -4638,6 +5085,7 @@ progArea.addEventListener('touchmove', (e) => { e.stopPropagation(); if(isScrubb
 progArea.addEventListener('touchend', (e) => { e.stopPropagation(); if(isScrubbing) { isScrubbing = false; const ratio = getScrubRatio(e.changedTouches[0].clientX); if(aud.duration) aud.currentTime = ratio * aud.duration; } }, {passive: true});
 function getScrubRatio(clientX) { const rect = document.getElementById('fp-prog').getBoundingClientRect(); let ratio = (clientX - rect.left) / rect.width; return Math.max(0, Math.min(1, ratio)); }
 function updateScrubPosition(clientX) { const ratio = getScrubRatio(clientX); document.getElementById('fp-fill').style.width = (ratio * 100) + '%'; document.getElementById('fp-thumb').style.left = (ratio * 100) + '%'; if (aud.duration) document.getElementById('fp-cur').textContent = fmt(ratio * aud.duration); }
+
 
 // Визуальное положение ползунка/заливки (mini-, full- и wave-плеер) теперь
 // ведёт отдельный rAF-цикл (startProgTick ниже), а не этот обработчик:
@@ -4651,7 +5099,9 @@ aud.addEventListener('timeupdate', () => {
   const p = aud.currentTime / aud.duration;
   const remaining = aud.duration - aud.currentTime;
 
+
   document.getElementById('fp-dur').textContent = fmt(aud.duration);
+
 
   // ── GAPLESS PRE-FETCH (начинаем за 12 сек) ─────────────────────
   if (remaining < 12 && queue[qIdx+1]) {
@@ -4663,6 +5113,7 @@ aud.addEventListener('timeupdate', () => {
           if (queue[qIdx+2]) swPrecacheAudio(queue[qIdx+2].id);
       }
   }
+
 
   // ── CROSSFADE (начинаем за XFADE_SECS секунд до конца) ──────────
   if (
@@ -4677,6 +5128,7 @@ aud.addEventListener('timeupdate', () => {
       startCrossfade(queue[qIdx+1]);
   }
 
+
   // ── ТАЙМЕР СНА "до конца трека": плавно гасим громкость к финалу ──
   if (typeof sleepTimerType !== 'undefined' && sleepTimerType === 'track' && typeof gxFadeOutForSleep === 'function'
       && !sleepFadeStarted && remaining > 0 && remaining <= SLEEP_FADE_SECS) {
@@ -4684,9 +5136,11 @@ aud.addEventListener('timeupdate', () => {
       gxFadeOutForSleep(remaining);
   }
 
+
   // ── СИНХРОНИЗАЦИЯ ПОЗИЦИИ МЕЖДУ УСТРОЙСТВАМИ (не чаще раза в ~12 сек) ──
   syncPlaybackState(false);
 });
+
 
 // ── ПЛАВНЫЙ ПРОГРЕСС: двигаем ползунок каждый кадр, а не только по timeupdate ──
 let _progRaf = 0;
@@ -4709,6 +5163,7 @@ function startProgTick() { if (!_progRaf) _progRaf = requestAnimationFrame(progT
 aud.addEventListener('playing', startProgTick);
 aud.addEventListener('play', startProgTick);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && !aud.paused) startProgTick(); });
+
 
 aud.addEventListener('ended', () => {
     if (repeatMode === 2) { aud.currentTime = 0; aud.play(); return; }
@@ -4795,6 +5250,7 @@ aud.addEventListener('error', () => {
   setTimeout(playNext, 900);
 });
 
+
 // ── FULLSCREEN MANAGEMENT ──
 function openFull() {
   const fp = document.getElementById('full-player');
@@ -4813,9 +5269,11 @@ function closeFull() {
   }, 380);
 }
 
+
 const fp = document.getElementById('full-player');
 let fpStartX = 0, fpStartY = 0, fpCurrentY = 0, fpDragging = false, fpSwipeDir = null;
 const fpCoverWrap = document.getElementById('fp-cover-wrap');
+
 
 fpCoverWrap.addEventListener('touchstart', e => { fpStartX = e.touches[0].clientX; fpStartY = e.touches[0].clientY; fpDragging = true; fpSwipeDir = null; fp.style.transition = 'none'; }, {passive: true});
 fpCoverWrap.addEventListener('touchmove', e => {
@@ -4861,6 +5319,7 @@ fpCoverWrap.addEventListener('touchend', e => {
   fpCurrentY = 0;
 }, {passive: true});
 
+
 // ── MINI PLAYER GESTURES ──
 const mp = document.getElementById('mini-player'); const mpBody = document.getElementById('mini-body'); let mpStartX = 0, mpStartY = 0; let mpDragging = false;
 mp.addEventListener('touchstart', e => { if (e.target.closest('.mi-play')) return; mpStartX = e.touches[0].clientX; mpStartY = e.touches[0].clientY; mpDragging = true; mp.style.transition = 'none'; }, {passive: true});
@@ -4877,6 +5336,7 @@ mp.addEventListener('touchend', e => {
   } else { mp.style.transform = ''; openFull(); }
 }, {passive: true});
 
+
 // ── MODALS (EQ, Playlist, Timer, More) ──
 function closeModals() { ['eq-panel', 'pl-modal', 'timer-modal', 'more-modal', 'queue-modal'].forEach(id => document.getElementById(id).classList.remove('vis')); document.getElementById('overlay').classList.remove('vis'); stopEqVisualizer(); }
 function openMoreMenu() {
@@ -4889,12 +5349,16 @@ function openMoreMenu() {
   document.getElementById('overlay').classList.add('vis');
 }
 
+
 // ── LYRICS (inline, karaoke-style) ──
 let lyricsVisible = false;
 let lyricsTrackId = null;
 let syncedLines = [];   // [{time: seconds, text: string}]
 let plainLines = [];    // [string]
+let translatedLines = null; // [string] или null
+let showLyricsTranslation = false;
 let lyricsRaf = null;
+
 
 function toggleLyricsView() {
   lyricsVisible = !lyricsVisible;
@@ -4902,6 +5366,7 @@ function toggleLyricsView() {
   const cover = document.getElementById('fp-cover');
   const vis = document.getElementById('vis-canvas');
   const btn = document.getElementById('btn-lyrics-toggle');
+
 
   if (lyricsVisible) {
     view.classList.add('active');
@@ -4926,21 +5391,28 @@ function toggleLyricsView() {
   }
 }
 
+
 async function loadLyricsForTrack(t) {
   if (!t) return;
   lyricsTrackId = t.id;
   syncedLines = [];
   plainLines = [];
+  translatedLines = null;
+  showLyricsTranslation = false;
+  document.getElementById('btn-lyr-translate')?.classList.remove('on');
+
 
   const linesEl = document.getElementById('fp-lyrics-lines');
   const loading = document.getElementById('fp-lyrics-loading');
   const empty = document.getElementById('fp-lyrics-empty');
   const placeholder = document.getElementById('fp-lyrics-placeholder');
 
+
   linesEl.innerHTML = '';
   placeholder.style.display = 'flex';
   loading.style.display = 'block';
   empty.style.display = 'none';
+
 
   try {
     const controller = new AbortController();
@@ -4953,7 +5425,9 @@ async function loadLyricsForTrack(t) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
 
+
     loading.style.display = 'none';
+
 
     if (d.synced && d.synced.trim()) {
       // Parse LRC format: [mm:ss.xx] text
@@ -4976,6 +5450,7 @@ async function loadLyricsForTrack(t) {
   }
 }
 
+
 function parseLRC(lrc) {
   const lines = [];
   const re = /\[(\d{1,2}):(\d{2})[\.,](\d{1,3})\](.*)/;
@@ -4992,13 +5467,15 @@ function parseLRC(lrc) {
   return lines.sort((a, b) => a.time - b.time);
 }
 
+
 function renderSyncedLyrics() {
   const el = document.getElementById('fp-lyrics-lines');
   el.innerHTML = '';
   syncedLines.forEach((line, i) => {
     const div = document.createElement('div');
     div.className = 'lyr-line';
-    div.textContent = line.text || '';
+    const trText = (showLyricsTranslation && translatedLines && translatedLines[i]) ? translatedLines[i] : '';
+    div.innerHTML = `<span>${esc(line.text || '')}</span>` + (trText ? `<span class="lyr-sub-tr">${esc(trText)}</span>` : '');
     div.dataset.idx = i;
     div.onclick = () => {
       if (aud.duration) { aud.currentTime = line.time + 0.05; }
@@ -5007,16 +5484,61 @@ function renderSyncedLyrics() {
   });
 }
 
+
 function renderPlainLyrics() {
   const el = document.getElementById('fp-lyrics-lines');
   el.innerHTML = '';
-  plainLines.forEach(line => {
+  plainLines.forEach((line, i) => {
     const div = document.createElement('div');
-    div.className = 'lyr-line past'; // All visible at once
-    div.textContent = line;
+    div.className = 'lyr-line past';
+    const trText = (showLyricsTranslation && translatedLines && translatedLines[i]) ? translatedLines[i] : '';
+    div.innerHTML = `<span>${esc(line || '')}</span>` + (trText ? `<span class="lyr-sub-tr">${esc(trText)}</span>` : '');
     el.appendChild(div);
   });
 }
+
+
+async function toggleLyricsTranslation() {
+  const btn = document.getElementById('btn-lyr-translate');
+  if (showLyricsTranslation) {
+    showLyricsTranslation = false;
+    if (btn) btn.classList.remove('on');
+    if (syncedLines.length) renderSyncedLyrics(); else if (plainLines.length) renderPlainLyrics();
+    return;
+  }
+  const sourceLines = syncedLines.length ? syncedLines.map(l => l.text || '') : plainLines;
+  if (!sourceLines.length) { toast('Сначала дождись загрузки текста'); return; }
+  if (translatedLines && translatedLines.length === sourceLines.length) {
+    showLyricsTranslation = true;
+    if (btn) btn.classList.add('on');
+    if (syncedLines.length) renderSyncedLyrics(); else renderPlainLyrics();
+    return;
+  }
+  const t = qIdx >= 0 ? queue[qIdx] : null;
+  if (!t) return;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Перевожу...'; }
+  try {
+    const r = await fetch('/api/lyrics/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': authStr },
+      body: JSON.stringify({ artist: t.artist || '', title: t.title || '', lines: sourceLines }),
+    });
+    const d = await r.json();
+    if (r.ok && Array.isArray(d.translated)) {
+      translatedLines = d.translated;
+      showLyricsTranslation = true;
+      if (btn) btn.classList.add('on');
+      if (syncedLines.length) renderSyncedLyrics(); else renderPlainLyrics();
+    } else {
+      toast('Перевод временно недоступен', 'warning');
+    }
+  } catch (e) {
+    toast('Ошибка перевода', 'warning');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🌐 Перевод'; }
+  }
+}
+
 
 let lastLyrIdx = -1;
 function startLyricsSync() {
@@ -5047,10 +5569,12 @@ function startLyricsSync() {
   lyricsRaf = requestAnimationFrame(tick);
 }
 
+
 function stopLyricsSync() {
   if (lyricsRaf) { cancelAnimationFrame(lyricsRaf); lyricsRaf = null; }
   lastLyrIdx = -1;
 }
+
 
 let gxLyrHold = 0, gxLyrEl = null, gxLyrP = -1;  // пауза автоскролла, активная строка, прогресс заливки
 function highlightLyricsLine(activeIdx) {
@@ -5068,6 +5592,7 @@ function highlightLyricsLine(activeIdx) {
     lines[activeIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 }
+
 
 // When track changes, reset lyrics state
 function resetLyricsOnTrackChange() {
@@ -5088,6 +5613,7 @@ function resetLyricsOnTrackChange() {
   }
 }
 
+
 // ── SLEEP TIMER ──
 // Таймер сна: круговой циферблат (разметка в #timer-modal) + настоящее
 // плавное затухание громкости перед остановкой вместо резкого обрыва.
@@ -5099,6 +5625,7 @@ let sleepTimerEndAt = 0;        // Date.now() момент срабатыван�
 let sleepTimerTotalMs = 0;      // исходная длительность — для кольца прогресса
 let sleepFadeStarted = false;
 const SLEEP_FADE_SECS = 15;
+
 
 function openSleepTimer() {
   document.getElementById('timer-modal').classList.add('vis');
@@ -5120,6 +5647,7 @@ function executeSleepTimer() {
   if (typeof gxSyncSleepTimerView === 'function') gxSyncSleepTimerView();
   toast('Таймер сна сработал 🌙');
 }
+
 
 // ── VISUALIZER (Canvas) ──
 let visCtx = null, analyser = null, dataArray = null; let isVisActive = false;
@@ -5151,6 +5679,7 @@ function drawVisualizer() {
   }
 }
 
+
 // ── SERVICE WORKER — регистрация ──────────────────────────────────────
 (function registerSW() {
     if (!('serviceWorker' in navigator)) return;
@@ -5172,6 +5701,7 @@ function drawVisualizer() {
         .catch(e => console.warn('[SW] registration failed:', e));
 })();
 
+
 // Проверяем, нет ли более свежей сессии воспроизведения с другого устройства
 // ── Свайп вниз для закрытия модалок-шторок (стандартный паттерн iOS/Telegram) ──
 // Раньше единственный способ закрыть more-modal/queue-modal/eq-panel и т.п.
@@ -5181,6 +5711,7 @@ function initSheetModalSwipe() {
     const grabZone = modal.querySelector('.modal-grabber') || modal.querySelector('.modal-head');
     if (!grabZone) return;
     let dragging = false, startY = 0, dy = 0;
+
 
     grabZone.addEventListener('pointerdown', (e) => {
       if (e.target.closest('.close-modal')) return; // не мешаем клику по крестику
@@ -5207,8 +5738,10 @@ function initSheetModalSwipe() {
 }
 initSheetModalSwipe();
 
+
 // Проверяем, нет ли более свежей сессии воспроизведения с другого устройства
 checkRemotePlaybackState();
+
 
 // ── СИНХРОНИЗАЦИЯ ВОСПРОИЗВЕДЕНИЯ МЕЖДУ УСТРОЙСТВАМИ ──────────────────
 async function syncPlaybackState(force) {
@@ -5229,6 +5762,7 @@ async function syncPlaybackState(force) {
   } catch (e) { /* нет сети — не страшно, синхронизируем в следующий раз */ }
 }
 
+
 async function checkRemotePlaybackState() {
   try {
     const res = await fetch('/api/playback/state?device_id=' + encodeURIComponent(deviceId), {
@@ -5242,6 +5776,7 @@ async function checkRemotePlaybackState() {
     showContinuePrompt(state);
   } catch (e) { /* офлайн при запуске — просто не показываем предложение */ }
 }
+
 
 function showContinuePrompt(state) {
   const t = state.track;
@@ -5274,6 +5809,7 @@ function showContinuePrompt(state) {
   setTimeout(remove, 12000); // не мешаем долго — само скроется
 }
 
+
 // ── Прекэширование следующего трека через SW ──────────────────────────
 function swPrecacheAudio(trackId) {
     if (!trackId) return;
@@ -5283,6 +5819,7 @@ function swPrecacheAudio(trackId) {
     });
 }
 
+
 // ── ОФЛАЙН-СОХРАНЕНИЕ ТРЕКОВ ────────────────────────────────────────
 // Кэш SW (audioStrategy) хранит только байты аудио, поэтому названия/
 // обложки для списка "Сохранено офлайн" держим отдельно в localStorage
@@ -5290,11 +5827,14 @@ function swPrecacheAudio(trackId) {
 // лежит на диске" — источник истины SW, с которым сверяемся через
 // LIST_OFFLINE при каждом запуске.
 
+
 function isOfflineSaved(id) { return !!offlineMeta[String(id)]; }
+
 
 function saveOfflineMeta() {
     try { localStorage.setItem('offline_tracks_meta', JSON.stringify(offlineMeta)); } catch (e) {}
 }
+
 
 async function saveTrackOffline(t) {
     if (!t || !t.id) return;
@@ -5319,6 +5859,7 @@ async function saveTrackOffline(t) {
     updateOfflineMenuState();
 }
 
+
 function removeTrackOffline(id) {
     id = String(id);
     if (!isOfflineSaved(id)) return;
@@ -5329,12 +5870,14 @@ function removeTrackOffline(id) {
     updateOfflineMenuState();
 }
 
+
 function toggleOfflineCurrentTrack() {
     if (qIdx < 0 || !queue[qIdx]) return;
     const t = queue[qIdx];
     if (isOfflineSaved(t.id)) removeTrackOffline(t.id);
     else saveTrackOffline(t);
 }
+
 
 function updateOfflineMenuState() {
     const label = document.getElementById('more-offline-label');
@@ -5343,8 +5886,16 @@ function updateOfflineMenuState() {
     label.textContent = saved ? 'Удалить из офлайна' : 'Сохранить офлайн';
 }
 
+
 function handleOfflineSWMessage(data) {
-    const { type, trackId, reason } = data;
+    const { type, trackId, reason, pct } = data;
+    if (type === 'OFFLINE_PROGRESS') {
+        const label = document.getElementById('more-offline-label');
+        if (label && qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === String(trackId)) {
+            label.textContent = `Скачиваю офлайн… ${pct}%`;
+        }
+        return;
+    }
     if (type === 'OFFLINE_SAVED') {
         offlinePending.delete(String(trackId));
         toast('✅ Сохранено офлайн', 'success');
@@ -5371,10 +5922,12 @@ function handleOfflineSWMessage(data) {
     }
 }
 
+
 function refreshOfflineList() {
     navigator.serviceWorker?.controller?.postMessage({ type: 'LIST_OFFLINE' });
     renderOfflineList(); // рендерим сразу из локальных метаданных, не дожидаясь ответа SW
 }
+
 
 function renderOfflineList() {
     const titleEl = document.getElementById('offline-title');
@@ -5388,6 +5941,7 @@ function renderOfflineList() {
     if (!tracks.length) return;
     appendTracksPaged(tracks, ul, 'offline');
 }
+
 
 // ── EQ + CROSSFADE Audio Graph ────────────────────────────────────────
 //
@@ -5403,15 +5957,18 @@ let srcBuf    = null;   // MediaElementSource для audBuf
 let eqAnalyser = null;  // для живой визуализации спектра в панели эквалайзера (отдельно от analyser полноэкранного визуализатора обложки)
 let _xfadeActive = false;
 
+
 function initAudioCtx() {
     if (actx) return;
     try {
         actx = new (window.AudioContext || window.webkitAudioContext)();
 
+
         // ── Основной трек ──────────────────────────────────────────
         srcNode   = actx.createMediaElementSource(aud);
         gainMain  = actx.createGain();
         gainMain.gain.value = 1.0;
+
 
         // EQ цепочка после gainMain
         let prev = gainMain;
@@ -5425,14 +5982,17 @@ function initAudioCtx() {
             eqFilters.push(f);
         });
 
+
         // ── Буферный трек (crossfade) ──────────────────────────────
         srcBuf    = actx.createMediaElementSource(audBuf);
         gainXfade = actx.createGain();
         gainXfade.gain.value = 0.0;
 
+
         // ── Мастер ────────────────────────────────────────────────
         masterGain = actx.createGain();
         masterGain.gain.value = 1.0;
+
 
         // Анализатор спектра для живой визуализации в панели эквалайзера —
         // включён прямо в основную цепь (masterGain → eqAnalyser → destination),
@@ -5440,6 +6000,7 @@ function initAudioCtx() {
         eqAnalyser = actx.createAnalyser();
         eqAnalyser.fftSize = 64;        // 32 частотных бина — достаточно для компактных полосок
         eqAnalyser.smoothingTimeConstant = 0.75;
+
 
         // Коммутация
         srcNode.connect(gainMain);
@@ -5449,35 +6010,43 @@ function initAudioCtx() {
         masterGain.connect(eqAnalyser);
         eqAnalyser.connect(actx.destination);
 
+
     } catch (e) {
         console.warn('AudioContext init failed:', e);
     }
 }
 
+
 // ── Запуск crossfade (вызывается из timeupdate) ───────────────────────
 const XFADE_SECS = 3.0;   // длительность перехода в секундах
+
 
 function startCrossfade(nextTrack) {
     if (_xfadeActive || !gainMain || !gainXfade || !actx) return;
     if (!audBuf.src || audBuf.src === window.location.href) return;
     _xfadeActive = true;
 
+
     const now = actx.currentTime;
     const dur  = XFADE_SECS;
+
 
     // Плавно затухаем основной трек
     gainMain.gain.cancelScheduledValues(now);
     gainMain.gain.setValueAtTime(gainMain.gain.value, now);
     gainMain.gain.linearRampToValueAtTime(0.0, now + dur);
 
+
     // Плавно нарастаем буферный
     gainXfade.gain.cancelScheduledValues(now);
     gainXfade.gain.setValueAtTime(0.0, now);
     gainXfade.gain.linearRampToValueAtTime(1.0, now + dur);
 
+
     // Запускаем буферный трек
     audBuf.currentTime = 0;
     audBuf.play().catch(() => {});
+
 
     // После crossfade: переключаемся на следующий трек полностью
     setTimeout(() => {
@@ -5501,6 +6070,7 @@ function buildEQ() {
     const lb = document.createElement('div'); lb.className = 'eq-label'; lb.textContent = EQ_LABELS[i]; wrap.appendChild(sl); wrap.appendChild(lb); bars.appendChild(wrap);
   });
 }
+
 
 // ── Живая визуализация спектра ─────────────────────────────────────────
 // Реальные данные из AnalyserNode, включённого прямо в цепь плеера (не
@@ -5537,7 +6107,9 @@ function stopEqVisualizer() {
   document.querySelectorAll('.eq-viz-bar').forEach(b => b.style.height = '2%');
 }
 
+
 function openEQ() { initAudioCtx(); if (actx && actx.state === 'suspended') actx.resume(); buildEQ(); document.getElementById('eq-panel').classList.add('vis'); document.getElementById('overlay').classList.add('vis'); startEqVisualizer(); }
+
 
 // ── PLAYLISTS MODAL ──
 function openPlaylistModal() {
@@ -5567,7 +6139,9 @@ async function createPlaylistByName(name) {
   }
 }
 
+
 let toastT; function toast(msg, type) { const el = document.getElementById('toast'); el.textContent = msg; el.className = 'vis' + (type ? ' toast-' + type : ''); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('vis'), 2000); }
+
 
 // ══ HERO WAVE VISUALIZER — Яндекс Музыка / Aurora Borealis style ══════════
 (function initHeroWave() {
@@ -5575,6 +6149,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   let W = 0, H = 0;
+
 
   // ── Цветовая палитра (lerp к целевым значениям) ──────────────────────────
   // Три основных цвета одновременно — как в Яндекс Музыке
@@ -5584,11 +6159,13 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     { r:80,  g:140, b:255, tr:80,  tg:140, tb:255  },  // blue
   ];
 
+
   function resizeCanvas() {
     W = canvas.offsetWidth || window.innerWidth;
     H = canvas.offsetHeight || 260;
     canvas.width = W; canvas.height = H;
   }
+
 
   // Вызывается снаружи при смене трека
   window.setHeroWaveColor = function(r, g, b) {
@@ -5603,6 +6180,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     colors[2].tg = Math.min(255, ~~(b * 0.7 + r * 0.2));
     colors[2].tb = Math.min(255, ~~(r * 0.5 + g * 0.5));
   };
+
 
   // ── Упрощённый Perlin-like noise (gradient noise 1D) ─────────────────────
   const _perm = new Uint8Array(512);
@@ -5627,6 +6205,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     return v/max;
   }
 
+
   // ── Слои волн ─────────────────────────────────────────────────────────────
   // Каждый слой — отдельная «живая» волна-облако
   const LAYERS = [
@@ -5641,6 +6220,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     { ci:1, yf:0.68, amp:0.26, sx:0.00020, st:0.00045, blur:30,  alpha:0.55, layer:'front'  },
   ];
 
+
   // Живые состояния слоёв
   const state = LAYERS.map((l,i) => ({
     ...l,
@@ -5649,14 +6229,18 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     phaseOffset: i * 1.37,  // разброс начальных фаз
   }));
 
+
   let t = 0;
   let rafId = null;
+
 
   // Текущие аудио-данные
   let bassEnergy = 0, midEnergy = 0, highEnergy = 0, volume = 0;
 
+
   function lerp(a,b,f){ return a+(b-a)*f; }
   function clamp(v,lo,hi){ return v<lo?lo:v>hi?hi:v; }
+
 
   // ── Рисуем одну волну-облако ───────────────────────────────────────────────
   function drawBlob(layer, c, audioScale) {
@@ -5665,7 +6249,9 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     const yBase = yf * H;
     const alpha = layer.alphaLive * clamp(0.6 + volume * 0.4, 0.4, 1.0);
 
+
     const r = ~~c.r, g = ~~c.g, b = ~~c.b;
+
 
     // ── Внешний glow (самый большой blur, почти прозрачный) ──
     if (layer.layer === 'back' || layer.layer === 'far') {
@@ -5676,6 +6262,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
       ctx.fill();
       ctx.restore();
     }
+
 
     // ── Средний glow ──────────────────────────────────────────
     ctx.save();
@@ -5690,6 +6277,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     ctx.fill();
     ctx.restore();
 
+
     // ── Яркое ядро (минимальный blur) ─────────────────────────
     if (layer.layer === 'front' || layer.layer === 'mid') {
       ctx.save();
@@ -5700,6 +6288,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
       ctx.restore();
     }
   }
+
 
   // Вычисляем путь волны через Perlin noise
   function _drawWavePath(yBase, amp, sx, st, phaseOff, W, H) {
@@ -5719,9 +6308,11 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     ctx.closePath();
   }
 
+
   function drawFrame() {
     if (W === 0) resizeCanvas();
     t += 1;
+
 
     // ── Lerp цветов к целевым ─────────────────────────────────
     for (const c of colors) {
@@ -5729,6 +6320,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
       c.g = lerp(c.g, c.tg, 0.025);
       c.b = lerp(c.b, c.tb, 0.025);
     }
+
 
     // ── Читаем аудио-энергию ──────────────────────────────────
     bassEnergy = 0; midEnergy = 0; highEnergy = 0; volume = 0;
@@ -5751,6 +6343,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
       } catch(e){}
     }
 
+
     // ── Обновляем живые параметры слоёв ──────────────────────
     for (const s of state) {
       // Бас расширяет амплитуду нижних слоёв
@@ -5760,14 +6353,17 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
       // Высокие — яркость фронтальных
       const highBoost  = s.layer==='front' ? highEnergy*0.20 : highEnergy*0.05;
 
+
       const targetAmp   = s.amp   * (1 + bassBoost + midBoost);
       const targetAlpha = s.alpha * (1 + highBoost + volume*0.15);
       s.ampLive   = lerp(s.ampLive,   targetAmp,   0.08);
       s.alphaLive = lerp(s.alphaLive, clamp(targetAlpha, 0.05, 0.95), 0.06);
     }
 
+
     // ── Очищаем ───────────────────────────────────────────────
     ctx.clearRect(0, 0, W, H);
+
 
     // Очень тёмный фоновый туман из доминирующего цвета
     const bgGrad = ctx.createRadialGradient(W*0.5, H*0.5, 0, W*0.5, H*0.5, W*0.7);
@@ -5776,6 +6372,7 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
     bgGrad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = bgGrad;
     ctx.fillRect(0, 0, W, H);
+
 
     // ── Рисуем слои от заднего к переднему ───────────────────
     // Порядок: far → back → mid → front
@@ -5787,8 +6384,10 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
       }
     }
 
+
     rafId = requestAnimationFrame(drawFrame);
   }
+
 
   // Start/stop когда вкладка видна
   const observer = new MutationObserver(() => {
@@ -5804,10 +6403,12 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
   if (pw) observer.observe(pw, { attributes:true, attributeFilter:['class'] });
   if (wi) observer.observe(wi, { attributes:true, attributeFilter:['style'] });
 
+
   resizeCanvas();
   rafId = requestAnimationFrame(drawFrame);
   window.addEventListener('resize', () => { resizeCanvas(); });
 })();
+
 
 // Patch applyDominantColor to also update hero wave AND the wave-active visualizer
 const _origApplyColor = applyDominantColor;
@@ -5851,9 +6452,11 @@ applyDominantColor = function(imgUrl) {
   img.src = imgUrl;
 };
 
+
 // ── ARTIST CARD ──
 let artistCardTracks = [];
 let artistCardName = '';
+
 
 function openArtistCard() {
   if (qIdx < 0 || !queue[qIdx]) return;
@@ -5861,6 +6464,7 @@ function openArtistCard() {
   artistCardName = t.artist;
   _acCurrentArtist = t.artist;
   _acSubscribed = false;
+
 
   // Set hero image — use artist_avatar if available, else artwork blurred
   const heroImg = document.getElementById('ac-hero-img');
@@ -5872,20 +6476,24 @@ function openArtistCard() {
   };
   heroImg.style.display = 'block';
 
+
   document.getElementById('ac-name').textContent = t.artist;
   document.getElementById('ac-meta').textContent = '';
   document.getElementById('ac-tracks').innerHTML = '<div class="ac-loading"></div>';
   document.getElementById('ac-genre-tags').innerHTML = '';
   updateSubscribeBtn();
 
+
   // Show card with slide-up from below the full player
   const card = document.getElementById('artist-card');
   card.classList.add('vis');
+
 
   // Fetch artist tracks + subscribe status in parallel
   loadArtistTracks(t.artist, t.artwork_url);
   loadArtistSubscribeStatus(t.artist);
 }
+
 
 function closeArtistCard() {
   const card = document.getElementById('artist-card');
@@ -5898,9 +6506,11 @@ function closeArtistCard() {
   }, 360);
 }
 
+
 let _acAllTracks = [];      // все найденные треки (до 60)
 let _acShownCount = 0;      // сколько сейчас отображается
 const AC_PAGE = 20;         // порция
+
 
 async function loadArtistTracks(artist, fallbackArtwork) {
   artistCardTracks = [];
@@ -5913,11 +6523,13 @@ async function loadArtistTracks(artist, fallbackArtwork) {
   document.getElementById('ac-albums-section').style.display = 'none';
   document.getElementById('ac-releases-section').style.display = 'none';
 
+
   try {
     const r = await fetch(`/api/search?q=${encodeURIComponent(artist)}&limit=90`, { headers: { Authorization: authStr } });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const tracks = await r.json();
     if (!tracks || !tracks.length) throw new Error('empty');
+
 
     const artistLower = artist.toLowerCase().trim();
     const matched = tracks.filter(t =>
@@ -5926,9 +6538,11 @@ async function loadArtistTracks(artist, fallbackArtwork) {
     _acAllTracks = (matched.length >= 3 ? matched : tracks).slice(0, 60);
     artistCardTracks = _acAllTracks;
 
+
     const cnt = _acAllTracks.length;
     document.getElementById('ac-meta').textContent =
       `${cnt} ${cnt === 1 ? 'трек' : cnt < 5 ? 'трека' : 'треков'}`;
+
 
     // Статистика
     const sources = [...new Set(_acAllTracks.map(t => t.source).filter(Boolean))];
@@ -5938,12 +6552,14 @@ async function loadArtistTracks(artist, fallbackArtwork) {
     document.getElementById('ac-stat-sources').textContent = sources.length || 1;
     document.getElementById('ac-stats-row').style.display = 'flex';
 
+
     renderArtistGenreTags(_acAllTracks);
     renderArtistTracks();
     renderArtistAlbums(_acAllTracks);
     renderArtistVideos(_acAllTracks);
     renderArtistReleases(_acAllTracks);
     fetchArtistBio(artist);
+
 
   } catch(e) {
     try {
@@ -5971,12 +6587,14 @@ async function loadArtistTracks(artist, fallbackArtwork) {
   }
 }
 
+
 function acShowMoreTracks() {
   _acShownCount = Math.min(_acShownCount + AC_PAGE, _acAllTracks.length);
   renderArtistTracksSlice(_acShownCount);
   if (_acShownCount >= _acAllTracks.length)
     document.getElementById('ac-show-more').style.display = 'none';
 }
+
 
 function renderArtistGenreTags(tracks) {
   // Извлекаем потенциальные жанры из источников и метаданных
@@ -5998,6 +6616,7 @@ function renderArtistGenreTags(tracks) {
   tagEl.innerHTML = tags.slice(0, 5).map(t => `<div class="ac-genre-tag">${esc(t)}</div>`).join('');
 }
 
+
 function renderArtistTracks() {
   if (!_acAllTracks.length) {
     document.getElementById('ac-tracks').innerHTML = '<div class="ac-empty">Треки не найдены</div>';
@@ -6007,16 +6626,19 @@ function renderArtistTracks() {
   renderArtistTracksSlice(_acShownCount);
 }
 
+
 function renderArtistTracksSlice(showCount) {
   const container = document.getElementById('ac-tracks');
   container.innerHTML = '';
   const slice = _acAllTracks.slice(0, showCount);
+
 
   slice.forEach((t, i) => {
     const isNow = qIdx >= 0 && queue[qIdx] && String(queue[qIdx].id) === String(t.id);
     const coverHtml = t.artwork_url
       ? `<img src="${esc(t.artwork_url)}" loading="lazy">`
       : coverFallbackHTML(t.title, t.artist);
+
 
     const row = document.createElement('div');
     row.className = 'ac-track' + (isNow ? ' now' : '');
@@ -6043,6 +6665,7 @@ function renderArtistTracksSlice(showCount) {
     container.appendChild(row);
   });
 
+
   const showMoreBtn = document.getElementById('ac-show-more');
   if (_acAllTracks.length > showCount) {
     showMoreBtn.textContent = `Ещё ${Math.min(AC_PAGE, _acAllTracks.length - showCount)} треков`;
@@ -6051,6 +6674,7 @@ function renderArtistTracksSlice(showCount) {
     showMoreBtn.style.display = 'none';
   }
 }
+
 
 function renderArtistAlbums(tracks) {
   const albumMap = new Map();
@@ -6061,6 +6685,7 @@ function renderArtistAlbums(tracks) {
   });
   const albums = [...albumMap.values()].slice(0, 10);
   if (!albums.length) return;
+
 
   const scroll = document.getElementById('ac-albums-scroll');
   scroll.innerHTML = '';
@@ -6088,10 +6713,12 @@ function renderArtistAlbums(tracks) {
   document.getElementById('ac-albums-section').style.display = '';
 }
 
+
 function renderArtistVideos(tracks) {
   // Ищем треки с YouTube (видеоклипы)
   const ytTracks = tracks.filter(t => t.source === 'YouTube' || (t.id && String(t.id).startsWith('yt'))).slice(0, 6);
   if (!ytTracks.length) return;
+
 
   const scroll = document.getElementById('ac-videos-scroll');
   scroll.innerHTML = '';
@@ -6121,10 +6748,12 @@ function renderArtistVideos(tracks) {
   document.getElementById('ac-videos-section').style.display = '';
 }
 
+
 function renderArtistReleases(tracks) {
   // Последние 5 уникальных треков как "недавние релизы"
   const recent = tracks.slice(0, 5);
   if (!recent.length) return;
+
 
   const list = document.getElementById('ac-releases-list');
   list.innerHTML = '';
@@ -6154,6 +6783,7 @@ function renderArtistReleases(tracks) {
   document.getElementById('ac-releases-section').style.display = '';
 }
 
+
 async function fetchArtistBio(artist) {
   // Используем Last.fm или Wikipedia API для получения биографии
   try {
@@ -6180,6 +6810,7 @@ function playArtistTracks() {
   setTimeout(renderArtistTracks, 350);
 }
 
+
 function shuffleArtistTracks() {
   if (!_acAllTracks.length) return;
   queue = [..._acAllTracks].sort(() => Math.random() - 0.5);
@@ -6188,11 +6819,13 @@ function shuffleArtistTracks() {
   setTimeout(renderArtistTracks, 350);
 }
 
+
 // Swipe down to close artist card
 (function() {
   const card = document.getElementById('artist-card');
   let acStartY = 0, acStartX = 0, acDragging = false, acCurrentY = 0;
   const tracksScroll = document.getElementById('ac-tracks');
+
 
   card.addEventListener('touchstart', e => {
     // Only start drag from the hero or header area (not tracks scroll)
@@ -6202,6 +6835,7 @@ function shuffleArtistTracks() {
     acDragging = true; acCurrentY = 0;
     card.style.transition = 'none';
   }, { passive: true });
+
 
   card.addEventListener('touchmove', e => {
     if (!acDragging) return;
@@ -6214,6 +6848,7 @@ function shuffleArtistTracks() {
       card.style.transform = `translateY(${travel}px)`;
     }
   }, { passive: true });
+
 
   card.addEventListener('touchend', () => {
     if (!acDragging) return;
@@ -6234,11 +6869,13 @@ let waveAnalyser = null;
 let waveDataArray = null;
 let wavePulseRaf = null;
 
+
 let _waveCanvas = null;
 let _waveCtx = null;
 let _waveR = 255, _waveG = 204, _waveB = 0;
 let _waveTR = 255, _wavesTG = 204, _waveTB = 0;
 let _waveT = 0;
+
 
 function _ensureWaveCanvas() {
     if (_waveCanvas) return;
@@ -6252,9 +6889,11 @@ function _ensureWaveCanvas() {
     _waveCtx = _waveCanvas.getContext('2d');
 }
 
+
 function setWaveColor(r, g, b) {
     _waveTR = r; _wavesTG = g; _waveTB = b;
 }
+
 
 function startWavePulse() {
     if (!actx) return;
@@ -6266,15 +6905,19 @@ function startWavePulse() {
         waveDataArray = new Uint8Array(waveAnalyser.frequencyBinCount);
     }
 
+
     _ensureWaveCanvas();
+
 
     const glowEl  = document.getElementById('wa-pulse-glow');
     const coverEl = document.querySelector('.wa-cover-container');
     const pageWave   = document.getElementById('page-wave');
     const waveActive = document.getElementById('wave-active');
 
+
     function lerp(a,b,f){ return a+(b-a)*f; }
     function clamp(v,lo,hi){ return v<lo?lo:v>hi?hi:v; }
+
 
     // 3 цветовых канала — меняются от обложки
     const C = [
@@ -6282,6 +6925,7 @@ function startWavePulse() {
         {r:200,g:80, b:220, tr:200,tg:80, tb:220 },
         {r:60, g:160,b:255, tr:60, tg:160,tb:255 },
     ];
+
 
     // ── 8 облачных blob-ов вокруг обложки ───────────────────────────────
     // Каждый blob — радиальный градиент (светящееся пятно/облако)
@@ -6302,6 +6946,7 @@ function startWavePulse() {
         { ci:1, angle:3.66, dist:0.45, size:0.90, spd:0.0020, spdR:0.0008, alpha:0.30 },
     ];
 
+
     // Живые состояния каждого blob (размер пульсирует под бит)
     const blobState = BLOBS.map(b => ({
         angle: b.angle,
@@ -6309,6 +6954,7 @@ function startWavePulse() {
         sizeLive: b.size * 0.5,
         alphaLive: b.alpha * 0.4,
     }));
+
 
     // ── Рисуем одно облако ────────────────────────────────────────────
     function drawBlob(ctx, cx, cy, coverR, blob, state, col, bassE, midE) {
@@ -6321,6 +6967,7 @@ function startWavePulse() {
         const sz = state.sizeLive * coverR;
         if (sz <= 0) return;
 
+
         // Внешнее большое свечение (очень мягкое, большой радиус)
         const outerR = sz * 2.2;
         const gOuter = ctx.createRadialGradient(bx, by, 0, bx, by, outerR);
@@ -6331,6 +6978,7 @@ function startWavePulse() {
         ctx.arc(bx, by, outerR, 0, Math.PI * 2);
         ctx.fillStyle = gOuter;
         ctx.fill();
+
 
         // Внутреннее яркое ядро
         const innerR = sz * 0.85;
@@ -6345,15 +6993,18 @@ function startWavePulse() {
         ctx.fill();
     }
 
+
     function pulseLoop() {
         const isVisible = pageWave && pageWave.classList.contains('on') &&
                           waveActive && waveActive.style.display !== 'none';
         const playing = !aud.paused;
 
+
         // Lerp цвета к цели
         _waveR = lerp(_waveR, _waveTR,  0.035);
         _waveG = lerp(_waveG, _wavesTG, 0.035);
         _waveB = lerp(_waveB, _waveTB,  0.035);
+
 
         // Три производных цвета
         C[0].tr=~~_waveR; C[0].tg=~~_waveG; C[0].tb=~~_waveB;
@@ -6365,11 +7016,13 @@ function startWavePulse() {
         C[2].tb=clamp(~~(_waveR*0.40+_waveG*0.60),0,255);
         for(const c of C){ c.r=lerp(c.r,c.tr,0.025); c.g=lerp(c.g,c.tg,0.025); c.b=lerp(c.b,c.tb,0.025); }
 
+
         if(_waveCanvas){
             _waveCanvas.style.opacity = isVisible ? '1' : '0';
             const W=_waveCanvas.offsetWidth||390, H=_waveCanvas.offsetHeight||600;
             if(_waveCanvas.width!==W||_waveCanvas.height!==H){ _waveCanvas.width=W; _waveCanvas.height=H; }
         }
+
 
         // Аудио анализ
         let bass=0, mid=0, high=0, vol=0;
@@ -6389,7 +7042,9 @@ function startWavePulse() {
             vol =clamp(vs/N*2.0,       0,1);
         }
 
+
         _waveT += playing ? 1 : 0.15;
+
 
         // Обновляем состояния blob-ов
         BLOBS.forEach((blob, i) => {
@@ -6400,20 +7055,24 @@ function startWavePulse() {
             const distTarget = blob.dist + Math.sin(_waveT * blob.spdR + blob.angle) * 0.12;
             st.dist = lerp(st.dist, distTarget, 0.04);
 
+
             // Размер реагирует на бас/мид
             const energy = i % 3 === 0 ? bass : (i % 3 === 1 ? mid : high);
             const sizeTarget = blob.size * (playing ? (0.5 + energy * 0.7 + vol * 0.15) : 0.30);
             st.sizeLive = lerp(st.sizeLive, sizeTarget, playing ? 0.10 : 0.03);
+
 
             // Прозрачность тоже пульсирует
             const alphaTarget = blob.alpha * (playing ? (0.6 + energy * 0.5) : 0.25);
             st.alphaLive = lerp(st.alphaLive, alphaTarget, 0.08);
         });
 
+
         // Рисуем
         if(isVisible && _waveCtx && _waveCanvas){
             const W=_waveCanvas.width, H=_waveCanvas.height;
             _waveCtx.clearRect(0,0,W,H);
+
 
             // Находим реальный центр и размер обложки на экране
             // Обложка — 45vw, max 220px, расположена в нижней части wave-active
@@ -6425,10 +7084,12 @@ function startWavePulse() {
             const cy = H * 0.52;
             const coverR = coverSize / 2;
 
+
             BLOBS.forEach((blob, i) => {
                 drawBlob(_waveCtx, cx, cy, coverR, blob, blobState[i], C[blob.ci], bass, mid);
             });
         }
+
 
         // Пульс CSS свечения и масштаб обложки
         if(glowEl){
@@ -6437,12 +7098,17 @@ function startWavePulse() {
         }
         if(coverEl) coverEl.style.transform=`scale(${1 + bass*0.04})`;
 
+
         wavePulseRaf = requestAnimationFrame(pulseLoop);
     }
+
 
     if(wavePulseRaf) cancelAnimationFrame(wavePulseRaf);
     pulseLoop();
 }
+
+
+
 
 
 
@@ -6452,10 +7118,13 @@ function startWavePulse() {
 let activeCollabId = null;       // ID открытого коллаб-плейлиста
 let collabIds = {};              // { plName: collabId } — для личных плейлистов с шарингом
 
+
 // Загружаем сохранённые collab ID из localStorage
 try { collabIds = JSON.parse(localStorage.getItem('collab_ids') || '{}'); } catch(e) {}
 
+
 function saveCollabIds() { localStorage.setItem('collab_ids', JSON.stringify(collabIds)); }
+
 
 // ── Открыть шторку шаринга ─────────────────────────────────────
 async function openShareSheet(plName) {
@@ -6465,12 +7134,14 @@ async function openShareSheet(plName) {
     document.getElementById('collab-sheet-overlay').style.display = 'block';
     haptic();
 
+
     // Если уже есть collab id для этого плейлиста — используем его
     if (collabIds[plName]) {
         activeCollabId = collabIds[plName];
         showCollabLink(plName);
         return;
     }
+
 
     // Иначе создаём новый коллаб-плейлист на сервере
     try {
@@ -6500,6 +7171,7 @@ async function openShareSheet(plName) {
     }
 }
 
+
 function showCollabLink(plName) {
     if (!activeCollabId) return;
     const botUsername = 'Betboomers_bot';  // юзернейм бота
@@ -6509,10 +7181,12 @@ function showCollabLink(plName) {
     document.getElementById('collab-link-text').textContent = link;
 }
 
+
 function closeCollabSheet() {
     document.getElementById('collab-sheet').classList.remove('vis');
     document.getElementById('collab-sheet-overlay').style.display = 'none';
 }
+
 
 function copyCollabLink() {
     const text = document.getElementById('collab-link-text').textContent;
@@ -6527,6 +7201,7 @@ function copyCollabLink() {
     }
 }
 
+
 function shareCollabTg() {
     const text = document.getElementById('collab-link-text').textContent;
     if (text.startsWith('http')) {
@@ -6538,6 +7213,7 @@ function shareCollabTg() {
     }
     closeCollabSheet();
 }
+
 
 // ── Открыть коллаб-плейлист по ссылке ─────────────────────────
 async function openCollabPlaylist(collabId) {
@@ -6553,14 +7229,17 @@ async function openCollabPlaylist(collabId) {
         // ── FIX: обязательно устанавливаем activeCollabId до любого рендера ──
         activeCollabId = collabId;
 
+
         // Показываем как отдельный "виртуальный" плейлист
         // (activeCollabId уже установлен выше)
         currentPl = '🤝 ' + meta.name;
+
 
         // Рендерим как обычный detail с аватарками
         document.getElementById('pls-detail-name').textContent = '🤝 ' + meta.name;
         const cnt = tracks.length;
         document.getElementById('pls-detail-count').textContent = cnt + ' ' + pluralRu(cnt, 'трек', 'трека', 'треков');
+
 
         const cgrid = document.getElementById('pls-detail-cover-grid');
         const covers = tracks.filter(t => t.artwork_url).slice(0, 4);
@@ -6568,26 +7247,32 @@ async function openCollabPlaylist(collabId) {
         else if (covers.length) cgrid.innerHTML = `<img src="${esc(covers[0].artwork_url)}" style="grid-column:1/-1;grid-row:1/-1;width:100%;height:100%;object-fit:cover">`;
         else cgrid.innerHTML = `<div class="pls-detail-cover-emoji">🤝</div>`;
 
+
         // Добавляем коллаб-баннер
         const ul = document.getElementById('pl-list');
         ul.innerHTML = '';
+        window._currentCollabTracks = tracks;
+        window._currentCollabMeta = meta;
         const banner = document.createElement('div');
         banner.className = 'collab-banner';
         banner.innerHTML = `
             <div class="collab-banner-ico">🤝</div>
             <div class="collab-banner-text">
                 <div class="collab-banner-title">Совместный плейлист</div>
-                <div class="collab-banner-sub">Создатель: ${esc(meta.owner_name || 'Неизвестно')}</div>
+                <div class="collab-banner-sub">Создатель: ${esc(meta.owner_name || 'Неизвестно')} · ${tracks.length} тр.</div>
             </div>
+            <button class="collab-banner-btn" style="background:rgba(255,255,255,0.14);color:#fff" onclick="saveCollabToMyPlaylists()">💾 К себе</button>
             <button class="collab-banner-btn" onclick="addCurrentToCollab('${collabId}')">+ Трек</button>
         `;
         ul.appendChild(banner);
 
+
         // Рендерим треки с аватарками добавивших
-        tracks.forEach(t => {
-            const li = makeCollabTrackItem(t, collabId, meta.owner_id);
+        tracks.forEach((t, idx) => {
+            const li = makeCollabTrackItem(t, collabId, meta.owner_id, idx);
             ul.appendChild(li);
         });
+
 
         document.getElementById('pls-grid').style.display = 'none';
         const plsHdr = document.querySelector('.pls-page-header'); if (plsHdr) plsHdr.style.display = 'none';
@@ -6595,6 +7280,7 @@ async function openCollabPlaylist(collabId) {
         document.getElementById('pls-detail').style.display = 'block';
         plsDetailOpen = true;
         nav('playlists');
+
 
         // ── FIX: запоминаем связь "название → collab id" локально ──
         const virtName = '🤝 ' + meta.name;
@@ -6607,10 +7293,12 @@ async function openCollabPlaylist(collabId) {
     }
 }
 
+
 function makeCollabTrackItem(t, collabId, ownerId) {
     const li = document.createElement('li'); li.className = 'track'; li.dataset.id = t.id;
     const cover = t.artwork_url ? `<img src="${esc(t.artwork_url)}" loading="lazy">` : coverFallbackHTML(t.title, t.artist);
     const dur = t.duration ? `<div class="tdur">${esc(t.duration)}</div>` : '';
+
 
     // Аватарка добавившего
     const adderHtml = `<div class="track-adder" title="${esc(t.added_by_name || 'Участник')}">
@@ -6619,6 +7307,7 @@ function makeCollabTrackItem(t, collabId, ownerId) {
             : (t.added_by_name||'?')[0].toUpperCase()
         }
     </div>`;
+
 
     li.innerHTML = `
         <div class="cover">${cover}</div>
@@ -6630,14 +7319,16 @@ function makeCollabTrackItem(t, collabId, ownerId) {
     `;
     li.addEventListener('click', () => {
         haptic();
-        // Играем из треков коллаб-плейлиста
-        queue = Array.from(document.getElementById('pl-list').querySelectorAll('.track'))
-            .map(el => ({ id: el.dataset.id, ...JSON.parse('{"title":"","artist":""}') }));
-        // Просто играем текущий трек
-        queue = [t]; qIdx = 0; playTrack(t, 1);
+        // Играем весь коллаб-плейлист по порядку
+        const fullList = (window._currentCollabTracks && window._currentCollabTracks.length) ? window._currentCollabTracks : [t];
+        queue = [...fullList];
+        qIdx = queue.findIndex(x => String(x.id) === String(t.id));
+        if (qIdx < 0) { queue.unshift(t); qIdx = 0; }
+        playTrack(queue[qIdx], 1);
     });
     return li;
 }
+
 
 // Добавить играющий трек в коллаб-плейлист
 async function addCurrentToCollab(collabId) {
@@ -6655,6 +7346,7 @@ async function addCurrentToCollab(collabId) {
     } catch(e) { toast('Ошибка'); }
 }
 
+
 // ── Кнопка "Поделиться" в хедере плейлиста ────────────────────
 // Автоматически добавляется при открытии обычного плейлиста (см. patchPlsDetail)
 function patchPlsDetailActions() {
@@ -6671,6 +7363,7 @@ function patchPlsDetailActions() {
     actions.appendChild(btn);
 }
 
+
 // Патчим openPlsDetail чтобы кнопка появлялась автоматически
 const _origOpenPlsDetail = openPlsDetail;
 openPlsDetail = function(name) {
@@ -6678,12 +7371,14 @@ openPlsDetail = function(name) {
     setTimeout(patchPlsDetailActions, 50);
 };
 
+
 // ── Обработка deep link ?startapp=collab_XXX / party_XXX ──────────────────
 (function handleStartParam() {
     try {
         // Telegram передаёт startapp через initDataUnsafe.start_param
         // ИЛИ через #tgWebAppStartParam в hash URL (при прямых переходах)
         let startParam = tg.initDataUnsafe?.start_param || '';
+
 
         if (!startParam) {
             // Fallback: парсим hash вручную (для случаев когда Mini App открывается по ссылке)
@@ -6697,6 +7392,7 @@ openPlsDetail = function(name) {
             startParam = urlParams.get('startapp') || urlParams.get('start') || '';
         }
 
+
         if (startParam.startsWith('collab_')) {
             const cid = startParam.replace('collab_', '');
             setTimeout(() => openCollabPlaylist(cid), 900);
@@ -6707,21 +7403,25 @@ openPlsDetail = function(name) {
             localStorage.setItem('party_room_id', pid);
             setTimeout(() => openPartyMode(), 900);
         }
-        // НОВЫЙ БЛОК: Открытие шеринг-трека
+        // Открытие шеринг-трека напрямую по его ID через /api/track/{track_id}
         else if (startParam.startsWith('play_track_')) {
             const trackId = startParam.replace('play_track_', '');
             setTimeout(async () => {
                 toast('Загружаю трек...');
-                const r = await fetch(`/api/search?q=${trackId}`, { headers: { Authorization: authStr } });
-                const tracks = await r.json();
-                const t = tracks.find(x => String(x.id) === trackId) || tracks[0];
-                if (t) {
-                    queue = [t]; qIdx = 0; playTrack(t, 1);
-                }
-            }, 900);
+                try {
+                    const r = await fetch(`/api/track/${encodeURIComponent(trackId)}`, { headers: { Authorization: authStr } });
+                    if (r.ok) {
+                        const t = await r.json();
+                        if (t && t.id) { queue = [t]; qIdx = 0; playTrack(t, 1); openFull(); return; }
+                    }
+                } catch (e) {}
+                toast('Не удалось загрузить трек', 'warning');
+            }, 600);
         }
     } catch(e) { console.error('handleStartParam error:', e); }
 })();
+
+
 
 
 // ── GAPLESS PRE-LOADER ────────────────────────────────────────────────────
@@ -6743,6 +7443,7 @@ async function gaplessPreload(nextTrack) {
         _gaplessBufReady = false;
     }
 }
+
 
 // ══ QUICK GRID (главная) ══════════════════════════════════════
 function renderQuickGrid() {
@@ -6768,6 +7469,7 @@ function renderQuickGrid() {
     }).join('');
 }
 
+
 // ── Приветствие по времени суток ────────────────────────────────
 function setGreeting() {
     const h = new Date().getHours();
@@ -6780,38 +7482,131 @@ function setGreeting() {
 }
 setGreeting();
 
+
 // ══ PARTY MODE ════════════════════════════════════════════════════
 // Хранилище: party state живёт в collab-api (переиспользуем) + доп. поля в localStorage
 // Для простоты без WebSocket — polling каждые 3 сек пока открыт
 let _partyId = null;         // collab ID комнаты
 let _partyPollTimer = null;
+let _partyWs = null;         // WebSocket для живой синхронизации Jam
+let _partyApplyingRemote = false;
 let _partySkipVoted = false;
-let _partyMyUid = null;
-let _partySkipVotes = new Set(); // ID тех, кто проголосовал за скип
+let _partyMyUid = String(tg.initDataUnsafe?.user?.id || 'dev');
+let _partySkipVotes = new Set();
+
+
+function connectPartyWs(roomId) {
+    if (_partyWs) { try { _partyWs.close(); } catch (e) {} _partyWs = null; }
+    if (!roomId) return;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${location.host}/api/party/${encodeURIComponent(roomId)}/ws?auth=${encodeURIComponent(authStr)}`;
+    try {
+        const ws = new WebSocket(wsUrl);
+        _partyWs = ws;
+        ws.onopen = () => {
+            if (qIdx >= 0 && queue[qIdx]) {
+                ws.send(JSON.stringify({
+                    type: 'sync_playback',
+                    track: queue[qIdx],
+                    position_sec: aud.currentTime || 0,
+                    is_playing: !aud.paused,
+                }));
+            }
+        };
+        ws.onmessage = (ev) => {
+            try {
+                const msg = JSON.parse(ev.data);
+                if (msg.type === 'room_state') {
+                    if (Array.isArray(msg.members)) {
+                        renderPartyMembers(msg.members.map(m => ({ added_by_name: m.name, added_by_avatar: m.avatar })));
+                    }
+                    if (Array.isArray(msg.skip_votes)) {
+                        _partySkipVotes = new Set(msg.skip_votes.map(String));
+                        _partySkipVoted = _partySkipVotes.has(_partyMyUid);
+                        const btn = document.getElementById('party-skip-btn');
+                        if (btn) btn.classList.toggle('voted', _partySkipVoted);
+                        updateSkipBar(_partySkipVotes.size, (msg.members || []).length || 1);
+                    }
+                    if (msg.now_playing && String(msg.sender_id || '') !== _partyMyUid) {
+                        const rt = msg.now_playing;
+                        document.getElementById('party-now-title').textContent = rt.title || 'Трек';
+                        document.getElementById('party-now-artist').textContent = rt.artist || '';
+                        const img = document.getElementById('party-now-cover');
+                        if (rt.artwork_url) { img.src = rt.artwork_url; img.style.display = ''; }
+                        // Синхронизируем локальный плеер гостя с комнатой
+                        _partyApplyingRemote = true;
+                        const curId = (qIdx >= 0 && queue[qIdx]) ? String(queue[qIdx].id) : '';
+                        if (curId !== String(rt.id)) {
+                            const idx = queue.findIndex(x => String(x.id) === String(rt.id));
+                            if (idx >= 0) qIdx = idx; else { queue.unshift(rt); qIdx = 0; }
+                            playTrack(rt, 1);
+                        } else {
+                            if (typeof msg.position_sec === 'number' && Math.abs((aud.currentTime || 0) - msg.position_sec) > 2.2) {
+                                aud.currentTime = msg.position_sec;
+                            }
+                            if (msg.is_playing && aud.paused) aud.play().catch(() => {});
+                            else if (!msg.is_playing && !aud.paused) aud.pause();
+                        }
+                        setTimeout(() => { _partyApplyingRemote = false; }, 600);
+                    }
+                } else if (msg.type === 'skip_triggered') {
+                    _partySkipVoted = false;
+                    document.getElementById('party-skip-btn')?.classList.remove('voted');
+                    toast('⏭️ Трек пропущен голосованием!', 'info');
+                    playNext();
+                } else if (msg.type === 'queue_updated') {
+                    refreshPartyState();
+                }
+            } catch (e) {}
+        };
+        ws.onclose = () => { if (_partyWs === ws) _partyWs = null; };
+    } catch (e) {}
+}
+
+
+function sendPartySync() {
+    if (_partyApplyingRemote || !_partyWs || _partyWs.readyState !== 1) return;
+    if (qIdx < 0 || !queue[qIdx]) return;
+    try {
+        _partyWs.send(JSON.stringify({
+            type: 'sync_playback',
+            track: queue[qIdx],
+            position_sec: aud.currentTime || 0,
+            is_playing: !aud.paused,
+        }));
+    } catch (e) {}
+}
+aud.addEventListener('play', sendPartySync);
+aud.addEventListener('pause', sendPartySync);
+aud.addEventListener('seeked', sendPartySync);
+
 
 function openPartyMode() {
     const overlay = document.getElementById('party-overlay');
     overlay.classList.add('vis');
     _partySkipVoted = false;
 
-    // Берём или создаём party room (используем collab API)
+
     const storedId = localStorage.getItem('party_room_id');
     if (storedId) {
         _partyId = storedId;
         document.getElementById('party-room-id').textContent = '# ' + storedId.slice(-6).toUpperCase();
         refreshPartyState();
         startPartyPoll();
+        connectPartyWs(_partyId);
     } else {
         createPartyRoom();
     }
-    // Если играет трек — синхронизируем как текущий
     if (qIdx >= 0 && queue[qIdx]) syncPartyNowPlaying(queue[qIdx]);
 }
+
 
 function closePartyMode() {
     document.getElementById('party-overlay').classList.remove('vis');
     stopPartyPoll();
+    if (_partyWs) { try { _partyWs.close(); } catch (e) {} _partyWs = null; }
 }
+
 
 async function createPartyRoom() {
     try {
@@ -6827,9 +7622,11 @@ async function createPartyRoom() {
             document.getElementById('party-room-id').textContent = '# ' + d.id.slice(-6).toUpperCase();
             refreshPartyState();
             startPartyPoll();
+            connectPartyWs(d.id);
         }
     } catch(e) { toast('Ошибка создания комнаты'); }
 }
+
 
 function copyPartyLink() {
     if (!_partyId) return;
@@ -6840,6 +7637,7 @@ function copyPartyLink() {
     haptic();
 }
 
+
 function startPartyPoll() {
     stopPartyPoll();
     _partyPollTimer = setInterval(refreshPartyState, 3000);
@@ -6847,6 +7645,7 @@ function startPartyPoll() {
 function stopPartyPoll() {
     if (_partyPollTimer) { clearInterval(_partyPollTimer); _partyPollTimer = null; }
 }
+
 
 async function refreshPartyState() {
     if (!_partyId) return;
@@ -6891,6 +7690,7 @@ async function refreshPartyState() {
     } catch(e) {}
 }
 
+
 function renderPartyQueue(tracks, meta) {
     const realTracks = tracks.filter(t => !t.id.toString().startsWith('skip_vote_'));
     const list = document.getElementById('party-queue-list');
@@ -6919,6 +7719,7 @@ function renderPartyQueue(tracks, meta) {
     }).join('') || '<div style="text-align:center;color:var(--text-sec);padding:30px;font-size:14px">Очередь пуста — добавь треки!</div>';
 }
 
+
 function renderPartyMembers(members) {
     const el = document.getElementById('party-members');
     el.innerHTML = members.slice(0, 8).map(m => {
@@ -6927,15 +7728,22 @@ function renderPartyMembers(members) {
     }).join('') + (members.length > 1 ? `<span class="party-members-count">${members.length} участника</span>` : '');
 }
 
+
 function updateSkipBar(votes, total) {
     const pct = total > 0 ? Math.round((votes / Math.max(total,1)) * 100) : 0;
     document.getElementById('party-skip-fill').style.width = pct + '%';
     document.getElementById('party-skip-count').textContent = `${votes} / ${Math.ceil(total/2)} нужно`;
 }
 
+
 async function voteSkip() {
     if (!_partyId) return;
     haptic();
+    if (_partyWs && _partyWs.readyState === 1) {
+        _partyWs.send(JSON.stringify({ type: "vote_skip" }));
+        toast("🗳️ Голос за скип учтён");
+        return;
+    }
     const btn = document.getElementById('party-skip-btn');
     if (_partySkipVoted) {
         // Снять голос
@@ -6963,15 +7771,17 @@ async function voteSkip() {
     await refreshPartyState();
 }
 
+
 async function syncPartyNowPlaying(t) {
     if (!_partyId || !t) return;
-    // Просто обновляем карточку локально
     document.getElementById('party-now-title').textContent = t.title || 'Трек';
     document.getElementById('party-now-artist').textContent = t.artist || '';
     const img = document.getElementById('party-now-cover');
     if (t.artwork_url) { img.src = t.artwork_url; img.style.display = ''; }
     else img.style.display = 'none';
+    sendPartySync();
 }
+
 
 async function removePartyTrack(trackId) {
     if (!_partyId) return;
@@ -6982,6 +7792,7 @@ async function removePartyTrack(trackId) {
     }).catch(()=>{});
     refreshPartyState();
 }
+
 
 // Добавить трек в очередь party
 async function addTrackToParty(t) {
@@ -6997,6 +7808,7 @@ async function addTrackToParty(t) {
             toast('✅ Добавлено в очередь!');
             closePartyAddSheet();
 
+
             // ── FIX: добавляем в локальную очередь воспроизведения ──
             // Проверяем — трека ещё нет в queue?
             const alreadyInQueue = queue.some(q => String(q.id) === String(t.id));
@@ -7009,6 +7821,8 @@ async function addTrackToParty(t) {
                 playTrack(t, 1);
             }
 
+
+            if (_partyWs && _partyWs.readyState === 1) _partyWs.send(JSON.stringify({ type: 'queue_updated' }));
             await refreshPartyState();
         } else {
             toast('Трек уже в очереди');
@@ -7016,12 +7830,14 @@ async function addTrackToParty(t) {
     } catch(e) { toast('Ошибка добавления'); }
 }
 
+
 // Поиск треков для добавления в party
 let _partySearchTimer = null;
 let _partySearchResults = [];
 function _partyAddByIdx(i) {
     if (_partySearchResults[i]) addTrackToParty(_partySearchResults[i]);
 }
+
 
 function searchForParty(q) {
     clearTimeout(_partySearchTimer);
@@ -7051,6 +7867,7 @@ function searchForParty(q) {
     }, 400);
 }
 
+
 function openPartyAddSheet() {
     document.getElementById('party-add-sheet').classList.add('vis');
     document.getElementById('party-add-overlay').style.display = 'block';
@@ -7064,14 +7881,17 @@ function closePartyAddSheet() {
     _partySearchResults = [];
 }
 
+
 // Открыть party по deep link startapp=party_XXX
 // (уже в handleStartParam ниже — добавляем обработку)
 (function patchHandleStartParam() {
     const origEl = document.querySelector('script');
 })();
 
+
 // При смене трека — синхронизируем с party если открыт
 const _origPlayTrack = typeof playTrack === 'function' ? playTrack : null;
+
 
 // ── Офлайн/онлайн индикатор ──────────────────────────────────────────
 (function initOfflineBanner() {
@@ -7088,12 +7908,15 @@ const _origPlayTrack = typeof playTrack === 'function' ? playTrack : null;
     update(); // начальная проверка
 })();
 
+
 // ════════════════════════════════════════════════════════════════
 // ARTIST SUBSCRIBE
 // ════════════════════════════════════════════════════════════════
 
+
 let _acCurrentArtist = '';
 let _acSubscribed = false;
+
 
 async function loadArtistSubscribeStatus(artist) {
     try {
@@ -7104,6 +7927,7 @@ async function loadArtistSubscribeStatus(artist) {
         updateSubscribeBtn();
     } catch(e) {}
 }
+
 
 function updateSubscribeBtn() {
     const btn = document.getElementById('ac-subscribe-btn');
@@ -7116,6 +7940,7 @@ function updateSubscribeBtn() {
         btn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>Подписаться`;
     }
 }
+
 
 async function toggleArtistSubscribe() {
     const artist = _acCurrentArtist;
@@ -7136,11 +7961,14 @@ async function toggleArtistSubscribe() {
     } catch(e) { toast('Ошибка'); }
 }
 
+
 // ════════════════════════════════════════════════════════════════
 // NOTIFICATIONS
 // ════════════════════════════════════════════════════════════════
 
+
 let _notifLoaded = false;
+
 
 async function openNotifPanel() {
     document.getElementById('notif-panel').classList.add('vis');
@@ -7150,9 +7978,11 @@ async function openNotifPanel() {
     document.getElementById('notif-badge').textContent = '';
 }
 
+
 function closeNotifPanel() {
     document.getElementById('notif-panel').classList.remove('vis');
 }
+
 
 async function loadNotifications() {
     try {
@@ -7162,6 +7992,7 @@ async function loadNotifications() {
         renderNotifications(d.notifications || []);
     } catch(e) {}
 }
+
 
 function renderNotifications(notifs) {
     const list = document.getElementById('notif-list');
@@ -7186,6 +8017,7 @@ function renderNotifications(notifs) {
     }).join('');
 }
 
+
 function handleNotifClick(n) {
     haptic();
     if (n.type === 'new_release' && n.payload?.track_id) {
@@ -7199,6 +8031,7 @@ function handleNotifClick(n) {
     }
 }
 
+
 function formatRelTime(dateStr) {
     if (!dateStr) return '';
     try {
@@ -7210,6 +8043,7 @@ function formatRelTime(dateStr) {
         return `${Math.floor(diff/86400)} д назад`;
     } catch(e) { return ''; }
 }
+
 
 async function checkNotifBadge() {
     try {
@@ -7226,14 +8060,17 @@ async function checkNotifBadge() {
     } catch(e) {}
 }
 
+
 // ════════════════════════════════════════════════════════════════
 // FRIENDS
 // ════════════════════════════════════════════════════════════════
+
 
 let _friendsTab = 'friends';
 let _friendsData = { friends: [], incoming: [] };
 let _friendsSearchRes = [];
 let _friendSearchTimer = null;
+
 
 function openFriendsPanel(tab = 'friends') {
     document.getElementById('friends-panel').classList.add('vis');
@@ -7241,9 +8078,11 @@ function openFriendsPanel(tab = 'friends') {
     loadFriends();
 }
 
+
 function closeFriendsPanel() {
     document.getElementById('friends-panel').classList.remove('vis');
 }
+
 
 async function loadFriends() {
     try {
@@ -7257,6 +8096,7 @@ async function loadFriends() {
     } catch(e) {}
 }
 
+
 function switchFriendsTab(tab) {
     _friendsTab = tab;
     document.querySelectorAll('.friends-tab').forEach(el => el.classList.remove('active'));
@@ -7264,6 +8104,7 @@ function switchFriendsTab(tab) {
     document.getElementById('friends-search').style.display = tab === 'search' ? 'block' : 'none';
     renderFriendsTab(tab);
 }
+
 
 function renderFriendsTab(tab) {
     const list = document.getElementById('friends-list');
@@ -7290,6 +8131,7 @@ function renderFriendsTab(tab) {
     }
 }
 
+
 function onFriendsSearch(val) {
     clearTimeout(_friendSearchTimer);
     if (val.trim().length < 2) { _friendsSearchRes = []; renderFriendsSearch([]); return; }
@@ -7301,6 +8143,7 @@ function onFriendsSearch(val) {
         } catch(e) {}
     }, 400);
 }
+
 
 function renderFriendsSearch(results) {
     const list = document.getElementById('friends-list');
@@ -7320,6 +8163,7 @@ function renderFriendsSearch(results) {
     }).join('');
 }
 
+
 async function addFriend(toId, btn) {
     if (btn) { btn.disabled = true; btn.textContent = '...'; }
     try {
@@ -7335,6 +8179,7 @@ async function addFriend(toId, btn) {
     } catch(e) { if (btn) { btn.disabled = false; btn.textContent = '+ Добавить'; } toast('Ошибка'); }
 }
 
+
 async function acceptFriend(fromId) {
     try {
         const r = await fetch('/api/friends/accept', {
@@ -7346,9 +8191,11 @@ async function acceptFriend(fromId) {
     } catch(e) { toast('Ошибка'); }
 }
 
+
 // ── Просмотр треков друга ────────────────────────────────────────────────
 let _ftFriendData = null;
 let _ftActiveTab = 'favs';
+
 
 async function openFriendTracks(uid, name, username, avatar) {
     document.getElementById('ft-name').textContent = name || 'Пользователь';
@@ -7362,14 +8209,17 @@ async function openFriendTracks(uid, name, username, avatar) {
         const r = await fetch(`/api/friends/${uid}/tracks`, { headers: { Authorization: authStr } });
         if (!r.ok) { document.getElementById('ft-list').innerHTML = '<div class="ac-empty">Нет доступа</div>'; return; }
         _ftFriendData = await r.json();
+        renderFriendBlend(_ftFriendData);
         renderFriendTracks(_ftActiveTab);
     } catch(e) { document.getElementById('ft-list').innerHTML = '<div class="ac-empty">Ошибка загрузки</div>'; }
 }
+
 
 function closeFriendTracks() {
     document.getElementById('friend-tracks-panel').classList.remove('vis');
     _ftFriendData = null;
 }
+
 
 function switchFriendTab(tab) {
     _ftActiveTab = tab;
@@ -7377,6 +8227,7 @@ function switchFriendTab(tab) {
     document.getElementById('ftt-' + tab)?.classList.add('active');
     if (_ftFriendData) renderFriendTracks(tab);
 }
+
 
 function renderFriendTracks(tab) {
     const list = document.getElementById('ft-list');
@@ -7399,7 +8250,143 @@ function renderFriendTracks(tab) {
     });
 }
 
+
+
+
+// ── СОХРАНЕНИЕ КОЛЛАБ-ПЛЕЙЛИСТА В ЛИЧНЫЕ ПЛЕЙЛИСТЫ ──────────────────────
+async function saveCollabToMyPlaylists() {
+    const tracks = window._currentCollabTracks || [];
+    const meta = window._currentCollabMeta || {};
+    if (!tracks.length) { toast('Плейлист пока пуст'); return; }
+    const name = ('🤝 ' + (meta.name || 'Коллаб')).slice(0, 50);
+    allData.playlists[name] = [...tracks];
+    localStorage.setItem('music_data', JSON.stringify(allData));
+    renderPlaylists();
+    toast(`✅ Сохранено в «${name}»`, 'success');
+    for (const t of tracks.slice(0, 60)) {
+        fetch('/api/playlist/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': authStr },
+            body: JSON.stringify({ name, track_data: t }),
+        }).catch(() => {});
+    }
+}
+
+
+// ── ОТПРАВКА MP3 В ЛИЧНЫЙ ЧАТ С БОТОМ ───────────────────────────────────
+async function sendTrackToBotChat(track) {
+    const t = track || (qIdx >= 0 ? queue[qIdx] : null);
+    if (!t || !t.id) { toast('Сначала выбери трек', 'warning'); return; }
+    toast('✈️ Отправляю MP3 в чат с ботом…', 'info');
+    try {
+        const r = await fetch('/api/send_to_chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': authStr },
+            body: JSON.stringify({ track_id: String(t.id) }),
+        });
+        const d = await r.json();
+        if (r.ok && d.ok) {
+            toast('✅ MP3 отправлен в личку с ботом!', 'success');
+        } else {
+            toast('⚠️ Не удалось отправить MP3 в чат', 'warning');
+        }
+    } catch (e) {
+        toast('⚠️ Ошибка соединения', 'warning');
+    }
+}
+function sendCurrentTrackToChat() { sendTrackToBotChat(qIdx >= 0 ? queue[qIdx] : null); }
+
+
+// ── ПУБЛИКАЦИЯ ИТОГОВ И ТРЕКОВ В TELEGRAM STORIES ───────────────────────
+function shareWrappedStory() {
+    const u = tg.initDataUnsafe?.user || {};
+    const uid = u.id || '123456789';
+    const uname = u.username || u.first_name || 'meloman';
+    const mediaUrl = `${location.origin}/api/story_card?mode=wrapped&uid=${encodeURIComponent(uid)}&name=${encodeURIComponent(uname)}&t=${Date.now()}`;
+    if (typeof tg.shareToStory === 'function') {
+        try {
+            tg.shareToStory(mediaUrl, { text: '🎧 Моя музыкальная аура в Telegram Music!' });
+            return;
+        } catch (e) {}
+    }
+    window.open(mediaUrl, '_blank');
+    toast('📸 Карточка итогов открыта!', 'success');
+}
+
+
+function shareTrackStory(track) {
+    const t = track || (qIdx >= 0 ? queue[qIdx] : null);
+    if (!t) { toast('Сначала включи трек'); return; }
+    const mediaUrl = `${location.origin}/api/story_card?mode=track&track_id=${encodeURIComponent(t.id)}&t=${Date.now()}`;
+    if (typeof tg.shareToStory === 'function') {
+        try {
+            tg.shareToStory(mediaUrl, { text: `🎵 ${t.artist} — ${t.title}` });
+            return;
+        } catch (e) {}
+    }
+    window.open(mediaUrl, '_blank');
+    toast('📸 Карточка трека открыта!', 'success');
+}
+
+
+// ── СОВМЕСТИМОСТЬ ВКУСОВ С ДРУГОМ (BLEND) ───────────────────────────────
+function renderFriendBlend(friendData) {
+    const wrap = document.getElementById('ft-blend-wrap');
+    if (!wrap || !friendData) return;
+    const myTracks = [...(allData.favs || []), ...(allData.history || [])];
+    const frTracks = [...(friendData.favs || []), ...(friendData.history || [])];
+    if (!myTracks.length || !frTracks.length) {
+        wrap.innerHTML = '';
+        return;
+    }
+    const myIds = new Set(myTracks.map(t => String(t.id)));
+    const myArtists = new Set(myTracks.map(t => (t.artist || '').toLowerCase().trim()).filter(Boolean));
+    const sharedTracks = frTracks.filter(t => myIds.has(String(t.id)));
+    const sharedArtists = [...new Set(frTracks.map(t => (t.artist || '').trim()).filter(a => a && myArtists.has(a.toLowerCase())))];
+
+
+    const trackScore = Math.min(60, sharedTracks.length * 15);
+    const artistScore = Math.min(40, sharedArtists.length * 10);
+    const totalScore = Math.min(99, Math.max(12, trackScore + artistScore));
+    const subText = sharedArtists.length
+        ? `Общие артисты: ${sharedArtists.slice(0, 3).join(', ')}`
+        : 'Собрали микс из ваших любимых треков';
+
+
+    wrap.innerHTML = `
+      <div class="ft-blend-card">
+        <div class="ft-blend-score">${totalScore}%</div>
+        <div class="ft-blend-meta">
+          <div class="ft-blend-title">Совпадение вкусов (Blend)</div>
+          <div class="ft-blend-sub">${esc(subText)}</div>
+        </div>
+        <button class="ft-blend-btn" onclick="haptic();playFriendBlend()">▶️ Микс</button>
+      </div>`;
+}
+
+
+function playFriendBlend() {
+    if (!_ftFriendData) return;
+    const myPool = [...(allData.favs || []), ...(allData.history || []).slice(0, 20)];
+    const frPool = [...(_ftFriendData.favs || []), ...(_ftFriendData.history || []).slice(0, 20)];
+    const seen = new Set();
+    const mix = [];
+    const maxLen = Math.max(myPool.length, frPool.length);
+    for (let i = 0; i < maxLen; i++) {
+        if (frPool[i] && !seen.has(String(frPool[i].id))) { seen.add(String(frPool[i].id)); mix.push(frPool[i]); }
+        if (myPool[i] && !seen.has(String(myPool[i].id))) { seen.add(String(myPool[i].id)); mix.push(myPool[i]); }
+        if (mix.length >= 40) break;
+    }
+    if (!mix.length) { toast('Недостаточно треков для микса'); return; }
+    queue = mix;
+    qIdx = 0;
+    playTrack(queue[0], 1);
+    toast('🎧 Запущен ваш общий Blend-микс!', 'success');
+}
+
+
 loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); setInterval(checkNotifBadge, 60000); });
+
 
 /* ═══════════════════════════════════════════════════════════════════
    GLASS UX PACK (JS): волна прогресса, меню по долгому тапу, акцентный
@@ -7413,6 +8400,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
   const fpVisible = () => { const f = $('full-player'); return !!f && f.classList.contains('vis'); };
+
 
   /* ───────── 1. ВОЛНОВОЙ ПРОГРЕСС ─────────
      Форма волны — стилизованная (псевдослучайная, но стабильная для каждого
@@ -7454,6 +8442,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
       area.addEventListener('touchcancel', off, { passive: true });
     }
   })();
+
 
   /* ───────── 5. АКЦЕНТНЫЙ ЦВЕТ ───────── */
   const ACCENTS = [
@@ -7535,12 +8524,14 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     window.applyDominantColor = function (url) { if (accentMode === 'auto') autoAccentFrom(url); return _adc.apply(this, arguments); };
   }
 
+
   /* ───────── 8. ЖИВАЯ ОБЛОЖКА (пульс + наклон) ───────── */
   const canAskOri = typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function';
   let tiltOn = lsGet('gx_tilt', canAskOri ? '0' : '1') === '1';
   let pulseOn = lsGet('gx_pulse', '1') === '1';
   let ori0 = null, tgtX = 0, tgtY = 0, curX = 0, curY = 0, oriBound = false;
   let fxRaf = 0, bass = 0, lastBass = -1, fxData = null;
+
 
   (function insertGlow() {
     const w = $('fp-cover-wrap'), c = $('fp-cover');
@@ -7599,6 +8590,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   document.addEventListener('visibilitychange', () => { if (!document.hidden && fpVisible()) startFx(); });
   aud.addEventListener('play', () => { if (fpVisible()) startFx(); });
 
+
   document.addEventListener('click', (e) => {
     const sw = e.target.closest && e.target.closest('#gx-sw-tilt, #gx-sw-pulse');
     if (!sw) return;
@@ -7621,6 +8613,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     syncSwitches();
   });
   syncSwitches();
+
 
   /* ───────── 7. РАСКРЫТИЕ ПЛЕЕРА (обложка «летит» из мини-плеера) ───────── */
   function springEasing() {
@@ -7666,6 +8659,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     return r;
   };
 
+
   /* ───────── 6. СВОРАЧИВАЮЩИЕСЯ ШАПКИ ───────── */
   [['page-playlists', '.pls-page-header'], ['page-history', '.hist-page-header'], ['page-search', '.srch-header']].forEach(([pid, sel]) => {
     const page = $(pid), head = page && page.querySelector(sel);
@@ -7677,6 +8671,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     }, { passive: true });
   });
 
+
   /* ───────── 4. КАРАОКЕ: пауза автопрокрутки при ручном скролле ───────── */
   const lyrScroll = $('fp-lyrics-scroll');
   if (lyrScroll) {
@@ -7684,6 +8679,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     lyrScroll.addEventListener('touchstart', hold, { passive: true });
     lyrScroll.addEventListener('wheel', hold, { passive: true });
   }
+
 
   /* ───────── 2. МЕНЮ ПО ДОЛГОМУ ТАПУ ───────── */
   const IC = {
@@ -7696,6 +8692,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     block: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM4 12c0-4.42 3.58-8 8-8 1.85 0 3.55.63 4.9 1.69L5.69 16.9C4.63 15.55 4 13.85 4 12zm8 8c-1.85 0-3.55-.63-4.9-1.69L18.31 7.1C19.37 8.45 20 10.15 20 12c0 4.42-3.58 8-8 8z',
   };
   const item = (a, ic, label, cls) => `<button class="gx-mi ${cls || ''}" data-a="${a}"><svg viewBox="0 0 24 24"><path d="${IC[ic]}"/></svg>${label}</button>`;
+
 
   function addToQueue(t, playNextFlag) {
     const id = String(t.id);
@@ -7730,6 +8727,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
         ${item('next', 'next', 'Играть следующим')}
         ${item('queue', 'queue', 'Добавить в очередь')}
         ${item('fav', 'heart', loved ? 'Убрать из любимых' : 'В любимые', loved ? 'acc' : '')}
+        ${item('mp3', 'play', 'Прислать MP3 файлом в бот')}
         ${item('plist', 'plist', 'В плейлист / Поделиться')}
         ${item('artist', 'person', 'Треки исполнителя')}
         ${item('hide', 'block', 'Скрыть трек', 'danger')}
@@ -7743,6 +8741,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
       else if (a === 'next') addToQueue(t, true);
       else if (a === 'queue') addToQueue(t, false);
       else if (a === 'fav') favToggle(null, esc(JSON.stringify(t)));
+      else if (a === 'mp3') sendTrackToBotChat(t);
       else if (a === 'plist') setTimeout(() => openShareTrackSheet(t), 200);
       else if (a === 'artist') { nav('search'); const q = $('q'); if (q) { q.value = t.artist || ''; doSearch(); } }
       else if (a === 'hide') {
@@ -7757,6 +8756,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     sh.addEventListener('touchmove', (e) => { if (!drag) return; dy = Math.max(0, e.touches[0].clientY - sy); sh.style.transform = `translateY(${dy}px)`; }, { passive: true });
     sh.addEventListener('touchend', () => { if (!drag) return; drag = false; sh.style.transition = ''; if (dy > 90) closeMenu(); else sh.style.transform = ''; });
   }
+
 
   let lpTimer = null, lpStart = null, lpFired = false;
   document.addEventListener('pointerdown', (e) => {
@@ -7782,11 +8782,14 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   // подавляем «обычный» клик, который браузер шлёт после долгого нажатия
   document.addEventListener('click', (e) => { if (lpFired) { lpFired = false; e.stopPropagation(); e.preventDefault(); } }, true);
 
+
   /* ───────── хуки на смену трека ───────── */
   const _pt = window.playTrack;
   window.playTrack = function (t) { try { renderWave(t); } catch (e) {} return _pt.apply(this, arguments); };
   try { const cur = queue[qIdx]; if (cur) renderWave(cur); } catch (e) {}
 })();
+
+
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -7796,6 +8799,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
 (function () {
   'use strict';
   const $ = (id) => document.getElementById(id);
+
 
   /* ───────── сеть: fetch с ретраями + офлайн-баннер ───────── */
   function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -7813,6 +8817,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   }
   window.gxFetchRetry = gxFetchRetry;
 
+
   let netBanner = null;
   function ensureBanner() {
     if (netBanner) return netBanner;
@@ -7827,6 +8832,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     if (autoHideMs) b._t = setTimeout(() => b.classList.remove('vis'), autoHideMs);
   }
   function hideBanner() { if (netBanner) netBanner.classList.remove('vis'); }
+
 
   let gxWasOffline = !navigator.onLine;
   if (gxWasOffline) showBanner('Нет соединения — жду сеть');
@@ -7843,6 +8849,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
       setTimeout(() => playTrack(t, 1), 400);
     }
   });
+
 
   /* ───────── 7. Избранное: офлайн-очередь + слияние с сервером ───────── */
   const FAV_Q_KEY = 'gx_fav_queue';
@@ -7880,6 +8887,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   window.addEventListener('load', () => setTimeout(flushFavQueue, 1500));
   setInterval(flushFavQueue, 45000);
 
+
   const _favToggle = window.favToggle;
   window.favToggle = async function (btn, trackJsonStr) {
     const track = decodeTrackJson(trackJsonStr);
@@ -7889,6 +8897,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     flushFavQueue();
     return r;
   };
+
 
   /* ───────── 3. Запасной источник при сбое трека ───────── */
   // Метим результат подмены флагом на самом объекте (а не глобальным
@@ -7922,8 +8931,10 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     return false;
   };
 
+
   const _pt2 = window.playTrack;
   window.playTrack = function () { gxPendingResume = null; gxPrefetchNext(); return _pt2.apply(this, arguments); };
+
 
   /* ───────── 5. Предзагрузка следующих треков ───────── */
   let _lastPrefetchKey = '';
@@ -7938,6 +8949,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
       body: JSON.stringify({ ids }),
     }).catch(() => {});
   }
+
 
   /* ───────── 1. Автоподсказки ───────── */
   const qInput = $('q'), sugBox = $('gx-suggest');
@@ -7998,6 +9010,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     return _doSearch.apply(this, arguments);
   };
 
+
   /* ───────── 2. Подгрузка результатов при скролле ───────── */
   let gxSearchQuery = '', gxSearchEnded = false, gxSearchLoading = false;
   const SEARCH_PAGE = 30;
@@ -8011,7 +9024,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     const spin = document.createElement('div'); spin.className = 'gx-more-spin'; spin.innerHTML = '<div class="gx-spin"></div>';
     ul.parentElement.appendChild(spin);
     try {
-      const r = await gxFetchRetry('/api/search?q=' + encodeURIComponent(gxSearchQuery) + '&offset=' + have + '&limit=' + SEARCH_PAGE, {}, 2);
+      const r = await gxFetchRetry('/api/search?q=' + encodeURIComponent(gxSearchQuery) + '&source=' + encodeURIComponent(currentSearchSource) + '&offset=' + have + '&limit=' + SEARCH_PAGE, {}, 2);
       const tracks = r.ok ? await r.json() : [];
       if (tracks.length) { appendTracks(tracks, ul, 'search'); updateAllHeartButtons(); }
       if (!tracks.length || tracks.length < SEARCH_PAGE) {
@@ -8028,6 +9041,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
       if (searchPage.scrollTop + searchPage.clientHeight > searchPage.scrollHeight - 700) loadMoreSearch();
     }, { passive: true });
   }
+
 
   /* ───────── 10. Карточка статуса источников ───────── */
   function dotColor(state) { return state === 'ok' ? '#34d399' : state === 'recovering' ? '#60a5fa' : state === 'missing' ? '#888' : '#fb923c'; }
@@ -8080,9 +9094,12 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   document.addEventListener('click', (e) => { if (e.target.closest && e.target.closest('.tab[onclick*="profile"]')) setTimeout(refreshStatusCard, 200); });
   if (location.hash.includes('profile')) setTimeout(refreshStatusCard, 800);
 
+
   window.flushFavQueue = flushFavQueue;
   window.refreshStatusCard = refreshStatusCard;
 })();
+
+
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -8093,6 +9110,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
 (function () {
   'use strict';
   const $ = (id) => document.getElementById(id);
+
 
   /* ───────── Автопродолжение очереди: переключатель ───────── */
   window.gxAutoContinue = localStorage.getItem('gx_autocontinue') !== '0';
@@ -8108,6 +9126,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
       haptic();
     });
   }
+
 
   /* ───────── Круговой таймер сна ───────── */
   const DIAL_CIRC = 2 * Math.PI * 92; // ≈ 578.05
@@ -8126,6 +9145,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   }
   window.gxRenderSleepDial = gxRenderSleepDial;
   window.sleepDialMinutes = 30;
+
 
   (function initDial() {
     const svg = $('gx-dial');
@@ -8153,6 +9173,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     const stopBtn = $('gx-dial-stop'); if (stopBtn) stopBtn.addEventListener('click', () => { haptic(); stopSleepTimer(); });
   })();
 
+
   window.gxSleepTick = gxSleepTick;
   window.gxSyncSleepTimerView = function () {
     const idle = $('gx-timer-idle'), active = $('gx-timer-active');
@@ -8162,6 +9183,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     active.style.display = isActive ? '' : 'none';
     if (isActive) gxSleepTick();
   };
+
 
   function gxSleepTick() {
     if (sleepTimerType !== 'minutes') {
@@ -8181,6 +9203,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     }
     if (remainSec <= SLEEP_FADE_SECS && remainSec > 0 && !sleepFadeStarted) { sleepFadeStarted = true; gxFadeOutForSleep(remainSec); }
   }
+
 
   window.startSleepTimer = function (minutesOrTrack) {
     clearInterval(sleepTimerId); sleepFadeStarted = false;
@@ -8229,6 +9252,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     } catch (e) {}
   };
 
+
   /* ───────── Подтверждающая шторка (переиспользуемая) ───────── */
   function gxConfirm(messageHtml, icon, okLabel, cancelLabel) {
     return new Promise((resolve) => {
@@ -8250,6 +9274,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   }
   window.gxConfirm = gxConfirm;
 
+
   /* ───────── Защита от дублей + частицы у лайка ───────── */
   const GX_NOISE = new Set(['official', 'video', 'audio', 'lyrics', 'lyric', 'hd', 'hq', 'clip', 'клип', 'feat', 'ft', 'prod', 'remix', 'live', 'cover']);
   function gxNormWords(s) {
@@ -8270,6 +9295,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     return null;
   }
   window.gxFindFavDuplicate = gxFindFavDuplicate;
+
 
   function gxHeartParticles(btn) {
     if (!btn || typeof btn.getBoundingClientRect !== 'function') return;
@@ -8295,6 +9321,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     setTimeout(() => { holder.innerHTML = ''; }, 760);
   }
 
+
   const _favToggleDup = window.favToggle;
   window.favToggle = async function (btn, trackJsonStr) {
     const track = decodeTrackJson(trackJsonStr);
@@ -8314,6 +9341,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     return r;
   };
 
+
   /* ───────── Импорт плейлиста по ссылке ───────── */
   window.gxOpenImportSheet = function () {
     $('gx-import-ov')?.classList.add('vis');
@@ -8326,6 +9354,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     $('gx-import-sheet')?.classList.remove('vis');
   };
   $('gx-import-ov')?.addEventListener('click', window.gxCloseImportSheet);
+
 
   async function gxDoImport() {
     const inp = $('gx-import-url'), statusEl = $('gx-import-status'), btn = $('gx-import-go');
@@ -8373,6 +9402,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   }
   $('gx-import-go')?.addEventListener('click', gxDoImport);
 
+
   /* ───────── Pull-to-refresh ───────── */
   function gxInitPullToRefresh(pageId, onRefresh) {
     const page = $(pageId);
@@ -8410,6 +9440,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   gxInitPullToRefresh('page-history', async () => { await loadData(); renderHistory(); toast('Обновлено'); });
   gxInitPullToRefresh('page-profile', async () => { await loadData(); renderFavs(); toast('Обновлено'); });
 
+
   /* ───────── Устойчивость к сворачиванию Telegram ───────── */
   let _gxWasPlaying = false;
   document.addEventListener('visibilitychange', () => {
@@ -8429,6 +9460,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     if (e.persisted) { try { if (typeof actx !== 'undefined' && actx && actx.state === 'suspended') actx.resume(); } catch (err) {} }
   });
 })();
+
 
 </script>
 </body>

@@ -2,23 +2,21 @@
 //  Music App — Service Worker  (Cache-First Architecture)
 //  Версия кэша: при изменении SW всегда меняй VERSION
 // ════════════════════════════════════════════════════════════════════
-const VERSION   = 'v1.3.0';
+const VERSION   = 'v1.4.0';
 const SHELL     = `shell-${VERSION}`;   // App Shell — статика
-const API_CACHE = `api-${VERSION}`;     // API-ответы (поиск, треки, волна)
+const API_CACHE = `api-${VERSION}`;     // API-ответы (поиск, треки, волна, тексты песен)
 const AUD_CACHE = `audio-${VERSION}`;   // Аудиопотоки (авто-кэш при прослушивании, LRU)
-const OFFLINE_CACHE = `offline-${VERSION}`; // Явно сохранённые пользователем треки — не вытесняются автоматической LRU-очисткой AUD_CACHE
+const OFFLINE_CACHE = `offline-${VERSION}`; // Явно сохранённые пользователем треки
 
-// App Shell — файлы, которые кэшируются при установке
 const SHELL_FILES = [
     '/',
     '/index.html',
 ];
 
-// Лимиты кэшей
-const API_MAX   = 60;    // максимум API-записей
-const AUD_MAX   = 15;    // максимум аудиофайлов (~15 × ~5MB = ~75MB)
-const AUD_TTL   = 7 * 24 * 3600 * 1000;  // 7 дней
-const OFFLINE_MAX = 40;  // явных офлайн-сохранений (~40 × ~5MB = ~200MB) — при превышении новое сохранение отклоняется, а не тихо вытесняет старое
+const API_MAX     = 80;
+const AUD_MAX     = 15;
+const AUD_TTL     = 7 * 24 * 3600 * 1000;  // 7 дней
+const OFFLINE_MAX = 40;
 
 // ── INSTALL ──────────────────────────────────────────────────────────
 self.addEventListener('install', event => {
@@ -28,12 +26,12 @@ self.addEventListener('install', event => {
     );
 });
 
-// ── ACTIVATE — удаляем старые кэши ───────────────────────────────────
+// ── ACTIVATE — удаляем старые кэши (сохраняя OFFLINE_CACHE при минорных апдейтах) ──
 self.addEventListener('activate', event => {
     event.waitUntil(
         caches.keys().then(keys =>
             Promise.all(
-                keys.filter(k => ![SHELL, API_CACHE, AUD_CACHE, OFFLINE_CACHE].includes(k))
+                keys.filter(k => ![SHELL, API_CACHE, AUD_CACHE, OFFLINE_CACHE].includes(k) && !k.startsWith('offline-'))
                     .map(k => caches.delete(k))
             )
         ).then(() => self.clients.claim())
@@ -44,28 +42,27 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
     const url = new URL(event.request.url);
 
-    // Только GET запросы
     if (event.request.method !== 'GET') return;
 
-    // ── 1. Аудиопоток /api/stream/... ── Stale-While-Revalidate + офлайн
+    // 1. Аудиопоток /api/stream/...
     if (url.pathname.startsWith('/api/stream/')) {
         event.respondWith(audioStrategy(event.request));
         return;
     }
 
-    // ── 2. API-ответы /api/search, /api/wave, /api/tracks ── Network-First с офлайн-кэшем
+    // 2. API-ответы (/api/search, /api/wave, /api/tracks, /api/lyrics)
     if (url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/stream/')) {
         event.respondWith(apiStrategy(event.request));
         return;
     }
 
-    // ── 3. Обложки и внешние картинки ── Cache-First
+    // 3. Обложки и внешние картинки
     if (isCoverImage(url)) {
         event.respondWith(coverStrategy(event.request));
         return;
     }
 
-    // ── 4. App Shell / index.html ── Cache-First
+    // 4. App Shell / index.html
     if (url.pathname === '/' || url.pathname === '/index.html') {
         event.respondWith(shellStrategy(event.request));
         return;
@@ -76,24 +73,19 @@ self.addEventListener('fetch', event => {
 //  СТРАТЕГИИ
 // ════════════════════════════════════════════════════════════════════
 
-// ── Audio: сперва постоянный офлайн-кэш, потом Cache-First с TTL, фолбек на сеть ──
 async function audioStrategy(request) {
-    // Явно сохранённый пользователем офлайн-трек — отдаём всегда, без TTL
-    // и без похода в сеть (это и есть смысл офлайн-режима).
     const offlineCache = await caches.open(OFFLINE_CACHE);
-    const offlineHit = await offlineCache.match(request);
+    const offlineHit = await offlineCache.match(request, { ignoreSearch: true });
     if (offlineHit) return offlineHit;
 
     const cache = await caches.open(AUD_CACHE);
-    const cached = await cache.match(request);
+    const cached = await cache.match(request, { ignoreSearch: true });
 
     if (cached) {
-        // Проверяем TTL
         const dateHeader = cached.headers.get('sw-cached-at');
         if (dateHeader) {
             const age = Date.now() - parseInt(dateHeader, 10);
             if (age < AUD_TTL) return cached;
-            // TTL истёк — удаляем и идём в сеть
             await cache.delete(request);
         } else {
             return cached;
@@ -103,9 +95,6 @@ async function audioStrategy(request) {
     try {
         const response = await fetch(request.clone());
         if (response.ok && response.status === 200) {
-            // Кэшируем В ФОНЕ: раньше здесь был await на весь arrayBuffer, и
-            // воспроизведение не стартовало, пока трек не скачается целиком
-            // (для свежетранскодируемых треков — десятки секунд тишины).
             const cloned = response.clone();
             (async () => {
                 try {
@@ -119,7 +108,6 @@ async function audioStrategy(request) {
         }
         return response;
     } catch (_) {
-        // Офлайн — возвращаем 503 с читаемым телом
         return new Response(JSON.stringify({ error: 'offline', cached: false }), {
             status: 503,
             headers: { 'Content-Type': 'application/json' },
@@ -127,22 +115,25 @@ async function audioStrategy(request) {
     }
 }
 
-// ── API: Network-First с кэш-фолбеком ─────────────────────────────────
 async function apiStrategy(request) {
     const cache = await caches.open(API_CACHE);
     try {
         const response = await fetch(request.clone());
         if (response.ok) {
-            // Кэшируем только search и wave (не колл-бэки, не истории)
             const url = new URL(request.url);
-            if (url.pathname === '/api/search' || url.pathname === '/api/wave' || url.pathname === '/api/tracks') {
+            if (
+                url.pathname === '/api/search' ||
+                url.pathname === '/api/wave' ||
+                url.pathname === '/api/tracks' ||
+                url.pathname === '/api/lyrics' ||
+                url.pathname.startsWith('/api/track/')
+            ) {
                 await cache.put(request, response.clone());
                 await trimCache(API_CACHE, API_MAX);
             }
         }
         return response;
     } catch (_) {
-        // Офлайн — возвращаем кэшированный ответ если есть
         const cached = await cache.match(request);
         if (cached) return cached;
         return new Response(JSON.stringify({ error: 'offline', cached: false }), {
@@ -152,7 +143,6 @@ async function apiStrategy(request) {
     }
 }
 
-// ── Обложки: Cache-First ──────────────────────────────────────────────
 async function coverStrategy(request) {
     const cache = await caches.open(SHELL);
     const cached = await cache.match(request);
@@ -166,11 +156,9 @@ async function coverStrategy(request) {
     }
 }
 
-// ── App Shell: Cache-First, обновляем в фоне ─────────────────────────
 async function shellStrategy(request) {
     const cache = await caches.open(SHELL);
     const cached = await cache.match(request);
-    // Обновляем в фоне независимо от результата
     const networkFetch = fetch(request.clone()).then(resp => {
         if (resp.ok) cache.put(request, resp.clone());
         return resp;
@@ -183,11 +171,11 @@ async function shellStrategy(request) {
 // ════════════════════════════════════════════════════════════════════
 
 function isCoverImage(url) {
-    // SoundCloud, LastFM, i.scdn.co (Spotify), и т.п.
     return (
         url.hostname.includes('sndcdn.com') ||
         url.hostname.includes('lastfm') ||
         url.hostname.includes('discogs') ||
+        url.hostname.includes('ytimg.com') ||
         url.pathname.match(/\.(jpg|jpeg|png|webp|gif)$/i)
     );
 }
@@ -196,7 +184,6 @@ async function trimCache(cacheName, maxEntries) {
     const cache = await caches.open(cacheName);
     const keys = await cache.keys();
     if (keys.length > maxEntries) {
-        // Удаляем самые старые (первые в списке)
         const toDelete = keys.slice(0, keys.length - maxEntries);
         await Promise.all(toDelete.map(k => cache.delete(k)));
     }
@@ -206,14 +193,13 @@ async function trimCache(cacheName, maxEntries) {
 self.addEventListener('message', event => {
     const { type, payload } = event.data || {};
 
-    // Клиент просит прекэшировать аудио конкретного трека
     if (type === 'PRECACHE_AUDIO') {
         const { trackId } = payload || {};
         if (!trackId) return;
         const url = `/api/stream/${encodeURIComponent(trackId)}`;
         caches.open(AUD_CACHE).then(async cache => {
             const existing = await cache.match(url);
-            if (existing) return;  // уже есть
+            if (existing) return;
             try {
                 const resp = await fetch(url);
                 if (resp.ok && resp.status === 200) {
@@ -222,25 +208,19 @@ self.addEventListener('message', event => {
                     const body = await resp.arrayBuffer();
                     await cache.put(url, new Response(body, { status: 200, headers }));
                     await trimCache(AUD_CACHE, AUD_MAX);
-                    // Уведомляем клиента
                     event.source?.postMessage({ type: 'AUDIO_CACHED', trackId });
                 }
-            } catch (_) { /* нет сети — пропускаем */ }
+            } catch (_) {}
         });
     }
 
-    // Сброс кэша (НЕ трогает OFFLINE_CACHE — это явные сохранения
-    // пользователя, "очистить кэш" не должно тихо удалять офлайн-музыку)
     if (type === 'CLEAR_CACHE') {
         caches.keys().then(keys => Promise.all(
             keys.filter(k => k !== OFFLINE_CACHE).map(k => caches.delete(k))
         )).then(() => event.source?.postMessage({ type: 'CACHE_CLEARED' }));
     }
 
-    // ── Явное офлайн-сохранение трека (кнопка "Сохранить офлайн") ──────
-    // В отличие от PRECACHE_AUDIO (временный кэш с LRU-вытеснением),
-    // здесь трек кладётся в отдельный OFFLINE_CACHE, который не чистится
-    // автоматически — только явным удалением или сверх лимита OFFLINE_MAX.
+    // ── Явное офлайн-сохранение трека с прогрессом скачивания (OFFLINE_PROGRESS) ──
     if (type === 'SAVE_OFFLINE') {
         const { trackId } = payload || {};
         if (!trackId) return;
@@ -263,17 +243,46 @@ self.addEventListener('message', event => {
                     event.source?.postMessage({ type: 'OFFLINE_SAVE_FAILED', trackId, reason: 'network' });
                     return;
                 }
-                const body = await resp.arrayBuffer();
-                // Страховка от "успешного" ответа с пустым/обрезанным телом
-                // (например сервер вернул JSON-ошибку с статусом 200, что
-                // раньше молча кэшировалось как валидный офлайн-трек и потом
-                // тихо не игралось без сети). 15 КБ — заведомо меньше самого
-                // короткого реального аудиофайла.
-                if (body.byteLength < 15000) {
+
+                const contentLength = parseInt(resp.headers.get('Content-Length') || '0', 10);
+                let bodyBuffer;
+
+                if (resp.body && typeof resp.body.getReader === 'function') {
+                    const reader = resp.body.getReader();
+                    const chunks = [];
+                    let received = 0;
+                    let lastSentPct = -1;
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        if (value) {
+                            chunks.push(value);
+                            received += value.byteLength;
+                            const pct = contentLength > 0
+                                ? Math.min(99, Math.round((received / contentLength) * 100))
+                                : Math.min(95, Math.round((received / (4 * 1024 * 1024)) * 100));
+                            if (pct - lastSentPct >= 5) {
+                                lastSentPct = pct;
+                                event.source?.postMessage({ type: 'OFFLINE_PROGRESS', trackId, pct, bytes: received });
+                            }
+                        }
+                    }
+                    const merged = new Uint8Array(received);
+                    let offset = 0;
+                    for (const ch of chunks) {
+                        merged.set(ch, offset);
+                        offset += ch.byteLength;
+                    }
+                    bodyBuffer = merged.buffer;
+                } else {
+                    bodyBuffer = await resp.arrayBuffer();
+                }
+
+                if (bodyBuffer.byteLength < 15000) {
                     event.source?.postMessage({ type: 'OFFLINE_SAVE_FAILED', trackId, reason: 'empty' });
                     return;
                 }
-                await cache.put(url, new Response(body, { status: 200, headers: resp.headers }));
+                await cache.put(url, new Response(bodyBuffer, { status: 200, headers: resp.headers }));
                 event.source?.postMessage({ type: 'OFFLINE_SAVED', trackId });
             } catch (_) {
                 event.source?.postMessage({ type: 'OFFLINE_SAVE_FAILED', trackId, reason: 'error' });
@@ -281,7 +290,6 @@ self.addEventListener('message', event => {
         })();
     }
 
-    // Удалить трек из офлайн-кэша
     if (type === 'REMOVE_OFFLINE') {
         const { trackId } = payload || {};
         if (!trackId) return;
@@ -291,7 +299,6 @@ self.addEventListener('message', event => {
             .then(() => event.source?.postMessage({ type: 'OFFLINE_REMOVED', trackId }));
     }
 
-    // Список id треков, реально сохранённых офлайн (для сверки со списком на клиенте)
     if (type === 'LIST_OFFLINE') {
         caches.open(OFFLINE_CACHE)
             .then(cache => cache.keys())
@@ -299,7 +306,6 @@ self.addEventListener('message', event => {
             .then(ids => event.source?.postMessage({ type: 'OFFLINE_LIST_RESULT', ids }));
     }
 
-    // Запрос статуса кэша
     if (type === 'CACHE_STATUS') {
         Promise.all([
             caches.open(SHELL).then(c => c.keys()).then(k => k.length),
