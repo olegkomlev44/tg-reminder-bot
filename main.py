@@ -1,12 +1,12 @@
 """
 main.py — точка входа бота. Только импорты, регистрация хэндлеров и запуск.
 Вся логика вынесена в отдельные модули:
-  config.py         — константы, CHAT_HISTORY (per-chat), расписание
-  duty_handlers.py  — наряды, расписание, планировщик
-  ai_handlers.py    — Gemini: чат, /meme, /tldr, /poll, /imagen, фото
-  music_handlers.py — музыка, плейлисты, DJ, inline
+  config.py          — константы, CHAT_HISTORY (per-chat), расписание
+  duty_handlers.py   — наряды, расписание, планировщик
+  ai_handlers.py     — Gemini: чат, /meme, /tldr, /poll, /imagen, фото, документы, ГС/кружочки
+  music_handlers.py  — музыка, плейлисты, DJ, inline
   anixart_handler.py — аниме поиск + inline
-  ozon_handler.py   — поиск товаров
+  ozon_handler.py    — поиск товаров
   instagram_handlers.py, feed_handlers.py, media_downloader.py — как раньше
 """
 
@@ -28,7 +28,7 @@ from instagram_handlers import register_ig_handlers, ig_checker_task, ig_session
 from media_downloader import register_media_handlers
 from feed_handlers import register_feed_handlers
 
-# ── Хэндлеры из новых модулей ─────────────────────────────────────────────────
+# ── Хэндлеры из модулей ───────────────────────────────────────────────────────
 from duty_handlers import (
     load_data, auto_delete_later, _startup_selftest,
     cmd_start, cmd_today, cmd_tomorrow, cmd_week, cmd_log, cmd_remind_now, cmd_settings,
@@ -46,7 +46,7 @@ from duty_handlers import (
 )
 from ai_handlers import (
     cmd_weather, cmd_meme, cmd_tldr, cmd_pollinations, cmd_imagen,
-    handle_photo, handle_ai_chat,
+    handle_photo, handle_document, handle_voice, handle_ai_chat,
     cmd_persona, callback_persona_set, cmd_ai,
 )
 from music_handlers import (
@@ -88,12 +88,8 @@ logger.info("🟡 main.py запускается...")
 
 async def _webhook_janitor(bot: Bot, interval: int = 90) -> None:
     """
-    Иногда вебхук боту выставляют уже во время работы (например, сам хостинг —
-    некоторые платформы так «усыпляют» простаивающий процесс). Long polling в
-    этом случае виснет в вечном TelegramConflictError, пока процесс не
-    перезапустят руками. Эта задача каждые `interval` секунд сама проверяет и
-    снимает вебхук, если он появился, — тогда getUpdates восстанавливается
-    без ручного вмешательства.
+    Каждые `interval` секунд проверяет и снимает вебхук, если он появился,
+    чтобы getUpdates не залипал в TelegramConflictError.
     """
     while True:
         try:
@@ -115,12 +111,12 @@ async def cmd_help(message: types.Message) -> None:
         "📋 <b>наряды</b>\n"
         "/наряд — наряд на сегодня\n"
         "/svodki — напомнить сводки прямо сейчас\n"
-        "/dembel — дембельский аккорд\n"
+        "/dembel — дембельский таймер\n"
         "/chatid — узнать id этого чата\n\n"
-        "🧠 <b>ии</b>\n"
-        "/ai — команды ии (ask, roast, debate, story)\n"
+        "🧠 <b>ии (gemini 2.5)</b>\n"
+        "/ai — команды ии (ask, roast, debate, story, memory, forget)\n"
         "/persona — сменить персону бота кнопками\n"
-        "/meme, /tldr, /poll, /imagen — генерация контента\n\n"
+        "/meme, /tldr, /poll, /imagen — генерация и разбор контента\n\n"
         "🎵 <b>музыка</b>\n"
         "/find, /music, /queue, /dj, /playlists, /charts, /wrapped\n\n"
         "🌦 <b>другое</b>\n"
@@ -139,22 +135,16 @@ async def main():
 
     bot = Bot(token=TOKEN)
     _set_bot_ref(bot)
-    await bot.delete_webhook(drop_pending_updates=True)  # снимаем вебхук, если он был выставлен ранее
+    await bot.delete_webhook(drop_pending_updates=True)
     dp  = Dispatcher(storage=MemoryStorage())
 
     # ── Сторонние роутеры ─────────────────────────────────────────────────────
     register_ig_handlers(dp)
     register_feed_handlers(dp)
     register_anixart_handlers(dp)
-    await anixart_startup_selftest()  # пингуем Anixart API и поднимаем sqlite-кэш ещё до polling
+    await anixart_startup_selftest()
 
     # ── Inline ────────────────────────────────────────────────────────────────
-    # Telegram присылает боту ровно один inline_query на запрос. Раньше на это
-    # событие вешались два отдельных хэндлера с противоположными фильтрами
-    # (~startswith / startswith) — победитель зависел от порядка регистрации
-    # и от того, не перехватит ли запрос ещё что-то раньше (ig/feed роутеры).
-    # Теперь один диспетчер сам решает маршрут — единственная точка, которую
-    # нужно смотреть при отладке через логи BotHost.
     async def inline_query_router(iq: types.InlineQuery):
         raw = iq.query or ""
         if raw.strip().startswith("a:"):
@@ -167,28 +157,29 @@ async def main():
     dp.inline_query.register(inline_query_router)
 
     # ── Команды ───────────────────────────────────────────────────────────────
-    dp.message.register(cmd_ozon,         Command("ozon"))
-    dp.message.register(cmd_start,        Command("start"))
-    dp.message.register(cmd_getchatid,    Command("chatid"))
-    dp.message.register(cmd_pollinations, Command("poll"))
-    dp.message.register(cmd_imagen,       Command("imagen"))
-    dp.message.register(cmd_meme,         Command("meme"))
-    dp.message.register(cmd_tldr,         Command("tldr"))
-    dp.message.register(cmd_music_find,   Command("find"))
-    dp.message.register(cmd_charts,       Command("charts"))
+    dp.message.register(cmd_ozon,            Command("ozon"))
+    dp.message.register(cmd_start,           Command("start"))
+    dp.message.register(cmd_getchatid,       Command("chatid"))
+    dp.message.register(cmd_pollinations,    Command("poll"))
+    dp.message.register(cmd_imagen,          Command("imagen"))
+    dp.message.register(cmd_meme,            Command("meme"))
+    dp.message.register(cmd_meme,            F.photo & F.caption.startswith("/meme"))
+    dp.message.register(cmd_tldr,            Command("tldr"))
+    dp.message.register(cmd_music_find,      Command("find"))
+    dp.message.register(cmd_charts,          Command("charts"))
     dp.message.register(cmd_music_dashboard, Command("music"))
-    dp.message.register(cmd_my_music,     Command("my_music"))
-    dp.message.register(cmd_playlists,    Command("playlists"))
-    dp.message.register(cmd_queue,        Command("queue"))
-    dp.message.register(cmd_dj,           Command("dj"))
-    dp.message.register(cmd_wrapped,      Command("wrapped"))
-    dp.message.register(cmd_weather,      Command("pogoda"))
-    dp.message.register(cmd_dembel,       Command("dembel"))
-    dp.message.register(cmd_persona,      Command("persona"))
-    dp.message.register(cmd_ai,           Command("ai"))
-    dp.message.register(cmd_help,         Command("help"))
-    dp.message.register(cmd_today,        Command("наряд"))
-    dp.message.register(cmd_remind_now,   Command("svodki"))
+    dp.message.register(cmd_my_music,        Command("my_music"))
+    dp.message.register(cmd_playlists,       Command("playlists"))
+    dp.message.register(cmd_queue,           Command("queue"))
+    dp.message.register(cmd_dj,              Command("dj"))
+    dp.message.register(cmd_wrapped,         Command("wrapped"))
+    dp.message.register(cmd_weather,         Command("pogoda"))
+    dp.message.register(cmd_dembel,          Command("dembel"))
+    dp.message.register(cmd_persona,         Command("persona"))
+    dp.message.register(cmd_ai,              Command("ai"))
+    dp.message.register(cmd_help,            Command("help"))
+    dp.message.register(cmd_today,           Command("наряд"))
+    dp.message.register(cmd_remind_now,      Command("svodki"))
 
     # ── Кнопки клавиатуры ─────────────────────────────────────────────────────
     dp.message.register(cmd_today,      F.text == "📋 Наряд сегодня")
@@ -199,28 +190,28 @@ async def main():
     dp.message.register(cmd_settings,   F.text == "⚙️ Настройки")
 
     # ── FSM ───────────────────────────────────────────────────────────────────
-    dp.message.register(process_chat_id,      AdminStates.waiting_chat_id)
-    dp.message.register(process_register,     AdminStates.waiting_register)
+    dp.message.register(process_chat_id,       AdminStates.waiting_chat_id)
+    dp.message.register(process_register,      AdminStates.waiting_register)
     dp.message.register(process_playlist_name, MusicStates.waiting_playlist_name)
 
-    # ── Callbacks — наряды ────────────────────────────────────────────────────
-    dp.callback_query.register(callback_done,             F.data.startswith("done:"))
-    dp.callback_query.register(callback_retry,            F.data.startswith("retry:"))
-    dp.callback_query.register(callback_toggle_reminders, F.data == "toggle_reminders")
-    dp.callback_query.register(callback_toggle_ai_replies,F.data == "toggle_ai_replies")
-    dp.callback_query.register(callback_set_chat,         F.data == "set_chat")
-    dp.callback_query.register(callback_register_personal,F.data == "register_personal")
-    dp.callback_query.register(callback_update_pinned,    F.data == "update_pinned")
-    dp.callback_query.register(callback_pick_svodki,      F.data == "pick_svodki")
-    dp.callback_query.register(callback_pick_procedura,   F.data == "pick_procedura")
-    dp.callback_query.register(callback_set_svodki_idx,   F.data.startswith("set_svodki_idx:"))
-    dp.callback_query.register(callback_set_proc_idx,     F.data.startswith("set_proc_idx:"))
-    dp.callback_query.register(callback_show_svodki_list, F.data == "show_svodki_list")
-    dp.callback_query.register(callback_show_procedura_list, F.data == "show_procedura_list")
-    dp.callback_query.register(callback_back_settings,    F.data == "back_settings")
-    dp.callback_query.register(callback_back_main,        F.data == "back_main")
-    dp.callback_query.register(callback_dembel_card,      F.data.startswith("dembel_card:"))
-    dp.callback_query.register(callback_persona_set,      F.data.startswith("persona_set:"))
+    # ── Callbacks — наряды и персоны ──────────────────────────────────────────
+    dp.callback_query.register(callback_done,                 F.data.startswith("done:"))
+    dp.callback_query.register(callback_retry,                F.data.startswith("retry:"))
+    dp.callback_query.register(callback_toggle_reminders,     F.data == "toggle_reminders")
+    dp.callback_query.register(callback_toggle_ai_replies,    F.data == "toggle_ai_replies")
+    dp.callback_query.register(callback_set_chat,             F.data == "set_chat")
+    dp.callback_query.register(callback_register_personal,    F.data == "register_personal")
+    dp.callback_query.register(callback_update_pinned,        F.data == "update_pinned")
+    dp.callback_query.register(callback_pick_svodki,          F.data == "pick_svodki")
+    dp.callback_query.register(callback_pick_procedura,       F.data == "pick_procedura")
+    dp.callback_query.register(callback_set_svodki_idx,       F.data.startswith("set_svodki_idx:"))
+    dp.callback_query.register(callback_set_proc_idx,         F.data.startswith("set_proc_idx:"))
+    dp.callback_query.register(callback_show_svodki_list,     F.data == "show_svodki_list")
+    dp.callback_query.register(callback_show_procedura_list,  F.data == "show_procedura_list")
+    dp.callback_query.register(callback_back_settings,        F.data == "back_settings")
+    dp.callback_query.register(callback_back_main,            F.data == "back_main")
+    dp.callback_query.register(callback_dembel_card,          F.data.startswith("dembel_card:"))
+    dp.callback_query.register(callback_persona_set,          F.data.startswith("persona_set:"))
 
     # ── Callbacks — музыка ────────────────────────────────────────────────────
     dp.callback_query.register(callback_download_music,  F.data.startswith("dl_sc:"))
@@ -253,25 +244,23 @@ async def main():
     dp.callback_query.register(callback_dj_vote,         F.data.startswith("dj_vote:"))
     dp.callback_query.register(callback_dj_finish,       F.data == "dj_finish")
 
-    # Аниме (cmd_anime, все anix:* callbacks, FSM привязки аккаунта) регистрируются
-    # через register_anixart_handlers(dp) выше — единым роутером, чтобы не забывать
-    # вручную добавлять сюда новые хендлеры (как раньше забыли cb_search_page).
-
-    # ── Фото и текст (всегда последними) ─────────────────────────────────────
+    # ── Медиа, документы, ГС/кружочки и текстовый ИИ-чат ──────────────────────
     dp.message.register(handle_photo,    F.photo)
+    dp.message.register(handle_document, F.document)
+    dp.message.register(handle_voice,    F.voice | F.video_note)
     register_media_handlers(dp)
-    dp.message.register(handle_ai_chat, F.text & ~F.text.startswith("/"))
+    dp.message.register(handle_ai_chat,  F.text & ~F.text.startswith("/"))
 
     # ── Планировщик ───────────────────────────────────────────────────────────
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-    scheduler.add_job(send_svodki_reminder,   CronTrigger(hour=18, minute=0,  timezone=TIMEZONE), args=[bot])
-    scheduler.add_job(send_procedura_reminder,CronTrigger(hour=22, minute=0,  timezone=TIMEZONE), args=[bot])
-    scheduler.add_job(send_monday_briefing,   CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=TIMEZONE), args=[bot])
-    scheduler.add_job(send_sunday_summary,    CronTrigger(day_of_week="sun", hour=20, minute=0, timezone=TIMEZONE), args=[bot])
-    scheduler.add_job(daily_pinned_update,    CronTrigger(hour=0, minute=1,   timezone=TIMEZONE), args=[bot])
-    scheduler.add_job(send_retry_reminder,    "interval", minutes=15, args=[bot, "svodki"])
-    scheduler.add_job(send_retry_reminder,    "interval", minutes=15, args=[bot, "proc"])
-    scheduler.add_job(check_anime_episodes,   "interval", hours=4, args=[bot])  # подписки на новые серии
+    scheduler.add_job(send_svodki_reminder,    CronTrigger(hour=18, minute=0,  timezone=TIMEZONE), args=[bot])
+    scheduler.add_job(send_procedura_reminder, CronTrigger(hour=22, minute=0,  timezone=TIMEZONE), args=[bot])
+    scheduler.add_job(send_monday_briefing,    CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=TIMEZONE), args=[bot])
+    scheduler.add_job(send_sunday_summary,     CronTrigger(day_of_week="sun", hour=20, minute=0, timezone=TIMEZONE), args=[bot])
+    scheduler.add_job(daily_pinned_update,     CronTrigger(hour=0, minute=1,   timezone=TIMEZONE), args=[bot])
+    scheduler.add_job(send_retry_reminder,     "interval", minutes=15, args=[bot, "svodki"])
+    scheduler.add_job(send_retry_reminder,     "interval", minutes=15, args=[bot, "proc"])
+    scheduler.add_job(check_anime_episodes,    "interval", hours=4, args=[bot])
     scheduler.start()
 
     asyncio.create_task(ig_checker_task(bot))
