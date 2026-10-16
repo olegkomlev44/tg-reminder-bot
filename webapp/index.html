@@ -955,7 +955,7 @@ body.audio-paused .now-eq span { animation-play-state: paused; transform: scaleY
   margin: 0 10px;
 }
 .fp-lyrics-scroll {
-  padding: 40px 40px 100px; /* Много воздуха вокруг текста для красивого скролла */
+  padding: 32px 22px 100px; /* Много воздуха вокруг текста для красивого скролла */
 }
 
 
@@ -1552,7 +1552,7 @@ audio {
   flex: 1;
   overflow-y: auto;
   /* Формат padding: сверху по-бокам снизу */
-  padding: 32px 50px 80px; 
+  padding: 28px 22px 80px; 
   scrollbar-width: none;
   -webkit-overflow-scrolling: touch;
 }
@@ -2298,7 +2298,7 @@ body.buffering .mi-play::after, body.buffering .fp-play::after {
 #toast {
   background: var(--glass-bg), rgba(20,20,30,0.55); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-border); border-radius: 22px; box-shadow: var(--glass-shadow), 0 10px 30px rgba(0,0,0,0.4);
-  top: max(20px, env(safe-area-inset-top));
+  top: max(20px, var(--gx-safe-top));
 }
 
 
@@ -2530,7 +2530,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 
 /* ── network banner (оффлайн / переподключение) ── */
 #gx-net-banner {
-  position: fixed; left: 12px; right: 12px; z-index: 900; top: max(10px, env(safe-area-inset-top));
+  position: fixed; left: 12px; right: 12px; z-index: 900; top: max(10px, var(--gx-safe-top));
   padding: 10px 16px; border-radius: 18px; font-size: 13px; font-weight: 600; text-align: center;
   color: #fff; background: linear-gradient(160deg, rgba(251,146,60,0.9), rgba(217,119,6,0.9));
   -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
@@ -2753,6 +2753,177 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 }
 
 
+
+/* ═══════════════════════════════════════════════════════════════
+   UX v2 — 4 вкладки, «Моя музыка», Vibe Tuner, док плеера, EQ-кривая,
+   свайпы строк, офлайн-статус, Stories-превью, аура, Party-реакции
+   ═══════════════════════════════════════════════════════════════ */
+:root { --gx-safe-top: calc(var(--tg-safe-area-inset-top, env(safe-area-inset-top, 0px)) + var(--tg-content-safe-area-inset-top, 0px)); }
+#app { padding-top: var(--gx-safe-top); }
+.fp-top, #party-overlay > .party-header { margin-top: var(--gx-safe-top); }
+#notif-panel > :first-child, #friends-panel > :first-child { margin-top: var(--gx-safe-top); }
+
+/* 4 вкладки */
+.tabs .tab { flex: 1; min-width: 0; }
+
+/* ── Моя музыка ── */
+#page-library { padding-bottom: calc(var(--nav-height) + var(--mini-player-height) + 44px); }
+.lib-top { position: sticky; top: 0; z-index: 30; padding: 14px 14px 8px; background: linear-gradient(to bottom, var(--bg) 82%, transparent); }
+.lib-pills { display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; padding-bottom: 10px; }
+.lib-pills::-webkit-scrollbar { display: none; }
+.lib-pill { flex-shrink: 1; border: 1px solid var(--glass-border, rgba(255,255,255,.14)); background: rgba(255,255,255,.07); color: var(--text); flex: 1 1 0; min-width: 0; white-space: nowrap; text-align: center; font: inherit; font-size: 12px; font-weight: 600; padding: 9px 2px; border-radius: 999px; cursor: pointer; transition: background .2s, color .2s, transform .15s; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+.lib-pill:active { transform: scale(.95); }
+.lib-pill.on { background: var(--accent); border-color: var(--accent); color: #000; }
+.lib-filter { display: flex; align-items: center; gap: 8px; padding: 0 12px; height: 40px; border-radius: 14px; background: rgba(255,255,255,.07); color: var(--text-sec); }
+.lib-filter input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--text); font: inherit; font-size: 15px; }
+.lib-filter input::-webkit-search-cancel-button { display: none; }
+.lib-filter-clear { display: none; background: none; border: none; color: var(--text-sec); font-size: 15px; padding: 4px; cursor: pointer; }
+.lib-filter.has-q .lib-filter-clear { display: block; }
+.lib-view { display: none; }
+.lib-view.on { display: block; }
+#page-library .pls-page-header, #page-library .hist-page-header { position: static; background: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+#page-library .pls-page-header::before, #page-library .hist-page-header::before { display: none; }
+
+/* ── Волна: чипы настроения, сцена ── */
+.wave-vibes { width: 100%; max-width: 100%; box-sizing: border-box; justify-content: flex-start; display: flex; gap: 8px; margin-top: 14px; overflow-x: auto; scrollbar-width: none; padding: 2px 0; }
+.wave-vibes::-webkit-scrollbar { display: none; }
+.vibe-chip { flex-shrink: 0; font: inherit; font-size: 13px; font-weight: 600; color: #fff; padding: 8px 13px; border-radius: 999px; border: 1px solid rgba(255,255,255,.22); background: rgba(255,255,255,.12); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); cursor: pointer; transition: background .2s, color .2s, transform .15s; }
+.vibe-chip:active { transform: scale(.94); }
+.vibe-chip.on { background: rgba(255,255,255,.95); border-color: #fff; color: #111; }
+.vibe-scene { border-style: dashed; }
+.wa-collapse { background: rgba(255,255,255,.12); border: none; color: #fff; width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+
+/* ── Мини-плеер: лайк ── */
+.mi-fav { background: none; border: none; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+.mi-fav svg { width: 22px; height: 22px; fill: none; stroke: var(--text-sec); stroke-width: 2; transition: transform .2s cubic-bezier(.34,1.56,.64,1), fill .2s, stroke .2s; }
+.mi-fav.loved svg { fill: var(--accent); stroke: var(--accent); transform: scale(1.1); }
+.mi-fav:active svg { transform: scale(.85); }
+
+/* ── Полный плеер: док ── */
+.fp-ctrl-deco { display: none !important; }
+#fp-upnext { display: none !important; }
+.fp-sub-row { display: none !important; }
+.fp-dock { display: flex; justify-content: space-around; gap: 6px; margin: 6px 16px calc(14px + env(safe-area-inset-bottom, 0px)); padding: 6px; border-radius: 20px; background: rgba(255,255,255,.07); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+.fp-dock-btn { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 8px 2px 7px; background: none; border: none; border-radius: 14px; color: var(--text-sec); font: inherit; font-size: 10.5px; font-weight: 600; cursor: pointer; transition: background .2s, color .2s; }
+.fp-dock-btn svg { width: 22px; height: 22px; fill: currentColor; }
+.fp-dock-btn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.fp-dock-btn:active { background: rgba(255,255,255,.1); }
+.fp-dock-btn.active { color: var(--accent); background: rgba(255,255,255,.1); }
+.fp-dock-badge { position: absolute; top: 3px; right: calc(50% - 22px); min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: #000; font-style: normal; font-size: 10px; font-weight: 800; line-height: 16px; text-align: center; }
+.fp-dock-badge:empty { display: none; }
+
+/* ── Караоке ── */
+.lyr-sub-tr { color: rgba(255,255,255,.74); opacity: .78; transform: translateY(2px); transition: opacity .35s ease, transform .35s ease, color .35s ease; }
+.lyr-line.active .lyr-sub-tr { opacity: 1; transform: translateY(0); color: var(--accent-light); }
+.lyr-line.lyr-sel { background: rgba(255,255,255,.16); border-radius: 12px; box-shadow: 0 0 0 2px var(--accent) inset; }
+#lyr-quote-bar { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 6; display: none; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 18px; background: rgba(20,20,28,.9); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+#lyr-quote-bar.on { display: flex; }
+#lyr-quote-bar .q-info { flex: 1; font-size: 13px; color: var(--text-sec); }
+#lyr-quote-bar button { border: none; border-radius: 12px; padding: 10px 14px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
+#lyr-quote-bar .q-go { background: var(--accent); color: #000; }
+#lyr-quote-bar .q-go[disabled] { opacity: .4; }
+#lyr-quote-bar .q-x { background: rgba(255,255,255,.1); color: var(--text); }
+#btn-lyr-quote.on { background: var(--accent); color: #000; border-color: var(--accent); }
+
+/* ── Эквалайзер ── */
+.eq-fx { display: flex; gap: 8px; margin-bottom: 12px; }
+.eq-fx-btn { flex: 1; font: inherit; font-size: 13px; font-weight: 700; padding: 11px 6px; border-radius: 14px; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.07); color: var(--text); cursor: pointer; transition: background .2s, color .2s, transform .15s; }
+.eq-fx-btn:active { transform: scale(.96); }
+.eq-fx-btn.on { background: var(--accent); border-color: var(--accent); color: #000; }
+.eq-curve-wrap { width: 100%; }
+.eq-curve { width: 100%; height: auto; display: block; user-select: none; -webkit-user-select: none; }
+.eq-grid { stroke: rgba(255,255,255,.1); stroke-width: 1; stroke-dasharray: 3 5; }
+.eq-grid.zero { stroke: rgba(255,255,255,.28); stroke-dasharray: none; }
+.eq-line { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; }
+.eq-area { fill: var(--accent); opacity: .14; stroke: none; }
+.eq-handle { fill: var(--accent); stroke: #fff; stroke-width: 2.5; transition: r .15s; filter: drop-shadow(0 2px 6px rgba(0,0,0,.5)); }
+.eq-handle.drag { r: 16; }
+.eq-hit { fill: transparent; cursor: grab; }
+.eq-lbl { fill: var(--text-sec); font-size: 10px; text-anchor: middle; }
+.eq-val { fill: #fff; font-size: 11px; font-weight: 700; text-anchor: middle; opacity: 0; transition: opacity .15s; pointer-events: none; }
+.eq-val.show { opacity: 1; }
+.eq-timer-btn { margin-top: 10px; width: 100%; padding: 12px; border-radius: 14px; border: none; background: rgba(255,255,255,.07); color: var(--text); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+
+/* ── Свайпы по строкам ── */
+li.track { touch-action: pan-y; }
+li.track.sw-right { box-shadow: -140px 0 0 0 rgba(var(--accent-rgb, 255,204,0), .22); }
+li.track.sw-left { box-shadow: 140px 0 0 0 rgba(255,90,90,.22); }
+li.track.sw-armed.sw-right { box-shadow: -140px 0 0 0 rgba(var(--accent-rgb, 255,204,0), .45); }
+li.track.sw-armed.sw-left { box-shadow: 140px 0 0 0 rgba(255,90,90,.45); }
+
+/* ── Офлайн-индикатор ── */
+.off-ind { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex-shrink: 0; }
+.off-ind:empty { display: none; }
+.off-ring, .off-ok { width: 20px; height: 20px; }
+.off-ring-bg { fill: none; stroke: rgba(255,255,255,.18); stroke-width: 2.4; }
+.off-ring-fg { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; transition: stroke-dashoffset .3s; }
+.off-ok circle { fill: var(--accent); }
+.off-ok path { stroke: #000; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ── Поиск: карточка артиста ── */
+.srch-artist { display: flex; align-items: center; gap: 14px; margin: 4px 16px 12px; padding: 14px; border-radius: 22px; background: var(--glass-bg, rgba(255,255,255,.07)); border: 1px solid var(--glass-border, rgba(255,255,255,.1)); cursor: pointer; }
+.srch-artist:active { opacity: .85; }
+.srch-artist-av { width: 64px; height: 64px; border-radius: 50%; overflow: hidden; flex-shrink: 0; background: rgba(255,255,255,.1); display: flex; align-items: center; justify-content: center; font-size: 26px; }
+.srch-artist-av img { width: 100%; height: 100%; object-fit: cover; }
+.srch-artist-meta { flex: 1; min-width: 0; }
+.srch-artist-kind { font-size: 12px; color: var(--text-sec); font-weight: 600; }
+.srch-artist-name { font-size: 20px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srch-artist-cnt { font-size: 12px; color: var(--text-sec); margin-top: 2px; }
+.srch-artist-play { border: none; border-radius: 999px; background: var(--accent); color: #000; font: inherit; font-size: 14px; font-weight: 700; padding: 10px 16px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.srch-artist-play svg { width: 16px; height: 16px; fill: #000; }
+
+/* ── Профиль: аура + настройки ── */
+.prof-aura { margin: 14px 16px 16px; padding: 18px; border-radius: 26px; color: #fff; position: relative; overflow: hidden; }
+.prof-aura::after { content: ''; position: absolute; inset: 0; background: radial-gradient(circle at 85% 0%, rgba(255,255,255,.22), transparent 55%); pointer-events: none; }
+.prof-aura > * { position: relative; z-index: 1; }
+.aura-title { font-size: 19px; font-weight: 800; }
+.aura-sub { font-size: 13px; opacity: .8; margin-top: 2px; }
+.aura-top3 { display: flex; gap: 10px; margin: 14px 0; }
+.aura-art { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+.aura-art-av { width: 58px; height: 58px; border-radius: 50%; overflow: hidden; background: rgba(0,0,0,.25); display: flex; align-items: center; justify-content: center; font-size: 22px; border: 2px solid rgba(255,255,255,.5); }
+.aura-art-av img { width: 100%; height: 100%; object-fit: cover; }
+.aura-art-name { font-size: 12px; font-weight: 700; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aura-art-cnt { font-size: 11px; opacity: .75; }
+.aura-genres { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.aura-genres span { font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; background: rgba(0,0,0,.28); }
+.aura-btn { width: 100%; border: none; border-radius: 14px; padding: 12px; background: rgba(0,0,0,.32); color: #fff; font: inherit; font-size: 15px; font-weight: 700; cursor: pointer; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.aura-time-slot .prof-listen-time { margin: 0 0 12px; background: rgba(0,0,0,.22); }
+#gx-settings-sheet { max-height: 88vh; }
+#gx-settings-body { overflow-y: auto; -webkit-overflow-scrolling: touch; min-height: 0; }
+#gx-settings-body .gx-card { margin: 0 0 14px; }
+
+/* ── Stories-превью ── */
+#gx-story-ov { position: fixed; inset: 0; z-index: 1200; background: rgba(0,0,0,.7); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); opacity: 0; pointer-events: none; transition: opacity .25s; display: flex; align-items: center; justify-content: center; }
+#gx-story-ov.vis { opacity: 1; pointer-events: all; }
+.gx-story-box { display: flex; flex-direction: column; align-items: center; gap: 14px; width: min(86vw, 340px); transform: translateY(20px) scale(.97); transition: transform .3s cubic-bezier(.22,1,.36,1); }
+#gx-story-ov.vis .gx-story-box { transform: none; }
+.gx-story-box img { width: auto; max-width: 100%; max-height: 62vh; aspect-ratio: 9 / 16; object-fit: cover; border-radius: 22px; box-shadow: 0 18px 50px rgba(0,0,0,.6); background: #111; }
+.gx-story-btns { display: flex; gap: 10px; width: 100%; }
+.gx-story-btns button { flex: 1; border: none; border-radius: 14px; padding: 13px 8px; font: inherit; font-size: 15px; font-weight: 700; cursor: pointer; }
+.gx-story-go { background: var(--accent); color: #000; }
+.gx-story-go[disabled] { opacity: .5; }
+.gx-story-alt { background: rgba(255,255,255,.14); color: #fff; }
+.gx-story-load { color: #fff; font-size: 14px; padding: 60px 0; }
+
+/* ── Party ── */
+#party-overlay { overflow: hidden; }
+.party-bg { position: absolute; inset: -40px; z-index: 0; background-size: cover; background-position: center; filter: blur(50px) brightness(.45) saturate(1.3); transform: scale(1.1); transition: background-image .6s ease; pointer-events: none; }
+#party-overlay > *:not(.party-bg) { z-index: 1; }
+.party-here { display: flex; align-items: center; gap: 8px; margin: 4px 20px -2px; font-size: 13px; font-weight: 700; color: rgba(255,255,255,.75); }
+.party-here-dot { width: 8px; height: 8px; border-radius: 50%; background: #35e07a; box-shadow: 0 0 0 0 rgba(53,224,122,.6); animation: gxHere 1.8s infinite; }
+@keyframes gxHere { 70% { box-shadow: 0 0 0 8px rgba(53,224,122,0); } 100% { box-shadow: 0 0 0 0 rgba(53,224,122,0); } }
+.party-member-av { animation: gxAvPulse 2.4s ease-in-out infinite; box-shadow: 0 0 0 2px rgba(255,255,255,.35); }
+.party-member-av:nth-child(2n) { animation-delay: .5s; }
+.party-member-av:nth-child(3n) { animation-delay: 1s; }
+@keyframes gxAvPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.1); box-shadow: 0 0 0 5px rgba(255,255,255,.18); } }
+.party-react-bar { display: flex; justify-content: space-between; gap: 8px; margin: 10px 16px 4px; padding: 8px; border-radius: 22px; background: rgba(255,255,255,.1); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+.party-react-bar button { flex: 1; border: none; background: none; font-size: 26px; padding: 6px 0; border-radius: 14px; cursor: pointer; transition: transform .15s; }
+.party-react-bar button:active { transform: scale(1.35); background: rgba(255,255,255,.12); }
+#gx-react-layer { position: fixed; inset: 0; z-index: 5000; pointer-events: none; overflow: hidden; }
+.gx-react { position: absolute; bottom: 90px; font-size: 38px; will-change: transform, opacity; animation: gxFloat 2.4s cubic-bezier(.2,.7,.3,1) forwards; filter: drop-shadow(0 4px 10px rgba(0,0,0,.4)); }
+@keyframes gxFloat { 0% { transform: translate(0, 0) scale(.4); opacity: 0; } 12% { opacity: 1; transform: translate(0, -30px) scale(1.15); } 100% { transform: translate(var(--dx, 0px), -62vh) scale(1) rotate(var(--rot, 0deg)); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .party-member-av, .party-here-dot, .gx-react { animation: none; } }
+
 </style>
 </head>
 <body>
@@ -2790,6 +2961,13 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
               Party
             </button>
           </div>
+<div class="wave-vibes" id="wave-vibes">
+<button class="vibe-chip vibe-scene" onclick="haptic();waveSceneToggle(true)" aria-label="Развернуть сцену Волны">🌊 Сцена</button>
+<button class="vibe-chip" data-vibe="energetic" onclick="waveVibePick('energetic')">⚡ Бодрое</button>
+<button class="vibe-chip" data-vibe="calm" onclick="waveVibePick('calm')">🌙 Спокойное</button>
+<button class="vibe-chip" data-vibe="new" onclick="waveVibePick('new')">🔥 Незнакомое</button>
+<button class="vibe-chip" data-vibe="familiar" onclick="waveVibePick('familiar')">❤️ Знакомое</button>
+</div>
         </div>
       </div>
 
@@ -2822,8 +3000,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <div class="wa-bg-color" id="wa-bg-color"></div>
       <div class="wa-bg" id="wa-bg"></div>
       
-      <div class="wa-top">
-        <span>Моя волна</span>
+      <div class="wa-top"><button class="wa-collapse" onclick="haptic();waveSceneToggle(false)" aria-label="Свернуть сцену"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg></button><span>Моя волна</span>
         <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" onclick="haptic();nav('search');"><path d="M15.5 14h-.79l-.28-.27A6.5 6.5 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14"/></svg>
       </div>
 
@@ -2922,12 +3099,28 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <!-- Results -->
     <div id="srch-results" style="display:none">
       <div class="srch-results-meta" id="srch-results-meta"></div>
-      <ul id="search-list"></ul>
+      <div id="srch-artist-slot"></div>
+<ul id="search-list"></ul>
     </div>
   </div>
 
 
-  <div class="page" id="page-playlists">
+  <div class="page" id="page-library">
+<div class="lib-top" id="lib-top">
+  <div class="lib-pills" id="lib-pills">
+    <button class="lib-pill on" data-v="favs" onclick="haptic();libShow('favs')">❤️ Любимое</button>
+    <button class="lib-pill" data-v="playlists" onclick="haptic();libShow('playlists')">📋 Плейлисты</button>
+    <button class="lib-pill" data-v="offline" onclick="haptic();libShow('offline')">📥 Офлайн</button>
+    <button class="lib-pill" data-v="history" onclick="haptic();libShow('history')">🕒 История</button>
+  </div>
+  <div class="lib-filter"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.5 6.5 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg><input id="lib-filter-input" type="search" inputmode="search" enterkeyhint="search" placeholder="Фильтр по моей музыке" oninput="libFilter(this.value)" autocomplete="off"><button class="lib-filter-clear" id="lib-filter-clear" onclick="libFilterClear()" aria-label="Очистить">✕</button></div>
+</div>
+<div class="lib-view on" id="lib-view-favs"><ul id="favs-list"></ul></div>
+<div class="lib-view" id="lib-view-offline">
+  <div class="prof-section" id="offline-title" style="display:none;">Сохранено офлайн <span id="offline-size-hint" style="font-weight:400;font-size:12px;color:var(--text-sec);"></span></div>
+  <ul id="offline-list"></ul>
+</div>
+<div class="lib-view" id="lib-view-playlists">
     <!-- Page header -->
     <div class="pls-page-header">
       <h1 class="pls-page-title">Плейлисты</h1>
@@ -3003,7 +3196,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   </div>
 
 
-  <div class="page" id="page-history">
+  <div class="lib-view" id="lib-view-history">
     <!-- Header -->
     <div class="hist-page-header">
       <div>
@@ -3026,6 +3219,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <!-- flat list (hidden, kept for compat) -->
     <ul id="hist-list" style="display:none"></ul>
   </div>
+</div>
 
 
   <div class="page" id="page-profile">
@@ -3034,6 +3228,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
       <div class="prof-hero-bg" id="prof-hero-bg"></div>
       <div class="prof-hero-particles"></div>
       <div style="position:absolute;top:14px;right:14px;display:flex;gap:10px;z-index:5">
+<button onclick="haptic();gxOpenSettings()" aria-label="Настройки" style="background:rgba(0,0,0,0.4);backdrop-filter:blur(10px);border:none;border-radius:50%;width:38px;height:38px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;cursor:pointer;">⚙️</button>
         <button onclick="haptic();openFriendsPanel()" style="background:rgba(0,0,0,0.4);backdrop-filter:blur(10px);border:none;border-radius:50%;width:38px;height:38px;color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;position:relative">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
         </button>
@@ -3131,19 +3326,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <div class="prof-recent-scroll" id="prof-recent-scroll"></div>
 
 
-    <div class="prof-divider"></div>
-
-
-    <!-- Favs list -->
-    <div class="prof-section">Мне нравится</div>
-    <ul id="favs-list"></ul>
-
-
-    <!-- Offline downloads -->
-    <div class="prof-section" id="offline-title" style="display:none;">
-      Сохранено офлайн <span id="offline-size-hint" style="font-weight:400;font-size:12px;color:var(--text-sec);"></span>
-    </div>
-    <ul id="offline-list"></ul>
+    
   </div>
 
 
@@ -3154,15 +3337,21 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   <div class="tab" onclick="haptic();nav('search')">
     <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.5 6.5 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14"/></svg>Поиск
   </div>
-  <div class="tab" onclick="haptic();nav('playlists')">
-    <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3zm0 4h2v-2H3zm0-8h2V7H3zm4 4h14v-2H7zm0 4h14v-2H7zm0-10v2h14V7z"/></svg>Плейлисты
-  </div>
-  <div class="tab" onclick="haptic();nav('history')">
-    <svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 1 0 9 9h-2a7 7 0 1 1-7-7v4l5-5-5-5z"/></svg>История
+  <div class="tab" onclick="haptic();nav('library')">
+    <svg viewBox="0 0 24 24"><path d="M3 10h11v2H3zm0-4h11v2H3zm0 8h7v2H3zm13-1v8l6-4z"/></svg>Моя музыка
   </div>
   <div class="tab" onclick="haptic();nav('profile')">
     <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>Профиль
   </div>
+</div>
+
+<div id="gx-react-layer"></div>
+
+<div id="gx-settings-ov" class="modal-overlay"></div>
+<div class="sheet-modal" id="gx-settings-sheet">
+  <div class="modal-grabber"></div>
+  <div class="modal-head"><span>⚙️ Настройки</span><button class="close-modal" onclick="gxCloseSettings()">✕</button></div>
+  <div id="gx-settings-body"></div>
 </div>
 
 
@@ -3171,6 +3360,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <div class="mi-cover" id="mini-cover">🎵</div>
     <div class="mi-info"><div class="mi-title" id="mini-title">Выбери трек</div><div class="mi-artist" id="mini-artist"></div></div>
   </div>
+   <button class="mi-fav" id="mini-fav" onclick="event.stopPropagation();haptic();toggleFavFromPlayer();" aria-label="Мне нравится"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></button>
    <button class="mi-play" id="mini-play" onclick="event.stopPropagation(); haptic(); togglePlay();"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
   <div id="mini-prog"><div id="mini-prog-fill"></div></div>
 </div>
@@ -3193,6 +3383,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <div class="fp-lyrics-view" id="fp-lyrics-view">
       <div class="fp-lyrics-toolbar">
         <button class="fp-lyr-tool-btn" id="btn-lyr-translate" onclick="event.stopPropagation();haptic();toggleLyricsTranslation()">🌐 Перевод</button>
+<button class="fp-lyr-tool-btn" id="btn-lyr-quote" onclick="event.stopPropagation();haptic();lyrQuoteToggle()">✂️ Цитата</button>
       </div>
       <div class="fp-lyrics-scroll" id="fp-lyrics-scroll">
         <div class="fp-lyrics-placeholder" id="fp-lyrics-placeholder">
@@ -3225,11 +3416,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   
   <!-- Controls: Яндекс Музыка order: shuffle | prev | play | next | repeat -->
   <div class="fp-ctrl">
-    <span class="fp-ctrl-deco fp-ctrl-deco-heart" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></span>
-    <span class="fp-ctrl-deco fp-ctrl-deco-spark" aria-hidden="true">
-      <svg viewBox="0 0 24 24"><path d="M12 2l1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5z"/></svg>
-      <svg viewBox="0 0 24 24"><path d="M12 2l1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5z"/></svg>
-    </span>
+    
     <button class="fp-ctrl-btn sec-btn" id="btn-shuf" onclick="haptic();toggleShuffle()"><svg viewBox="0 0 24 24"><path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg></button>
     <button class="fp-ctrl-btn" onclick="haptic();playPrev()"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
     <button class="fp-play" id="fp-play" onclick="haptic();togglePlay()"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
@@ -3239,20 +3426,12 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 
 
   <!-- Lyrics toggle button row (как в ЯМ — под кнопками) -->
-  <div class="fp-sub-row">
-    <button class="fp-sub-btn" id="btn-lyrics-toggle" onclick="haptic();toggleLyricsView()">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm1 7V3.5L18.5 9H15zm-3 9H8v-2h4v2zm4-4H8v-2h8v2z"/></svg>
-      Текст
-    </button>
-    <button class="fp-sub-btn" onclick="haptic();dislikeTrack()">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05C1.05 11.5 1 11.74 1 12v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>
-      Не нравится
-    </button>
-    <button class="fp-sub-btn" onclick="haptic();shareTrack()">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg>
-      Поделиться
-    </button>
-  </div>
+  <div class="fp-dock" id="fp-dock">
+<button class="fp-dock-btn" id="btn-lyrics-toggle" onclick="haptic();toggleLyricsView()" aria-label="Текст"><svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm1 7V3.5L18.5 9H15zm-3 9H8v-2h4v2zm4-4H8v-2h8v2z"/></svg><span>Текст</span></button>
+<button class="fp-dock-btn" onclick="haptic();openQueueModal()" aria-label="Очередь"><svg viewBox="0 0 24 24"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg><span>Очередь</span><i class="fp-dock-badge" id="fp-dock-badge"></i></button>
+<button class="fp-dock-btn" onclick="haptic();openEQ()" aria-label="Звук и таймер"><svg viewBox="0 0 24 24"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg><span>Звук · Таймер</span></button>
+<button class="fp-dock-btn" onclick="haptic();shareTrack()" aria-label="Поделиться"><svg viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/></svg><span>Поделиться</span></button>
+</div>
 
 
   <!-- Мини-превью очереди: следующие 1-2 трека без открытия модалки —
@@ -3273,7 +3452,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   <div class="modal-grabber"></div>
   <div class="modal-head"><span>🎚 Эквалайзер</span><button class="close-modal" onclick="closeModals()">✕</button></div>
   <div class="eq-visualizer" id="eq-visualizer"></div>
-  <div class="eq-presets" id="eq-presets"></div><div class="eq-bars" id="eq-bars"></div>
+  <div class="eq-fx" id="eq-fx"></div><div class="eq-presets" id="eq-presets"></div><div class="eq-curve-wrap" id="eq-bars"></div><button class="eq-timer-btn" onclick="haptic();closeModals();openSleepTimer()">🌙 Таймер сна</button>
 </div>
 
 
@@ -3369,6 +3548,10 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
     <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/></svg>
     Очередь воспроизведения
   </button>
+<button class="more-menu-btn" onclick="haptic();closeModals();dislikeTrack()">
+<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05C1.05 11.5 1 11.74 1 12v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>
+Не нравится
+</button>
 </div>
 
 
@@ -3499,6 +3682,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 
 <!-- ══ PARTY MODE ══════════════════════════════════════════════ -->
 <div id="party-overlay">
+  <div class="party-bg" id="party-bg"></div>
   <div class="party-header">
     <div class="party-title">
       <span class="party-title-emoji">🎉</span>
@@ -3515,6 +3699,7 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
 
 
   <!-- Участники -->
+  <div class="party-here"><span class="party-here-dot"></span>Кто сейчас в комнате</div>
   <div class="party-members" id="party-members"></div>
 
 
@@ -3546,6 +3731,9 @@ li.track.gx-pressed { transform: scale(0.97); background: rgba(255,255,255,0.10)
   </div>
 
 
+  <div class="party-react-bar" id="party-react-bar">
+    <button onclick="partyReact('🔥')">🔥</button><button onclick="partyReact('❤️')">❤️</button><button onclick="partyReact('🚀')">🚀</button><button onclick="partyReact('😭')">😭</button><button onclick="partyReact('👏')">👏</button>
+  </div>
   <!-- Очередь -->
   <div class="party-queue-header">
     <span class="party-queue-label">Очередь</span>
@@ -3690,11 +3878,12 @@ try { updateProfileUI(); } catch(e) {}
 
 
 // ── SWIPE LOGIC FOR PAGES ──
-let startX = 0; const pagesEl = document.getElementById('pages'); const tabsOrder = ['wave', 'search', 'playlists', 'history', 'profile'];
-pagesEl.addEventListener('touchstart', e => { startX = e.touches[0].clientX; }, {passive: true});
+let startX = 0, startY = 0, swipeBlocked = false; const SWIPE_IGNORE = '.wave-big-cards, .prof-artists-scroll, .prof-pls-scroll, .prof-recent-scroll, .srch-source-chips, .eq-presets, .wave-vibes, .lib-pills, .home-quick-grid, li.track, input, textarea'; const pagesEl = document.getElementById('pages'); const tabsOrder = ['wave', 'search', 'library', 'profile'];
+pagesEl.addEventListener('touchstart', e => { startX = e.touches[0].clientX; startY = e.touches[0].clientY; swipeBlocked = !!(e.target.closest && e.target.closest(SWIPE_IGNORE)); }, {passive: true});
 pagesEl.addEventListener('touchend', e => {
-  let diff = startX - e.changedTouches[0].clientX;
-  if (Math.abs(diff) > 70) {
+  if (swipeBlocked || window._gxRowSwipe) { swipeBlocked = false; return; }
+  let diff = startX - e.changedTouches[0].clientX; let diffY = startY - e.changedTouches[0].clientY;
+  if (Math.abs(diff) > 70 && Math.abs(diff) > Math.abs(diffY) * 1.4) {
     let curIdx = tabsOrder.findIndex(t => document.getElementById('page-'+t).classList.contains('on'));
     if (diff > 0 && curIdx < tabsOrder.length - 1) { haptic(); nav(tabsOrder[curIdx + 1]); }
     if (diff < 0 && curIdx > 0) { haptic(); nav(tabsOrder[curIdx - 1]); }
@@ -3724,19 +3913,25 @@ const EQ_PRESETS = {
 };
 
 
+var waveScene = false;
 function checkMiniPlayerVis(targetTab) {
-  if (qIdx === -1) return; 
-  if (targetTab === 'wave') {
-    document.getElementById('mini-player').classList.remove('vis');
-    document.getElementById('wave-idle').style.display = 'none';
-    document.getElementById('wave-active').style.display = 'flex';
+  if (qIdx === -1) return;
+  const mpEl = document.getElementById('mini-player');
+  const idle = document.getElementById('wave-idle'), act = document.getElementById('wave-active');
+  if (targetTab !== 'wave') waveScene = false;
+  if (targetTab === 'wave' && waveScene) {
+    mpEl.classList.remove('vis'); idle.style.display = 'none'; act.style.display = 'flex';
   } else {
-    document.getElementById('mini-player').classList.add('vis');
-    document.getElementById('wave-idle').style.display = 'block';
-    document.getElementById('wave-active').style.display = 'none';
+    mpEl.classList.add('vis'); idle.style.display = 'block'; act.style.display = 'none';
   }
 }
+function waveSceneToggle(on) {
+  if (qIdx === -1) { toast('Сначала включи трек'); return; }
+  waveScene = (on === undefined) ? !waveScene : !!on;
+  checkMiniPlayerVis('wave');
+}
 function nav(name) {
+  if (name === 'playlists' || name === 'history' || name === 'favs' || name === 'offline') { try { libShow(name); } catch (e) {} name = 'library'; }
   let newIdx = tabsOrder.indexOf(name);
   document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('on', i === newIdx));
   document.querySelectorAll('.page').forEach((p, i) => {
@@ -3996,12 +4191,13 @@ function renderWaveBigCards(tracks) {
 }
 
 
+var waveVibe = '';
 async function loadWave(reset = false) {
   if (waveLoading) return;
   if (reset) { waveOffset = 0; document.getElementById('wave-list').innerHTML = skeletonTracksHTML(6); document.getElementById('wave-big-cards').innerHTML = ''; }
   waveLoading = true; document.getElementById('wave-more').style.display = 'flex';
   try {
-    const r = await fetch(`/api/wave?limit=20&offset=${waveOffset}`, {headers:{Authorization: authStr}});
+    const r = await fetch(`/api/wave?limit=20&offset=${waveOffset}${waveVibe ? '&vibe=' + encodeURIComponent(waveVibe) : ''}`, {headers:{Authorization: authStr}});
     const tracks = await r.json();
     if (reset) document.getElementById('wave-list').innerHTML = ''; // убираем skeleton перед вставкой реальных данных
     if (tracks.length) {
@@ -4056,12 +4252,12 @@ function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;
 // неотличимо друг от друга. Вместо этого генерируем стабильный (по хэшу
 // title+artist) двухцветный градиент — один и тот же трек всегда получает
 // один и тот же цвет, а разные треки без обложек визуально различаются.
-const COVER_PALETTES = [
+function _coverPalettes() { return [
   ['#ff6b6b', '#feca57'], ['#48dbfb', '#0abde3'], ['#1dd1a1', '#10ac84'],
   ['#f368e0', '#ff9ff3'], ['#5f27cd', '#a29bfe'], ['#ff9f43', '#ee5253'],
   ['#00d2d3', '#54a0ff'], ['#c8d6e5', '#8395a7'], ['#ffcc00', '#ff9500'],
   ['#576574', '#222f3e'],
-];
+]; }
 function _hashStr(s) {
   let h = 0;
   for (let i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h |= 0; }
@@ -4069,7 +4265,7 @@ function _hashStr(s) {
 }
 function coverFallbackHTML(title, artist) {
   const key = `${title || ''}::${artist || ''}`;
-  const [c1, c2] = COVER_PALETTES[_hashStr(key) % COVER_PALETTES.length];
+  const _pal = _coverPalettes(); const [c1, c2] = _pal[_hashStr(key) % _pal.length];
   return `<div class="cover-fallback" style="background:linear-gradient(135deg, ${c1}, ${c2});"><svg viewBox="0 0 24 24" width="46%" height="46%" fill="rgba(255,255,255,0.85)"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg></div>`;
 }
 // Вызывается из onerror сломанной <img> — читает title/artist из data-атрибутов
@@ -4094,6 +4290,7 @@ function renderUpNext() {
   const wrap = document.getElementById('fp-upnext');
   const list = document.getElementById('fp-upnext-list');
   if (!wrap || !list) return;
+  try { const b = document.getElementById('fp-dock-badge'); if (b) { const n = Math.max(0, queue.length - qIdx - 1); b.textContent = n > 0 ? String(n) : ''; } } catch (e) {}
   const upcoming = queue.slice(qIdx + 1, qIdx + 3);
   if (!upcoming.length) { wrap.style.display = 'none'; return; }
   wrap.style.display = '';
@@ -4115,6 +4312,20 @@ function sourceBadgeHTML(source) {
 }
 
 
+var offlinePct = {};
+function offIndInner(id) {
+  const k = String(id);
+  if (typeof offlinePending !== 'undefined' && offlinePending.has(k)) {
+    const pct = Math.max(2, Math.min(100, offlinePct[k] || 0)); const C = 2 * Math.PI * 8;
+    return `<svg viewBox="0 0 20 20" class="off-ring"><circle cx="10" cy="10" r="8" class="off-ring-bg"/><circle cx="10" cy="10" r="8" class="off-ring-fg" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${(C * (1 - pct / 100)).toFixed(1)}" transform="rotate(-90 10 10)"/></svg>`;
+  }
+  if (isOfflineSaved(k)) return '<svg viewBox="0 0 20 20" class="off-ok"><circle cx="10" cy="10" r="9"/><path d="M5.8 10.3l3 3 5.4-6" fill="none"/></svg>';
+  return '';
+}
+function offIndHTML(id) { return `<span class="off-ind" data-oid="${esc(String(id))}">${offIndInner(id)}</span>`; }
+function refreshOffInds(id) {
+  document.querySelectorAll('.off-ind').forEach(el => { if (id === undefined || id === null || el.dataset.oid === String(id)) el.innerHTML = offIndInner(el.dataset.oid); });
+}
 function makeItem(t, ctx) {
   const li = document.createElement('li'); li.className = 'track'; li.dataset.id = t.id;
   const trackJson = esc(JSON.stringify(t)); li.dataset.json = trackJson; 
@@ -4131,7 +4342,7 @@ function makeItem(t, ctx) {
     : `<button class="fav-btn ${loved ? 'loved' : ''}" onclick="haptic();event.stopPropagation();favToggle(this, '${trackJson}')"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54z"/></svg></button>`;
 
 
-  li.innerHTML = `<div class="cover">${cover}${badge}<div class="now-eq"><span></span><span></span><span></span><span></span></div></div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><div class="tright">${durationHtml}${rightBtn}</div>`;
+  li.innerHTML = `<div class="cover">${cover}${badge}<div class="now-eq"><span></span><span></span><span></span><span></span></div></div><div class="tmeta"><div class="ttitle">${esc(t.title)}</div><div class="tartist">${esc(t.artist)}</div></div><div class="tright">${durationHtml}${offIndHTML(t.id)}${rightBtn}</div>`;
   li.addEventListener('click', () => {
     // ВАЖНО: .children включает служебный <li class="track-list-sentinel">
     // для подгрузки при скролле (см. appendTracksPaged) — он не выводится
@@ -4209,7 +4420,10 @@ function renderList(tracks, ulId, ctx, emptyText, emptyIcon, emptyCta) {
   }
   appendTracks(tracks, ul, ctx); updateAllHeartButtons();
 }
-function renderFavs() { renderList(allData.favs, 'favs-list', 'fav', 'Добавляй треки, чтобы они появились здесь.', '🖤', { label: '🔍 Найти музыку', action: "nav('search')" }); if(document.getElementById('stat-favs')) document.getElementById('stat-favs').textContent = allData.favs.length; }
+var libQuery = '';
+function libMatch(t) { if (!libQuery) return true; return (((t.title || '') + ' ' + (t.artist || '')).toLowerCase()).indexOf(libQuery) !== -1; }
+function libFilterTracks(a) { return libQuery ? (a || []).filter(libMatch) : (a || []); }
+function renderFavs() { renderList(libFilterTracks(allData.favs), 'favs-list', 'fav', libQuery ? 'В любимом ничего не нашлось.' : 'Добавляй треки, чтобы они появились здесь.', libQuery ? '🔎' : '🖤', { label: '🔍 Найти музыку', action: "nav('search')" }); if(document.getElementById('stat-favs')) document.getElementById('stat-favs').textContent = allData.favs.length; }
 
 
 // ── HISTORY: timeline grouped render ──
@@ -4526,7 +4740,7 @@ async function doSearch() {
   meta.textContent = '';
   try {
     const r = await fetch('/api/search?q=' + encodeURIComponent(q) + '&source=' + encodeURIComponent(currentSearchSource));
-    const tracks = await r.json(); ul.innerHTML = '';
+    const tracks = await r.json(); ul.innerHTML = ''; { const sl = document.getElementById('srch-artist-slot'); if (sl) sl.innerHTML = ''; }
     if (!tracks.length) {
       // Пустой результат может означать не "ничего нет", а то, что источник
       // YouTube сейчас в cooldown после серии неудач (см. /health) —
@@ -4540,7 +4754,7 @@ async function doSearch() {
     }
     saveRecentSearch(q);
     meta.textContent = `${tracks.length} результат${tracks.length === 1 ? '' : tracks.length < 5 ? 'а' : 'ов'} · «${q}»`;
-    appendTracks(tracks, ul, 'search'); updateAllHeartButtons();
+    appendTracks(tracks, ul, 'search'); updateAllHeartButtons(); try { renderSearchArtistCard(tracks, q); } catch (e) {}
   } catch { ul.innerHTML = `<div class="empty"><div class="empty-ico">⚠️</div><p>Ошибка поиска</p></div>`; }
 }
 
@@ -4562,7 +4776,7 @@ async function favToggle(btn, trackJsonStr) {
 }
 function updateAllHeartButtons() { document.querySelectorAll('.fav-btn').forEach(btn => { if(btn.id === 'fp-fav' || btn.id === 'wa-fav') return; const li = btn.closest('.track'); if(li) { btn.classList.toggle('loved', isFav(li.dataset.id)); } }); }
 function toggleFavFromPlayer() { if (qIdx < 0 || !queue[qIdx]) return; favToggle(document.getElementById('fp-fav'), esc(JSON.stringify(queue[qIdx]))); }
-function updateFavBtnPlayer() { if (qIdx < 0 || !queue[qIdx]) return; const isLoved = isFav(queue[qIdx].id); document.getElementById('fp-fav').classList.toggle('loved', isLoved); document.getElementById('wa-fav').classList.toggle('loved', isLoved); }
+function updateFavBtnPlayer() { if (qIdx < 0 || !queue[qIdx]) return; const isLoved = isFav(queue[qIdx].id); document.getElementById('fp-fav').classList.toggle('loved', isLoved); document.getElementById('wa-fav').classList.toggle('loved', isLoved); const mf = document.getElementById('mini-fav'); if (mf) mf.classList.toggle('loved', isLoved); }
 
 
 async function dislikeTrack() {
@@ -5322,10 +5536,10 @@ fpCoverWrap.addEventListener('touchend', e => {
 
 // ── MINI PLAYER GESTURES ──
 const mp = document.getElementById('mini-player'); const mpBody = document.getElementById('mini-body'); let mpStartX = 0, mpStartY = 0; let mpDragging = false;
-mp.addEventListener('touchstart', e => { if (e.target.closest('.mi-play')) return; mpStartX = e.touches[0].clientX; mpStartY = e.touches[0].clientY; mpDragging = true; mp.style.transition = 'none'; }, {passive: true});
+mp.addEventListener('touchstart', e => { if (e.target.closest('.mi-play, .mi-fav')) return; mpStartX = e.touches[0].clientX; mpStartY = e.touches[0].clientY; mpDragging = true; mp.style.transition = 'none'; }, {passive: true});
 mp.addEventListener('touchmove', e => { if (!mpDragging) return; let dy = e.touches[0].clientY - mpStartY, dx = e.touches[0].clientX - mpStartX; if (dy > 0 && Math.abs(dy) > Math.abs(dx)) mp.style.transform = `translateY(${dy}px)`; }, {passive: true});
 mp.addEventListener('touchend', e => {
-  if (!mpDragging) return; mpDragging = false; mp.style.transition = ''; if (e.target.closest('.mi-play')) { mp.style.transform = ''; return; }
+  if (!mpDragging) return; mpDragging = false; mp.style.transition = ''; if (e.target.closest('.mi-play, .mi-fav')) { mp.style.transform = ''; return; }
   let diffX = mpStartX - e.changedTouches[0].clientX, diffY = mpStartY - e.changedTouches[0].clientY;
   if (Math.abs(diffX) > 40 || Math.abs(diffY) > 40) {
     if (Math.abs(diffX) > Math.abs(diffY)) {
@@ -5938,8 +6152,10 @@ function renderOfflineList() {
     if (titleEl) titleEl.style.display = tracks.length ? '' : 'none';
     if (sizeHint) sizeHint.textContent = tracks.length ? `· ${tracks.length}` : '';
     ul.innerHTML = '';
-    if (!tracks.length) return;
-    appendTracksPaged(tracks, ul, 'offline');
+    if (!tracks.length) { ul.innerHTML = '<div class="empty"><div class="empty-ico">📥</div><p>Тут будут треки без интернета.<br>Открой «⋯» в плеере → «Сохранить офлайн».</p></div>'; return; }
+    const shown = libFilterTracks(tracks);
+    if (!shown.length) { ul.innerHTML = '<div class="empty"><div class="empty-ico">🔎</div><p>В офлайне ничего не нашлось.</p></div>'; return; }
+    appendTracksPaged(shown, ul, 'offline');
 }
 
 
@@ -6059,16 +6275,98 @@ function startCrossfade(nextTrack) {
         playNext();
     }, dur * 1000);
 }
-function buildEQ() {
-  const pp = document.getElementById('eq-presets'); pp.innerHTML = '';
-  Object.keys(EQ_PRESETS).forEach(name => { const d = document.createElement('div'); d.className = 'chip' + (name === currentPreset ? ' on' : ''); d.textContent = name; d.onclick = () => { haptic(); currentPreset = name; EQ_PRESETS[name].forEach((v, i) => eqFilters[i].gain.value = v); buildEQ(); }; pp.appendChild(d); });
-  const bars = document.getElementById('eq-bars'); bars.innerHTML = '';
-  EQ_FREQS.forEach((freq, i) => {
-    const wrap = document.createElement('div'); wrap.className = 'eq-bar-wrap';
-    const sl = document.createElement('input'); sl.type = 'range'; sl.className = 'eq-slider'; sl.min = -12; sl.max = 12; sl.value = eqFilters[i]?.gain.value || 0;
-    sl.oninput = () => { if(eqFilters[i]) eqFilters[i].gain.value = +sl.value; currentPreset = ''; buildEQ(); };
-    const lb = document.createElement('div'); lb.className = 'eq-label'; lb.textContent = EQ_LABELS[i]; wrap.appendChild(sl); wrap.appendChild(lb); bars.appendChild(wrap);
+const EQ_BAND_LABELS = ['60–170', '310–600', '1–3K', '6–12K', '14–16K'];
+const EQ_FX = {
+  'Slowed':      { rate: 0.85, preset: 'Bass Boost', label: '🐌 Slowed' },
+  'Nightcore':   { rate: 1.15, preset: null,         label: '⚡ Nightcore' },
+  'Vocal Boost': { rate: 1,    preset: 'Vocal',      label: '🎤 Vocal Boost' },
+};
+var gxFx = '';
+function eqHandleVals() {
+  return EQ_BAND_LABELS.map((_, k) => {
+    const a = eqFilters[2 * k] ? eqFilters[2 * k].gain.value : 0;
+    const b = eqFilters[2 * k + 1] ? eqFilters[2 * k + 1].gain.value : a;
+    return (a + b) / 2;
   });
+}
+function eqSetBand(k, v) { [2 * k, 2 * k + 1].forEach(i => { if (eqFilters[i]) eqFilters[i].gain.value = v; }); }
+function eqApplyPreset(name) { (EQ_PRESETS[name] || []).forEach((v, i) => { if (eqFilters[i]) eqFilters[i].gain.value = v; }); }
+function eqApplyFx(name) {
+  const on = gxFx !== name;
+  gxFx = on ? name : '';
+  const fx = EQ_FX[name];
+  const rate = on ? fx.rate : 1;
+  try { const keep = (rate === 1); aud.preservesPitch = keep; aud.mozPreservesPitch = keep; aud.webkitPreservesPitch = keep; } catch (e) {}
+  try { aud.defaultPlaybackRate = rate; aud.playbackRate = rate; } catch (e) {}
+  if (on && fx.preset) { currentPreset = fx.preset; eqApplyPreset(fx.preset); }
+  if (!on) { currentPreset = 'Flat'; eqApplyPreset('Flat'); }
+  buildEQ();
+}
+function buildEQ() {
+  const fxWrap = document.getElementById('eq-fx'); fxWrap.innerHTML = '';
+  Object.keys(EQ_FX).forEach(name => {
+    const b = document.createElement('button'); b.className = 'eq-fx-btn' + (gxFx === name ? ' on' : ''); b.textContent = EQ_FX[name].label;
+    b.onclick = () => { haptic(); eqApplyFx(name); }; fxWrap.appendChild(b);
+  });
+  const pp = document.getElementById('eq-presets'); pp.innerHTML = '';
+  Object.keys(EQ_PRESETS).forEach(name => {
+    const d = document.createElement('div'); d.className = 'chip' + (name === currentPreset ? ' on' : ''); d.textContent = name;
+    d.onclick = () => { haptic(); currentPreset = name; eqApplyPreset(name); buildEQ(); }; pp.appendChild(d);
+  });
+  const W = 320, H = 200, PX = 28, ZERO = 100, K = 7.5; // 1 dB = 7.5px, диапазон ±12 dB
+  const xs = EQ_BAND_LABELS.map((_, k) => PX + k * ((W - 2 * PX) / 4));
+  const yOf = v => ZERO - v * K;
+  const vals = eqHandleVals();
+  const curve = (pts) => {
+    let d = 'M' + pts[0][0] + ',' + pts[0][1];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+      const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+      const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+      d += ' C' + c1x.toFixed(1) + ',' + c1y.toFixed(1) + ' ' + c2x.toFixed(1) + ',' + c2y.toFixed(1) + ' ' + p2[0] + ',' + p2[1];
+    }
+    return d;
+  };
+  const NS = 'http://www.w3.org/2000/svg';
+  const bars = document.getElementById('eq-bars'); bars.innerHTML = '';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('class', 'eq-curve'); svg.style.touchAction = 'none';
+  const mk = (tag, attrs) => { const el = document.createElementNS(NS, tag); for (const k in attrs) el.setAttribute(k, attrs[k]); svg.appendChild(el); return el; };
+  [-12, -6, 0, 6, 12].forEach(db => mk('line', { x1: PX - 10, x2: W - PX + 10, y1: yOf(db), y2: yOf(db), class: db === 0 ? 'eq-grid zero' : 'eq-grid' }));
+  const area = mk('path', { class: 'eq-area' });
+  const line = mk('path', { class: 'eq-line' });
+  const hs = [], tx = [];
+  const redraw = () => {
+    const pts = xs.map((x, k) => [x, yOf(vals[k])]);
+    line.setAttribute('d', curve(pts));
+    area.setAttribute('d', curve(pts) + ` L${xs[4]},${ZERO} L${xs[0]},${ZERO} Z`);
+    pts.forEach(([x, y], k) => {
+      hs[k].setAttribute('cy', y); hs[k].hit.setAttribute('cy', y);
+      tx[k].setAttribute('y', y - 22); tx[k].textContent = (vals[k] > 0 ? '+' : '') + (Math.round(vals[k] * 2) / 2) + ' dB';
+    });
+  };
+  xs.forEach((x, k) => {
+    const lab = mk('text', { x, y: H - 6, class: 'eq-lbl' }); lab.textContent = EQ_BAND_LABELS[k];
+    const t = mk('text', { x, y: 0, class: 'eq-val' }); tx.push(t);
+    const h = mk('circle', { cx: x, cy: 0, r: 13, class: 'eq-handle' });
+    const hit = mk('circle', { cx: x, cy: 0, r: 28, class: 'eq-hit' }); h.hit = hit; hs.push(h);
+    const move = (e) => {
+      const r = svg.getBoundingClientRect();
+      const yy = (e.clientY - r.top) * (H / r.height);
+      let v = Math.round(((ZERO - yy) / K) * 2) / 2; v = Math.max(-12, Math.min(12, v));
+      if (v === vals[k]) return;
+      vals[k] = v; eqSetBand(k, v); redraw();
+    };
+    hit.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); hit.setPointerCapture(e.pointerId); h.classList.add('drag'); tx[k].classList.add('show');
+      if (currentPreset) { currentPreset = ''; pp.querySelectorAll('.chip').forEach(c => c.classList.remove('on')); }
+      move(e);
+    });
+    hit.addEventListener('pointermove', (e) => { if (hit.hasPointerCapture(e.pointerId)) move(e); });
+    const end = (e) => { h.classList.remove('drag'); tx[k].classList.remove('show'); };
+    hit.addEventListener('pointerup', end); hit.addEventListener('pointercancel', end);
+  });
+  bars.appendChild(svg); redraw();
 }
 
 
@@ -6458,9 +6756,9 @@ let artistCardTracks = [];
 let artistCardName = '';
 
 
-function openArtistCard() {
-  if (qIdx < 0 || !queue[qIdx]) return;
-  const t = queue[qIdx];
+function openArtistCard(trackOverride) {
+  const t = (trackOverride && trackOverride.artist) ? trackOverride : queue[qIdx];
+  if (!t) return;
   artistCardName = t.artist;
   _acCurrentArtist = t.artist;
   _acSubscribed = false;
@@ -7554,7 +7852,9 @@ function connectPartyWs(roomId) {
                     document.getElementById('party-skip-btn')?.classList.remove('voted');
                     toast('⏭️ Трек пропущен голосованием!', 'info');
                     playNext();
-                } else if (msg.type === 'queue_updated') {
+                } else if (msg.type === 'reaction') {
+ try { if (String(msg.sender_id || '') !== _partyMyUid) gxPartyFloat(msg.emoji); } catch (e) {}
+ } else if (msg.type === 'queue_updated') {
                     refreshPartyState();
                 }
             } catch (e) {}
@@ -7640,7 +7940,7 @@ function copyPartyLink() {
 
 function startPartyPoll() {
     stopPartyPoll();
-    _partyPollTimer = setInterval(refreshPartyState, 3000);
+    /* поллинг убран: синхронизация голосов, состава и очереди — только через WebSocket */
 }
 function stopPartyPoll() {
     if (_partyPollTimer) { clearInterval(_partyPollTimer); _partyPollTimer = null; }
@@ -7648,46 +7948,13 @@ function stopPartyPoll() {
 
 
 async function refreshPartyState() {
-    if (!_partyId) return;
-    try {
-        const r = await fetch(`/api/collab/${_partyId}`, { headers: { Authorization: authStr } });
-        if (!r.ok) return;
-        const { meta, tracks } = await r.json();
-        renderPartyQueue(tracks, meta);
-        // Считаем skip-голоса из спец-треков (track_id начинается с "skip_vote_")
-        const skipVoters = tracks.filter(t => t.id && t.id.toString().startsWith('skip_vote_'));
-        _partySkipVotes = new Set(skipVoters.map(t => t.added_by));
-        // Участники = уникальные added_by
-        const members = [...new Map(tracks.map(t => [t.added_by, t])).values()];
-        renderPartyMembers(members);
-        // Обновляем skip bar
-        updateSkipBar(skipVoters.length, members.length);
-        // Авто-скип если 50%+ проголосовали
-        if (members.length > 1 && skipVoters.length >= Math.ceil(members.length / 2)) {
-            // Чистим skip-голоса и переключаем трек
-            for (const sv of skipVoters) {
-                await fetch(`/api/collab/${_partyId}/remove`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', Authorization: authStr },
-                    body: JSON.stringify({ track_id: sv.id })
-                }).catch(()=>{});
-            }
-            _partySkipVoted = false;
-            document.getElementById('party-skip-btn').classList.remove('voted');
-            // Удаляем первый реальный трек из очереди и играем следующий
-            const realTracks = tracks.filter(t => !t.id.toString().startsWith('skip_vote_'));
-            if (realTracks.length > 1) {
-                await fetch(`/api/collab/${_partyId}/remove`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', Authorization: authStr },
-                    body: JSON.stringify({ track_id: realTracks[0].id })
-                }).catch(()=>{});
-                playTrack(realTracks[1], 1);
-                syncPartyNowPlaying(realTracks[1]);
-                toast('⏭️ Трек пропущен голосованием!');
-            }
-        }
-    } catch(e) {}
+  if (!_partyId) return;
+  try {
+    const r = await fetch(`/api/collab/${_partyId}`, { headers: { Authorization: authStr } });
+    if (!r.ok) return;
+    const { meta, tracks } = await r.json();
+    renderPartyQueue(tracks || [], meta);
+  } catch (e) {}
 }
 
 
@@ -7737,38 +8004,15 @@ function updateSkipBar(votes, total) {
 
 
 async function voteSkip() {
-    if (!_partyId) return;
-    haptic();
-    if (_partyWs && _partyWs.readyState === 1) {
-        _partyWs.send(JSON.stringify({ type: "vote_skip" }));
-        toast("🗳️ Голос за скип учтён");
-        return;
-    }
-    const btn = document.getElementById('party-skip-btn');
-    if (_partySkipVoted) {
-        // Снять голос
-        const uid = (tg.initDataUnsafe?.user?.id || 'test').toString();
-        await fetch(`/api/collab/${_partyId}/remove`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: authStr },
-            body: JSON.stringify({ track_id: `skip_vote_${uid}` })
-        }).catch(()=>{});
-        _partySkipVoted = false;
-        btn.classList.remove('voted');
-        btn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg> Проголосовать за скип`;
-    } else {
-        const uid = (tg.initDataUnsafe?.user?.id || 'test').toString();
-        await fetch(`/api/collab/${_partyId}/add`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: authStr },
-            body: JSON.stringify({ track_data: { id: `skip_vote_${uid}`, title: 'skip_vote', artist: '' } })
-        }).catch(()=>{});
-        _partySkipVoted = true;
-        btn.classList.add('voted');
-        btn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg> Голос отдан ✓`;
-        toast('🗳️ Голос за скип засчитан');
-    }
-    await refreshPartyState();
+  if (!_partyId) return;
+  haptic();
+  if (_partyWs && _partyWs.readyState === 1) {
+    _partyWs.send(JSON.stringify({ type: 'vote_skip' }));
+    toast(_partySkipVoted ? '↩️ Голос снят' : '🗳️ Голос за скип учтён');
+    return;
+  }
+  toast('Нет связи с комнатой — переподключаюсь…', 'warning');
+  connectPartyWs(_partyId);
 }
 
 
@@ -7790,6 +8034,7 @@ async function removePartyTrack(trackId) {
         headers: { 'Content-Type': 'application/json', Authorization: authStr },
         body: JSON.stringify({ track_id: trackId })
     }).catch(()=>{});
+    if (_partyWs && _partyWs.readyState === 1) { try { _partyWs.send(JSON.stringify({ type: 'queue_updated' })); } catch (e) {} }
     refreshPartyState();
 }
 
@@ -8705,6 +8950,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     try { renderQueueList(); } catch (e) {}
     toast(playNextFlag ? 'Сыграет следующим' : 'Добавлено в очередь', 'success');
   }
+  window.gxAddToQueue = addToQueue;
   function closeMenu(instant) {
     const ov = $('gx-menu-ov'), sh = $('gx-menu');
     if (!ov && !sh) return;
@@ -9437,7 +9683,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
       }
     }, { passive: true });
   }
-  gxInitPullToRefresh('page-history', async () => { await loadData(); renderHistory(); toast('Обновлено'); });
+  gxInitPullToRefresh('page-library', async () => { await loadData(); renderHistory(); toast('Обновлено'); });
   gxInitPullToRefresh('page-profile', async () => { await loadData(); renderFavs(); toast('Обновлено'); });
 
 
@@ -9461,6 +9707,528 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   });
 })();
 
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   UX v2 (JS): «Моя музыка», Vibe Tuner, системная «Назад», свайпы строк,
+   карточка артиста в поиске, офлайн-статус, Stories на canvas, аура,
+   настройки, реакции Party
+   ═══════════════════════════════════════════════════════════════════ */
+(function gxUxV2() {
+  const $ = (id) => document.getElementById(id);
+  const hap = (t) => { try { tg.HapticFeedback.notificationOccurred(t || 'success'); } catch (e) {} };
+
+  /* ───────── Моя музыка: пилюли + фильтр ───────── */
+  let libView = 'favs';
+  try { libView = localStorage.getItem('lib_view') || 'favs'; } catch (e) {}
+  function libDomFilter() {
+    const q = libQuery;
+    document.querySelectorAll('#hist-groups li.track').forEach((li) => {
+      let t; try { t = decodeTrackJson(li.dataset.json); } catch (e) { return; }
+      li.style.display = libMatch(t) ? '' : 'none';
+    });
+    const hg = $('hist-groups');
+    if (hg) Array.from(hg.children).forEach((g) => {
+      const rows = g.querySelectorAll ? g.querySelectorAll('li.track') : [];
+      if (rows.length) g.style.display = Array.from(rows).some((r) => r.style.display !== 'none') ? '' : 'none';
+    });
+    const grid = $('pls-grid');
+    if (grid) Array.from(grid.children).forEach((c) => { c.style.display = (!q || (c.textContent || '').toLowerCase().indexOf(q) !== -1) ? '' : 'none'; });
+  }
+  function libFilterApply() {
+    try { renderFavs(); } catch (e) {}
+    try { renderOfflineList(); } catch (e) {}
+    libDomFilter();
+  }
+  window.libShow = function (v) {
+    if (['favs', 'playlists', 'offline', 'history'].indexOf(v) === -1) v = 'favs';
+    libView = v;
+    try { localStorage.setItem('lib_view', v); } catch (e) {}
+    document.querySelectorAll('.lib-pill').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+    document.querySelectorAll('.lib-view').forEach((el) => el.classList.toggle('on', el.id === 'lib-view-' + v));
+    const page = $('page-library'); if (page) page.scrollTop = 0;
+  };
+  window.libFilter = function (val) {
+    libQuery = String(val || '').trim().toLowerCase();
+    const box = document.querySelector('.lib-filter'); if (box) box.classList.toggle('has-q', !!libQuery);
+    libFilterApply();
+  };
+  window.libFilterClear = function () {
+    const inp = $('lib-filter-input'); if (inp) inp.value = '';
+    window.libFilter('');
+  };
+  ['renderHistory', 'renderPlaylists'].forEach((name) => {
+    const orig = window[name]; if (typeof orig !== 'function') return;
+    window[name] = function () { const r = orig.apply(this, arguments); try { libDomFilter(); } catch (e) {} return r; };
+  });
+
+  /* ───────── Vibe Tuner ───────── */
+  const VIBE_NAMES = { energetic: '⚡ Бодрое', calm: '🌙 Спокойное', new: '🔥 Незнакомое', familiar: '❤️ Знакомое' };
+  function vibeSync() { document.querySelectorAll('.vibe-chip').forEach((c) => c.classList.toggle('on', c.dataset.vibe === waveVibe)); }
+  window.waveVibePick = function (v) {
+    haptic();
+    waveVibe = (waveVibe === v) ? '' : v;
+    vibeSync();
+    waveLoading = false; waveOffset = 0;
+    loadWave(true);
+    toast(waveVibe ? 'Волна: ' + VIBE_NAMES[waveVibe] : 'Волна: как обычно');
+  };
+
+  /* ───────── Системная кнопка «Назад» (стек слоёв) ───────── */
+  const vis = (e) => e.classList.contains('vis');
+  const LAYERS = [
+    ['gx-story-ov', vis, () => gxCloseStory()],
+    ['gx-settings-sheet', vis, () => gxCloseSettings()],
+    ['gx-import-sheet', vis, () => gxCloseImportSheet()],
+    ['share-track-overlay', (e) => e.style.display === 'block', () => { try { closeShareTrackSheet(); } catch (e) {} }],
+    ['gx-menu', vis, () => { const o = $('gx-menu-ov'); if (o) o.click(); }],
+    ['party-add-sheet', vis, () => closePartyAddSheet()],
+    ['eq-panel', vis, () => closeModals()], ['pl-modal', vis, () => closeModals()], ['timer-modal', vis, () => closeModals()],
+    ['more-modal', vis, () => closeModals()], ['queue-modal', vis, () => closeModals()],
+    ['artist-card', vis, () => closeArtistCard()],
+    ['party-overlay', vis, () => closePartyMode()],
+    ['friends-panel', vis, () => closeFriendsPanel()],
+    ['notif-panel', vis, () => closeNotifPanel()],
+    ['full-player', vis, () => closeFull()],
+    ['pls-detail', (e) => e.style.display === 'block' && plsDetailOpen, () => closePlsDetail()],
+    ['wave-active', (e) => waveScene && e.style.display === 'flex', () => waveSceneToggle(false)],
+  ];
+  function topLayer() { return LAYERS.find(([id, test]) => { const e = $(id); return e && test(e); }); }
+  function syncBack() {
+    try { if (topLayer()) tg.BackButton.show(); else tg.BackButton.hide(); } catch (e) {}
+  }
+  try { tg.BackButton.onClick(() => { const t = topLayer(); if (t) { try { t[2](); } catch (e) {} } setTimeout(syncBack, 420); }); } catch (e) {}
+  let _sbRaf = 0;
+  const syncSoon = () => { cancelAnimationFrame(_sbRaf); _sbRaf = requestAnimationFrame(syncBack); };
+  const mo = new MutationObserver(syncSoon);
+  LAYERS.forEach(([id]) => { const e = $(id); if (e) mo.observe(e, { attributes: true, attributeFilter: ['class', 'style'] }); });
+  mo.observe(document.body, { childList: true });
+  ['click', 'touchend'].forEach((ev) => document.addEventListener(ev, () => setTimeout(syncBack, 80), true));
+
+  /* ───────── Свайпы по строкам треков ───────── */
+  (function rowSwipe() {
+    let li = null, sx = 0, sy = 0, dx = 0, active = false, armed = false;
+    const reset = (el, animate) => {
+      if (!el) return;
+      el.style.transition = animate ? 'transform .25s cubic-bezier(.22,1,.36,1)' : '';
+      el.style.transform = '';
+      el.classList.remove('sw-right', 'sw-left', 'sw-armed');
+      if (animate) setTimeout(() => { el.style.transition = ''; }, 280);
+    };
+    document.addEventListener('touchstart', (e) => {
+      li = (e.target.closest && e.target.closest('li.track')) || null;
+      if (!li || e.touches.length !== 1 || e.target.closest('button')) { li = null; return; }
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; active = false; armed = false;
+    }, { passive: true });
+    document.addEventListener('touchmove', (e) => {
+      if (!li) return;
+      const mx = e.touches[0].clientX - sx, my = e.touches[0].clientY - sy;
+      if (!active) {
+        if (Math.abs(mx) > 14 && Math.abs(mx) > Math.abs(my) * 1.6) { active = true; window._gxRowSwipe = true; }
+        else if (Math.abs(my) > 10) { li = null; return; }
+        else return;
+      }
+      dx = mx;
+      li.style.transition = 'none';
+      li.style.transform = 'translateX(' + Math.max(-110, Math.min(110, dx * 0.7)) + 'px)';
+      li.classList.toggle('sw-right', dx > 0); li.classList.toggle('sw-left', dx < 0);
+      const now = Math.abs(dx) > 80;
+      li.classList.toggle('sw-armed', now);
+      if (now && !armed) haptic();
+      armed = now;
+    }, { passive: true });
+    const end = () => {
+      if (!li) return;
+      const el = li; li = null;
+      if (!active) return;
+      active = false;
+      const fire = Math.abs(dx) > 80, dir = dx > 0 ? 'right' : 'left';
+      reset(el, true);
+      setTimeout(() => { window._gxRowSwipe = false; }, 60);
+      if (!fire) return;
+      let t; try { t = decodeTrackJson(el.dataset.json); } catch (e) { return; }
+      const ulId = el.parentElement && el.parentElement.id;
+      if (dir === 'right') { hap('success'); if (window.gxAddToQueue) window.gxAddToQueue(t, true); }
+      else {
+        hap('warning');
+        if (ulId === 'pl-list' && currentPl) removeFromPlaylist(currentPl, String(t.id));
+        else if (ulId === 'offline-list') removeTrackOffline(String(t.id));
+        else openShareTrackSheet(t);
+      }
+    };
+    document.addEventListener('touchend', end, { passive: true });
+    document.addEventListener('touchcancel', () => { if (li) reset(li, true); li = null; active = false; window._gxRowSwipe = false; }, { passive: true });
+  })();
+
+  /* ───────── Поиск: карточка «Артист» ───────── */
+  window.renderSearchArtistCard = function (tracks, q) {
+    const slot = $('srch-artist-slot'); if (!slot) return;
+    slot.innerHTML = '';
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const nq = norm(q), counts = new Map();
+    tracks.slice(0, 15).forEach((t) => {
+      const a = norm(t.artist); if (!a) return;
+      const e = counts.get(a) || { n: 0, t }; e.n++; counts.set(a, e);
+    });
+    let best = null;
+    counts.forEach((e, a) => {
+      const hit = !!nq && (a.indexOf(nq) !== -1 || nq.indexOf(a) !== -1);
+      const score = e.n + (hit ? 3 : 0);
+      if ((e.n >= 2 || hit) && (!best || score > best.score)) best = { n: e.n, t: e.t, a, score };
+    });
+    if (!best) return;
+    const t = best.t;
+    const src = t.artist_avatar || t.artwork_url || '';
+    const el = document.createElement('div'); el.className = 'srch-artist';
+    el.innerHTML = '<div class="srch-artist-av">' + (src ? '<img src="' + esc(src) + '" loading="lazy" onerror="this.remove()">' : '🎤') + '</div>' +
+      '<div class="srch-artist-meta"><div class="srch-artist-kind">Артист</div><div class="srch-artist-name">' + esc(t.artist) + '</div>' +
+      '<div class="srch-artist-cnt">' + best.n + ' ' + pluralRu(best.n, 'трек', 'трека', 'треков') + ' в выдаче</div></div>' +
+      '<button class="srch-artist-play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>Слушать</button>';
+    el.addEventListener('click', () => { haptic(); openArtistCard(t); });
+    el.querySelector('.srch-artist-play').addEventListener('click', (e) => {
+      e.stopPropagation(); haptic();
+      const list = tracks.filter((x) => norm(x.artist) === best.a);
+      if (!list.length) return;
+      queue = list; qIdx = 0; playTrack(queue[0], 1);
+    });
+    slot.appendChild(el);
+  };
+
+  /* ───────── Офлайн: статус в строках ───────── */
+  (function offlineHooks() {
+    const h = window.handleOfflineSWMessage;
+    if (typeof h === 'function') {
+      window.handleOfflineSWMessage = function (data) {
+        try {
+          if (data && data.type === 'OFFLINE_PROGRESS') { offlinePct[String(data.trackId)] = data.pct; refreshOffInds(data.trackId); }
+        } catch (e) {}
+        const r = h.apply(this, arguments);
+        try { if (data && data.type && data.type !== 'OFFLINE_PROGRESS') { delete offlinePct[String(data.trackId)]; refreshOffInds(data.trackId); } } catch (e) {}
+        return r;
+      };
+    }
+    ['toggleOfflineCurrentTrack', 'removeTrackOffline'].forEach((n) => {
+      const o = window[n]; if (typeof o !== 'function') return;
+      window[n] = function () { const r = o.apply(this, arguments); setTimeout(() => refreshOffInds(), 60); return r; };
+    });
+  })();
+
+  /* ───────── Настройки (шторка) + аура ───────── */
+  window.gxOpenSettings = function () { $('gx-settings-ov').classList.add('vis'); $('gx-settings-sheet').classList.add('vis'); };
+  window.gxCloseSettings = function () { $('gx-settings-ov').classList.remove('vis'); $('gx-settings-sheet').classList.remove('vis'); };
+  $('gx-settings-ov').addEventListener('click', window.gxCloseSettings);
+  (function moveCards() {
+    const body = $('gx-settings-body');
+    ['gx-status-card', 'gx-appearance', 'gx-playback-card'].forEach((id) => { const c = $(id); if (c) body.appendChild(c); });
+  })();
+
+  const hue = (str) => { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) % 360; return h; };
+  function topArtists(n) {
+    const all = [...(allData.history || []), ...(allData.favs || [])];
+    const map = new Map();
+    all.forEach((t) => { const a = (t.artist || '').trim(); if (!a) return; const e = map.get(a) || { name: a, n: 0, t }; e.n++; if (!e.t.artwork_url && t.artwork_url) e.t = t; map.set(a, e); });
+    return Array.from(map.values()).sort((a, b) => b.n - a.n).slice(0, n);
+  }
+  function buildAuraSkeleton() {
+    if ($('prof-aura')) return;
+    const host = $('page-profile'), anchor = host && host.querySelector('.prof-stats-row');
+    if (!host || !anchor) return;
+    const el = document.createElement('div'); el.className = 'prof-aura'; el.id = 'prof-aura';
+    el.innerHTML = '<div class="aura-title">Моя музыкальная аура</div><div class="aura-sub" id="aura-sub"></div>' +
+      '<div class="aura-genres" id="aura-genres"></div><div class="aura-time-slot" id="aura-time-slot"></div><div class="aura-top3" id="aura-top3"></div>' +
+      '<button class="aura-btn" onclick="haptic();openFriendsPanel(\'friends\')">🤝 Blend-миксы с друзьями</button>';
+    host.insertBefore(el, anchor);
+    const lt = $('prof-listen-time'); if (lt) $('aura-time-slot').appendChild(lt);
+  }
+  window.renderAura = function () {
+    buildAuraSkeleton();
+    const el = $('prof-aura'); if (!el) return;
+    const favs = allData.favs || [], hist = allData.history || [];
+    const arts = topArtists(3);
+    const gc = {};
+    [...hist, ...favs].forEach((t) => { if (t.genre) gc[t.genre] = (gc[t.genre] || 0) + 1; });
+    const genres = Object.keys(gc).sort((a, b) => gc[b] - gc[a]).slice(0, 3);
+    const seed = (genres.length ? genres : arts.map((a) => a.name)).join('|') || 'aura';
+    const h1 = hue(seed), h2 = (h1 + 55) % 360;
+    el.style.background = 'linear-gradient(135deg, hsl(' + h1 + ' 62% 34%), hsl(' + h2 + ' 70% 20%))';
+    $('aura-sub').textContent = hist.length || favs.length ? hist.length + ' ' + pluralRu(hist.length, 'прослушивание', 'прослушивания', 'прослушиваний') + ' · ' + favs.length + ' в любимом' : 'Послушай несколько треков — и здесь появится твоя аура';
+    $('aura-genres').innerHTML = genres.map((g) => '<span>' + esc(g) + '</span>').join('');
+    $('aura-top3').innerHTML = arts.map((a) => {
+      const src = a.t.artist_avatar || a.t.artwork_url || '';
+      return '<div class="aura-art"><div class="aura-art-av">' + (src ? '<img src="' + esc(src) + '" onerror="this.remove()">' : '🎤') + '</div><div class="aura-art-name">' + esc(a.name) + '</div><div class="aura-art-cnt">' + a.n + ' ' + pluralRu(a.n, 'раз', 'раза', 'раз') + '</div></div>';
+    }).join('');
+  };
+  (function () {
+    const o = window.updateProfileUI;
+    if (typeof o === 'function') window.updateProfileUI = function () { const r = o.apply(this, arguments); try { renderAura(); } catch (e) {} return r; };
+  })();
+
+  /* ───────── Stories: карточки на canvas ───────── */
+  const FONT = '-apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+  function tryLoad(src, cors) {
+    return new Promise((res) => { const im = new Image(); if (cors) im.crossOrigin = 'anonymous'; im.onload = () => res(im); im.onerror = () => res(null); im.src = src; });
+  }
+  async function loadImg(url) {
+    if (!url) return null;
+    let im = await tryLoad(url, true); if (im) return im;
+    try {
+      const r = await fetch('/api/cover_proxy?url=' + encodeURIComponent(url), { headers: { Authorization: authStr } });
+      if (r.ok) { const u = URL.createObjectURL(await r.blob()); return await tryLoad(u, false); }
+    } catch (e) {}
+    return null;
+  }
+  function rr(ctx, x, y, w, h, r) {
+    ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+  function cropDraw(ctx, im, x, y, w, h) {
+    const s = Math.max(w / im.width, h / im.height), sw = w / s, sh = h / s;
+    ctx.drawImage(im, (im.width - sw) / 2, (im.height - sh) / 2, sw, sh, x, y, w, h);
+  }
+  function wrap(ctx, text, maxW, maxLines) {
+    const words = String(text || '').split(/\s+/).filter(Boolean), lines = []; let cur = '', i = 0;
+    for (; i < words.length; i++) {
+      const test = cur ? cur + ' ' + words[i] : words[i];
+      if (ctx.measureText(test).width <= maxW) cur = test;
+      else { if (cur) { lines.push(cur); if (lines.length === maxLines) break; } cur = words[i]; }
+    }
+    if (lines.length < maxLines && cur) { lines.push(cur); i = words.length; }
+    if (i < words.length || ctx.measureText(lines[lines.length - 1] || '').width > maxW) {
+      let l = lines[lines.length - 1] || '';
+      while (l.length > 1 && ctx.measureText(l + '…').width > maxW) l = l.slice(0, -1);
+      lines[lines.length - 1] = l + '…';
+    }
+    return lines;
+  }
+  function drawBg(ctx, W, H, im, seed) {
+    const h = hue(seed || 'x');
+    if (im) {
+      const t = document.createElement('canvas'); t.width = 36; t.height = 64;
+      const tc = t.getContext('2d'); cropDraw(tc, im, 0, 0, 36, 64);
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(t, 0, 0, W, H);
+      ctx.fillStyle = 'rgba(0,0,0,.42)'; ctx.fillRect(0, 0, W, H);
+    } else {
+      const g = ctx.createLinearGradient(0, 0, W, H);
+      g.addColorStop(0, 'hsl(' + h + ',58%,32%)'); g.addColorStop(1, 'hsl(' + ((h + 60) % 360) + ',62%,14%)');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    }
+    const v = ctx.createLinearGradient(0, H * 0.55, 0, H);
+    v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,.55)');
+    ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  }
+  function footer(ctx, W, H) {
+    ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.textAlign = 'center'; ctx.font = '600 34px ' + FONT;
+    ctx.fillText('Telegram Music', W / 2, H - 96);
+    ctx.fillStyle = 'rgba(255,255,255,.45)'; ctx.font = '500 28px ' + FONT;
+    ctx.fillText(new Date().toLocaleDateString('ru-RU'), W / 2, H - 52);
+  }
+  function mkCanvas() { const c = document.createElement('canvas'); c.width = 1080; c.height = 1920; return [c, c.getContext('2d')]; }
+
+  async function buildTrackCard(t) {
+    const [c, ctx] = mkCanvas(), W = 1080, H = 1920;
+    const im = await loadImg(t.artwork_url);
+    drawBg(ctx, W, H, im, t.title + t.artist);
+    ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.font = '700 38px ' + FONT;
+    ctx.fillText('Сейчас слушаю', W / 2, 250);
+    const S = 780, x = (W - S) / 2, y = 330;
+    ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 36; ctx.shadowOffsetY = 22; rr(ctx, x, y, S, S, 56); ctx.fillStyle = '#222'; ctx.fill(); ctx.restore();
+    ctx.save(); rr(ctx, x, y, S, S, 56); ctx.clip();
+    if (im) cropDraw(ctx, im, x, y, S, S); else { ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fillRect(x, y, S, S); ctx.font = '260px ' + FONT; ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.fillText('🎵', W / 2, y + S / 2 + 90); }
+    ctx.restore();
+    ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = '800 72px ' + FONT;
+    const tl = wrap(ctx, t.title, 900, 2); tl.forEach((l, i) => ctx.fillText(l, W / 2, 1290 + i * 84));
+    ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.font = '600 50px ' + FONT;
+    ctx.fillText(wrap(ctx, t.artist, 900, 1)[0] || '', W / 2, 1290 + tl.length * 84 + 24);
+    footer(ctx, W, H);
+    return c;
+  }
+  async function buildQuoteCard(t, lines) {
+    const [c, ctx] = mkCanvas(), W = 1080, H = 1920;
+    const im = await loadImg(t.artwork_url);
+    drawBg(ctx, W, H, im, t.title + t.artist);
+    const S = 170, x = 90, y = 170;
+    ctx.save(); rr(ctx, x, y, S, S, 30); ctx.clip();
+    if (im) cropDraw(ctx, im, x, y, S, S); else { ctx.fillStyle = 'rgba(255,255,255,.14)'; ctx.fillRect(x, y, S, S); }
+    ctx.restore();
+    ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = '800 46px ' + FONT;
+    ctx.fillText(wrap(ctx, t.title, 740, 1)[0] || '', x + S + 34, y + 76);
+    ctx.fillStyle = 'rgba(255,255,255,.72)'; ctx.font = '600 38px ' + FONT;
+    ctx.fillText(wrap(ctx, t.artist, 740, 1)[0] || '', x + S + 34, y + 132);
+    // цитата
+    ctx.fillStyle = 'rgba(255,255,255,.28)'; ctx.font = '900 260px Georgia, serif'; ctx.fillText('“', 80, 640);
+    let size = 76, all;
+    for (; size >= 46; size -= 4) {
+      ctx.font = '800 ' + size + 'px ' + FONT;
+      all = lines.flatMap((l) => wrap(ctx, l, 900, 4));
+      if (all.length * size * 1.28 <= 900) break;
+    }
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
+    const lh = size * 1.28, top = 960 - (all.length * lh) / 2 + size * 0.5;
+    all.forEach((l, i) => ctx.fillText(l, 90, top + i * lh));
+    footer(ctx, W, H);
+    return c;
+  }
+  async function buildAuraCard() {
+    const [c, ctx] = mkCanvas(), W = 1080, H = 1920;
+    const arts = topArtists(3), favs = allData.favs || [], hist = allData.history || [];
+    const first = arts[0] ? arts[0].t : null;
+    const im = first ? await loadImg(first.artwork_url) : null;
+    drawBg(ctx, W, H, im, arts.map((a) => a.name).join('|') || 'aura');
+    const u = (tg.initDataUnsafe && tg.initDataUnsafe.user) || {};
+    ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = '800 76px ' + FONT; ctx.fillText('Моя музыкальная аура', W / 2, 230);
+    ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.font = '600 44px ' + FONT; ctx.fillText('@' + (u.username || u.first_name || 'meloman'), W / 2, 300);
+    const lt = $('prof-listen-time'), ltt = lt && lt.style.display !== 'none' ? ($('prof-listen-time-big') || {}).textContent : '';
+    const stats = [[String(hist.length), pluralRu(hist.length, 'прослушивание', 'прослушивания', 'прослушиваний')], [ltt || '—', 'с музыкой'], [String(favs.length), 'в любимом']];
+    ctx.save(); rr(ctx, 70, 400, W - 140, 300, 48); ctx.fillStyle = 'rgba(0,0,0,.32)'; ctx.fill(); ctx.restore();
+    stats.forEach(([big, small], i) => {
+      const cx = 70 + (W - 140) * (i + 0.5) / 3;
+      ctx.fillStyle = '#fff'; ctx.font = '800 ' + (big.length > 6 ? 54 : 78) + 'px ' + FONT; ctx.fillText(big, cx, 570);
+      ctx.fillStyle = 'rgba(255,255,255,.65)'; ctx.font = '600 30px ' + FONT; ctx.fillText(small, cx, 630);
+    });
+    ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = '800 56px ' + FONT; ctx.fillText('Топ исполнителей', 90, 850);
+    for (let i = 0; i < arts.length; i++) {
+      const a = arts[i], y = 910 + i * 270;
+      ctx.save(); rr(ctx, 70, y, W - 140, 230, 44); ctx.fillStyle = 'rgba(0,0,0,.34)'; ctx.fill(); ctx.restore();
+      const ai = await loadImg(a.t.artist_avatar || a.t.artwork_url);
+      ctx.save(); ctx.beginPath(); ctx.arc(190, y + 115, 78, 0, Math.PI * 2); ctx.clip();
+      if (ai) cropDraw(ctx, ai, 112, y + 37, 156, 156); else { ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fillRect(112, y + 37, 156, 156); }
+      ctx.restore();
+      ctx.fillStyle = '#fff'; ctx.font = '800 54px ' + FONT; ctx.textAlign = 'left';
+      ctx.fillText(wrap(ctx, a.name, 600, 1)[0], 310, y + 112);
+      ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.font = '600 38px ' + FONT;
+      ctx.fillText(a.n + ' ' + pluralRu(a.n, 'раз', 'раза', 'раз'), 310, y + 172);
+      ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.font = '800 64px ' + FONT; ctx.textAlign = 'right'; ctx.fillText('#' + (i + 1), W - 120, y + 140);
+    }
+    footer(ctx, W, H);
+    return c;
+  }
+
+  // шторка предпросмотра
+  let storyState = null;
+  function ensureStorySheet() {
+    if ($('gx-story-ov')) return;
+    const ov = document.createElement('div'); ov.id = 'gx-story-ov';
+    ov.innerHTML = '<div class="gx-story-box"><div class="gx-story-load" id="gx-story-load">Собираю карточку…</div><img id="gx-story-img" alt="" style="display:none"><div class="gx-story-btns"><button class="gx-story-alt" id="gx-story-close">Закрыть</button><button class="gx-story-go" id="gx-story-go" disabled>В Stories</button></div><div class="gx-story-btns" id="gx-story-extra" style="display:none"><button class="gx-story-alt" id="gx-story-copy">Скопировать текст</button></div></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener('click', (e) => { if (e.target === ov) gxCloseStory(); });
+    $('gx-story-close').onclick = () => gxCloseStory();
+  }
+  window.gxCloseStory = function () {
+    const ov = $('gx-story-ov'); if (ov) ov.classList.remove('vis');
+    if (storyState && storyState.url) { try { URL.revokeObjectURL(storyState.url); } catch (e) {} }
+    storyState = null;
+  };
+  function toBlob(canvas) {
+    return new Promise((res) => {
+      canvas.toBlob((b) => { if (b && b.size > 850000) canvas.toBlob((b2) => res(b2 || b), 'image/jpeg', 0.7); else res(b); }, 'image/jpeg', 0.88);
+    });
+  }
+  async function openStory(buildFn, opts) {
+    ensureStorySheet();
+    const ov = $('gx-story-ov'), img = $('gx-story-img'), load = $('gx-story-load'), go = $('gx-story-go'), extra = $('gx-story-extra');
+    load.style.display = ''; img.style.display = 'none'; go.disabled = true; go.textContent = 'В Stories';
+    extra.style.display = opts.copyText ? '' : 'none';
+    ov.classList.add('vis');
+    let blob;
+    try { blob = await toBlob(await buildFn()); if (!blob) throw new Error('blob'); }
+    catch (e) { gxCloseStory(); if (opts.fallback) opts.fallback(); else toast('Не удалось собрать карточку', 'warning'); return; }
+    const url = URL.createObjectURL(blob);
+    storyState = { blob, url };
+    img.src = url; img.style.display = ''; load.style.display = 'none'; go.disabled = false;
+    if (opts.copyText) $('gx-story-copy').onclick = () => { try { navigator.clipboard.writeText(opts.copyText); toast('Текст скопирован', 'success'); } catch (e) {} };
+    go.onclick = async () => {
+      go.disabled = true; go.textContent = 'Загружаю…';
+      try {
+        const r = await fetch('/api/story_upload', { method: 'POST', headers: { Authorization: authStr, 'Content-Type': 'image/jpeg' }, body: blob });
+        const d = await r.json(); if (!r.ok || !d.path) throw new Error('upload');
+        const link = location.origin + d.path;
+        if (typeof tg.shareToStory === 'function') { tg.shareToStory(link, { text: opts.caption }); gxCloseStory(); }
+        else { window.open(link, '_blank'); toast('📸 Карточка открыта', 'success'); }
+      } catch (e) { toast('Не удалось загрузить карточку', 'warning'); go.disabled = false; go.textContent = 'Повторить'; }
+    };
+  }
+  const _oldW = window.shareWrappedStory, _oldT = window.shareTrackStory;
+  window.shareWrappedStory = function () {
+    openStory(() => buildAuraCard(), { caption: '🎧 Моя музыкальная аура в Telegram Music!', fallback: _oldW });
+  };
+  window.shareTrackStory = function (track) {
+    const t = track || (qIdx >= 0 ? queue[qIdx] : null);
+    if (!t) { toast('Сначала включи трек'); return; }
+    openStory(() => buildTrackCard(t), { caption: '🎵 ' + t.artist + ' — ' + t.title, fallback: () => _oldT(track) });
+  };
+
+  /* ───────── Караоке: карточка-цитата ───────── */
+  let qMode = false; const qSel = new Set();
+  function ensureQuoteBar() {
+    if ($('lyr-quote-bar')) return $('lyr-quote-bar');
+    const bar = document.createElement('div'); bar.id = 'lyr-quote-bar';
+    bar.innerHTML = '<div class="q-info" id="q-info"></div><button class="q-x" id="q-x">Отмена</button><button class="q-go" id="q-go" disabled>Создать</button>';
+    $('fp-lyrics-view').appendChild(bar);
+    $('q-x').onclick = (e) => { e.stopPropagation(); lyrQuoteExit(); };
+    $('q-go').onclick = async (e) => {
+      e.stopPropagation(); haptic();
+      const t = qIdx >= 0 ? queue[qIdx] : null; if (!t || !qSel.size) return;
+      const lines = Array.from(document.querySelectorAll('#fp-lyrics-lines .lyr-line.lyr-sel')).map((l) => (l.firstElementChild ? l.firstElementChild.textContent : '').trim()).filter(Boolean);
+      lyrQuoteExit();
+      openStory(() => buildQuoteCard(t, lines), { caption: '🎵 ' + t.artist + ' — ' + t.title, copyText: lines.join('\n') + '\n— ' + t.artist + ', «' + t.title + '»' });
+    };
+    return bar;
+  }
+  function quoteInfo() {
+    const n = qSel.size; $('q-info').textContent = n ? 'Выбрано: ' + n + ' из 4' : 'Нажми на строки (до 4)';
+    $('q-go').disabled = n === 0;
+  }
+  function lyrQuoteExit() {
+    qMode = false; qSel.clear();
+    document.querySelectorAll('#fp-lyrics-lines .lyr-line.lyr-sel').forEach((l) => l.classList.remove('lyr-sel'));
+    const b = $('lyr-quote-bar'); if (b) b.classList.remove('on');
+    const btn = $('btn-lyr-quote'); if (btn) btn.classList.remove('on');
+  }
+  window.lyrQuoteToggle = function () {
+    if (qMode) { lyrQuoteExit(); return; }
+    if (qIdx < 0 || !queue[qIdx]) { toast('Сначала включи трек'); return; }
+    if (!lyricsVisible) toggleLyricsView();
+    if (!document.querySelector('#fp-lyrics-lines .lyr-line')) { toast('Текст ещё не загрузился'); return; }
+    qMode = true; qSel.clear(); ensureQuoteBar().classList.add('on'); $('btn-lyr-quote').classList.add('on'); quoteInfo();
+  };
+  $('fp-lyrics-lines').addEventListener('click', (e) => {
+    if (!qMode) return;
+    const line = e.target.closest && e.target.closest('.lyr-line'); if (!line) return;
+    e.stopPropagation(); e.preventDefault();
+    if (!(line.firstElementChild && line.firstElementChild.textContent.trim())) return;
+    if (qSel.has(line)) { qSel.delete(line); line.classList.remove('lyr-sel'); }
+    else { if (qSel.size >= 4) { toast('Максимум 4 строки'); return; } qSel.add(line); line.classList.add('lyr-sel'); }
+    haptic(); quoteInfo();
+  }, true);
+
+  /* ───────── Party: реакции и фон ───────── */
+  window.gxPartyFloat = function (emoji) {
+    const layer = $('gx-react-layer'); if (!layer) return;
+    const el = document.createElement('div'); el.className = 'gx-react'; el.textContent = emoji;
+    el.style.left = (8 + Math.random() * 78) + '%';
+    el.style.setProperty('--dx', (Math.random() * 90 - 45) + 'px');
+    el.style.setProperty('--rot', (Math.random() * 50 - 25) + 'deg');
+    layer.appendChild(el); setTimeout(() => el.remove(), 2500);
+    while (layer.children.length > 40) layer.firstChild.remove();
+  };
+  window.partyReact = function (emoji) {
+    haptic();
+    if (!_partyWs || _partyWs.readyState !== 1) { toast('Нет связи с комнатой', 'warning'); return; }
+    gxPartyFloat(emoji);
+    try { _partyWs.send(JSON.stringify({ type: 'reaction', emoji })); } catch (e) {}
+  };
+  (function partyBg() {
+    const img = $('party-now-cover'), bg = $('party-bg'); if (!img || !bg) return;
+    const upd = () => { const s = img.getAttribute('src'); bg.style.backgroundImage = s ? 'url("' + s.replace(/"/g, '%22') + '")' : 'none'; };
+    new MutationObserver(upd).observe(img, { attributes: true, attributeFilter: ['src'] }); upd();
+  })();
+
+  /* ───────── инициализация ───────── */
+  libShow(libView);
+  try { renderAura(); } catch (e) {}
+  try { libFilterApply(); } catch (e) {}
+  syncBack();
+})();
 
 </script>
 </body>

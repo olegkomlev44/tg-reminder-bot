@@ -2,7 +2,7 @@
 //  Music App — Service Worker  (Cache-First Architecture)
 //  Версия кэша: при изменении SW всегда меняй VERSION
 // ════════════════════════════════════════════════════════════════════
-const VERSION   = 'v1.4.0';
+const VERSION   = 'v1.5.0';
 const SHELL     = `shell-${VERSION}`;   // App Shell — статика
 const API_CACHE = `api-${VERSION}`;     // API-ответы (поиск, треки, волна, тексты песен)
 const AUD_CACHE = `audio-${VERSION}`;   // Аудиопотоки (авто-кэш при прослушивании, LRU)
