@@ -254,6 +254,8 @@ RATE_LIMIT_RULES = [
     ("/api/playlist/import", 6, 60),
     ("/api/send_to_chat", 10, 60),
     ("/api/story_card", 15, 60),
+    ("/api/story_upload", 10, 60),
+    ("/api/cover_proxy", 90, 60),
     ("/api/wave", 20, 60),
     ("/api/radio", 20, 60),
     ("/api/lyrics/translate", 15, 60),
@@ -469,6 +471,48 @@ async def api_radio(request):
 
 
 
+# ── Vibe Tuner: пресеты настроения для «Моей Волны» ────────────────────────
+_WAVE_VIBE_QUERIES = {
+    "energetic": ["energetic workout hits", "upbeat dance pop", "phonk drift", "hype rap bangers",
+                  "edm festival", "rock energy", "high tempo electronic", "gym motivation"],
+    "calm": ["lofi chill beats", "calm acoustic", "ambient relaxing", "soft indie chill",
+             "piano relax", "sleep lofi", "slow jazz night", "dream pop calm"],
+}
+
+
+async def _wave_vibe_search(vibe: str, limit: int, offset: int, bl, known_ids: set):
+    pool = _WAVE_VIBE_QUERIES[vibe]
+    page = offset // max(limit, 1)
+    queries = [pool[(page * 3 + k) % len(pool)] for k in range(3)]
+    results = await asyncio.gather(
+        *[music_engine.search_multi(q, limit=max(8, limit // 2)) for q in queries],
+        return_exceptions=True,
+    )
+    out, seen = [], set()
+    for res in results:
+        if not isinstance(res, list):
+            continue
+        for t in res:
+            tid = str(t.get("id", ""))
+            if tid and tid not in seen and tid not in bl:
+                seen.add(tid)
+                out.append(t)
+    random.shuffle(out)
+    return out[:limit]
+
+
+def _wave_familiar(uid, favs: list, history: list, limit: int, offset: int, bl):
+    pool, seen = [], set()
+    for t in list(favs) + list(history):
+        tid = str(t.get("id", ""))
+        if tid and tid not in seen and tid not in bl:
+            seen.add(tid)
+            pool.append(t)
+    # стабильный порядок в течение дня, чтобы пагинация по offset не повторяла треки
+    random.Random(f"{uid}-{datetime.now().strftime('%Y%m%d')}").shuffle(pool)
+    return pool[offset:offset + limit]
+
+
 async def api_wave(request):
     limit = int(request.rel_url.query.get("limit", 120))
     offset = int(request.rel_url.query.get("offset", 0))
@@ -479,6 +523,14 @@ async def api_wave(request):
     bl = get_blacklist(uid)
     favs = get_music_favs(uid)
     history = get_user_history(uid)
+
+    vibe = (request.rel_url.query.get("vibe") or "").strip().lower()
+    known_ids = {str(t.get("id")) for t in (list(favs) + list(history)) if t.get("id")}
+    if vibe in _WAVE_VIBE_QUERIES:
+        tracks = await _wave_vibe_search(vibe, limit, offset, bl, known_ids)
+        return cors(web.json_response(tracks))
+    if vibe == "familiar":
+        return cors(web.json_response(_wave_familiar(uid, favs, history, limit, offset, bl)))
 
 
     unique_tracks = []
@@ -632,6 +684,8 @@ async def api_wave(request):
                     break
 
 
+    if vibe == "new":
+        unique_tracks = [t for t in unique_tracks if str(t.get("id", "")) not in known_ids]
     random.shuffle(unique_tracks)
     return cors(web.json_response(unique_tracks[:limit]))
 
@@ -1081,6 +1135,85 @@ async def api_story_card(request):
 
 
 
+# ── Клиентские карточки для Stories ─────────────────────────────────────────
+# Браузер рисует карточку 1080×1920 на <canvas> и заливает JPEG сюда, чтобы
+# Telegram мог скачать её по публичной ссылке (tg.shareToStory требует URL).
+_story_media: dict = {}
+_STORY_TTL = 30 * 60
+_STORY_MAX_ITEMS = 60
+
+
+def _story_media_gc():
+    now = time.monotonic()
+    for k in [k for k, (_, ts) in _story_media.items() if now - ts > _STORY_TTL]:
+        _story_media.pop(k, None)
+    while len(_story_media) > _STORY_MAX_ITEMS:
+        _story_media.pop(next(iter(_story_media)), None)
+
+
+async def api_story_upload(request):
+    verify(request.headers.get("Authorization", ""))
+    data = await request.read()
+    if len(data) < 1000 or len(data) > 900_000 or data[:3] != b"\xff\xd8\xff":
+        return cors(web.json_response({"error": "bad image"}, status=400))
+    _story_media_gc()
+    token = uuid.uuid4().hex
+    _story_media[token] = (data, time.monotonic())
+    return cors(web.json_response({"ok": True, "path": f"/api/story_media/{token}.jpg"}))
+
+
+async def api_story_media(request):
+    token = request.match_info.get("name", "").split(".")[0]
+    item = _story_media.get(token)
+    if not item:
+        return cors(web.json_response({"error": "not found"}, status=404))
+    return cors(web.Response(body=item[0], content_type="image/jpeg",
+                             headers={"Cache-Control": "public, max-age=1800"}))
+
+
+async def _is_public_host(host: str) -> bool:
+    import ipaddress, socket
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except Exception:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            if not ipaddress.ip_address(info[4][0]).is_global:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
+async def api_cover_proxy(request):
+    """Отдаёт обложку с CORS, чтобы canvas не «протухал» (taint) при рендере карточек."""
+    verify(request.headers.get("Authorization", ""))
+    from urllib.parse import urlparse
+    url = request.rel_url.query.get("url", "").strip()
+    u = urlparse(url)
+    if u.scheme != "https" or not u.hostname or not await _is_public_host(u.hostname):
+        return cors(web.json_response({"error": "bad url"}, status=400))
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=False) as resp:
+                ctype = resp.headers.get("Content-Type", "")
+                if resp.status != 200 or not ctype.startswith("image/"):
+                    return cors(web.json_response({"error": "upstream"}, status=502))
+                body = bytearray()
+                async for chunk in resp.content.iter_chunked(65536):
+                    body.extend(chunk)
+                    if len(body) > 4_000_000:
+                        return cors(web.json_response({"error": "too large"}, status=413))
+    except Exception:
+        return cors(web.json_response({"error": "fetch failed"}, status=502))
+    return cors(web.Response(body=bytes(body), content_type=ctype.split(";")[0],
+                             headers={"Cache-Control": "public, max-age=86400"}))
+
+
 async def api_history_add(request):
     user = verify(request.headers.get("Authorization", ""))
     try:
@@ -1431,6 +1564,7 @@ async def api_prefetch(request):
 # REAL-TIME PARTY MODE (WebSocket Jam)
 # ═══════════════════════════════════════════════════════════════
 _party_rooms: dict[str, dict] = {}
+_PARTY_REACTIONS = {"🔥", "❤️", "🚀", "😭", "👏"}
 
 
 
@@ -1563,6 +1697,14 @@ async def api_party_ws(request):
 
             elif mtype == "queue_updated":
                 await _party_broadcast(room, {"type": "queue_updated", "room_id": room_id, "sender_id": uid})
+
+
+            elif mtype == "reaction":
+                emoji = str(data.get("emoji", ""))
+                if emoji in _PARTY_REACTIONS and not _is_rate_limited(f"react:{room_id}:{uid}", 12, 5):
+                    await _party_broadcast(room, {
+                        "type": "reaction", "emoji": emoji, "sender_id": uid, "name": uname,
+                    })
 
 
     finally:
@@ -1872,6 +2014,9 @@ async def start_web_server():
     app.router.add_post("/api/playlist/import", api_playlist_import)
     app.router.add_post("/api/send_to_chat", api_send_to_chat)
     app.router.add_get("/api/story_card", api_story_card)
+    app.router.add_post("/api/story_upload", api_story_upload)
+    app.router.add_get("/api/story_media/{name}", api_story_media)
+    app.router.add_get("/api/cover_proxy", api_cover_proxy)
     app.router.add_get("/api/wave", api_wave)
     app.router.add_get("/api/radio", api_radio)
     app.router.add_get("/api/lyrics", api_lyrics)
