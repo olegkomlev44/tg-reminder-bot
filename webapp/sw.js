@@ -2,11 +2,11 @@
 //  Music App — Service Worker  (Cache-First Architecture)
 //  Версия кэша: при изменении SW всегда меняй VERSION
 // ════════════════════════════════════════════════════════════════════
-const VERSION   = 'v1.5.0';
+const VERSION   = 'v1.5.1';
 const SHELL     = `shell-${VERSION}`;   // App Shell — статика
 const API_CACHE = `api-${VERSION}`;     // API-ответы (поиск, треки, волна, тексты песен)
 const AUD_CACHE = `audio-${VERSION}`;   // Аудиопотоки (авто-кэш при прослушивании, LRU)
-const OFFLINE_CACHE = `offline-${VERSION}`; // Явно сохранённые пользователем треки
+const OFFLINE_CACHE = 'offline-store'; // постоянное имя: офлайн-треки переживают обновления SW // Явно сохранённые пользователем треки
 
 const SHELL_FILES = [
     '/',
@@ -28,14 +28,27 @@ self.addEventListener('install', event => {
 
 // ── ACTIVATE — удаляем старые кэши (сохраняя OFFLINE_CACHE при минорных апдейтах) ──
 self.addEventListener('activate', event => {
-    event.waitUntil(
-        caches.keys().then(keys =>
-            Promise.all(
-                keys.filter(k => ![SHELL, API_CACHE, AUD_CACHE, OFFLINE_CACHE].includes(k) && !k.startsWith('offline-'))
-                    .map(k => caches.delete(k))
-            )
-        ).then(() => self.clients.claim())
-    );
+    event.waitUntil((async () => {
+        const keys = await caches.keys();
+        // миграция: офлайн-треки из старых версионных кэшей offline-vX.Y.Z → offline-store
+        const legacy = keys.filter(k => k.startsWith('offline-') && k !== OFFLINE_CACHE);
+        if (legacy.length) {
+            const dst = await caches.open(OFFLINE_CACHE);
+            for (const k of legacy) {
+                try {
+                    const src = await caches.open(k);
+                    for (const req of await src.keys()) {
+                        if (!(await dst.match(req))) { const res = await src.match(req); if (res) await dst.put(req, res); }
+                    }
+                    await caches.delete(k);
+                } catch (_) {}
+            }
+        }
+        await Promise.all(keys
+            .filter(k => ![SHELL, API_CACHE, AUD_CACHE, OFFLINE_CACHE].includes(k) && !k.startsWith('offline-'))
+            .map(k => caches.delete(k)));
+        await self.clients.claim();
+    })());
 });
 
 // ── FETCH — стратегия по типу запроса ────────────────────────────────

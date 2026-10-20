@@ -2924,6 +2924,18 @@ li.track.sw-armed.sw-left { box-shadow: 140px 0 0 0 rgba(255,90,90,.45); }
 @keyframes gxFloat { 0% { transform: translate(0, 0) scale(.4); opacity: 0; } 12% { opacity: 1; transform: translate(0, -30px) scale(1.15); } 100% { transform: translate(var(--dx, 0px), -62vh) scale(1) rotate(var(--rot, 0deg)); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .party-member-av, .party-here-dot, .gx-react { animation: none; } }
 
+
+/* ── perf: ничего тяжёлого, пока оно скрыто ── */
+.party-bg { inset: -20px; transform: none; filter: blur(28px) brightness(.45) saturate(1.2); transition: none; }
+#party-overlay:not(.vis) .party-bg { display: none; }
+#party-overlay:not(.vis) .party-here-dot, #party-overlay:not(.vis) .party-member-av { animation: none; }
+.vibe-chip, .lib-pill, .lib-filter, .fp-dock, .party-react-bar, .aura-btn { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+.fp-dock { background: rgba(255,255,255,.09); }
+.party-react-bar { background: rgba(255,255,255,.14); }
+#gx-settings-sheet:not(.vis) { visibility: hidden; transition: transform .4s cubic-bezier(.22,1,.36,1), visibility 0s linear .4s; }
+#gx-story-ov:not(.vis) { visibility: hidden; transition: opacity .25s, visibility 0s linear .25s; }
+#gx-react-layer:empty { display: none; }
+body.gx-playing .wave-hero-bg { animation: none !important; }
 </style>
 </head>
 <body>
@@ -3817,7 +3829,7 @@ li.track.sw-armed.sw-left { box-shadow: 140px 0 0 0 rgba(255,90,90,.45); }
 </div><script>
 // ── INIT & UTILS ──
 const tg = window.Telegram.WebApp;
-tg.expand(); tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
+tg.expand(); try { if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {} tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
 function haptic() { try { tg.HapticFeedback.impactOccurred('light'); } catch(e){} }
 const authStr = tg.initData || 'test_mode';
 const aud = document.getElementById('aud');
@@ -6608,6 +6620,8 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
 
 
   function drawFrame() {
+    if (window.__gxHeroPaused && window.__gxHeroPaused()) { rafId = null; return; }
+    if (window.__gxHeroThrottle && window.__gxHeroThrottle()) { rafId = requestAnimationFrame(drawFrame); return; }
     if (W === 0) resizeCanvas();
     t += 1;
 
@@ -6704,6 +6718,11 @@ let toastT; function toast(msg, type) { const el = document.getElementById('toas
 
   resizeCanvas();
   rafId = requestAnimationFrame(drawFrame);
+  window.__gxHeroKick = function () {
+    const pw = document.getElementById('page-wave'), wi = document.getElementById('wave-idle');
+    const ok = pw && pw.classList.contains('on') && wi && wi.style.display !== 'none';
+    if (ok && !rafId) { resizeCanvas(); rafId = requestAnimationFrame(drawFrame); }
+  };
   window.addEventListener('resize', () => { resizeCanvas(); });
 })();
 
@@ -9792,10 +9811,12 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     ['full-player', vis, () => closeFull()],
     ['pls-detail', (e) => e.style.display === 'block' && plsDetailOpen, () => closePlsDetail()],
     ['wave-active', (e) => waveScene && e.style.display === 'flex', () => waveSceneToggle(false)],
+    ['pages', () => { const w = $('page-wave'); return !!w && !w.classList.contains('on'); }, () => nav('wave')],
   ];
   function topLayer() { return LAYERS.find(([id, test]) => { const e = $(id); return e && test(e); }); }
   function syncBack() {
     try { if (topLayer()) tg.BackButton.show(); else tg.BackButton.hide(); } catch (e) {}
+    if (!topLayer() && window.__gxHeroKick) window.__gxHeroKick();
   }
   try { tg.BackButton.onClick(() => { const t = topLayer(); if (t) { try { t[2](); } catch (e) {} } setTimeout(syncBack, 420); }); } catch (e) {}
   let _sbRaf = 0;
@@ -9803,6 +9824,7 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
   const mo = new MutationObserver(syncSoon);
   LAYERS.forEach(([id]) => { const e = $(id); if (e) mo.observe(e, { attributes: true, attributeFilter: ['class', 'style'] }); });
   mo.observe(document.body, { childList: true });
+  document.querySelectorAll('.page').forEach((pg) => mo.observe(pg, { attributes: true, attributeFilter: ['class'] }));
   ['click', 'touchend'].forEach((ev) => document.addEventListener(ev, () => setTimeout(syncBack, 80), true));
 
   /* ───────── Свайпы по строкам треков ───────── */
@@ -10222,6 +10244,15 @@ loadData().then(() => { renderQuickGrid(); loadWave(true); checkNotifBadge(); se
     const upd = () => { const s = img.getAttribute('src'); bg.style.backgroundImage = s ? 'url("' + s.replace(/"/g, '%22') + '")' : 'none'; };
     new MutationObserver(upd).observe(img, { attributes: true, attributeFilter: ['src'] }); upd();
   })();
+
+  /* ───────── производительность ───────── */
+  const COVER_LAYERS = ['full-player', 'artist-card', 'party-overlay', 'friends-panel', 'notif-panel'];
+  window.__gxHeroPaused = () => document.hidden || COVER_LAYERS.some((id) => { const e = $(id); return e && e.classList.contains('vis'); });
+  let _heroSkip = 0;
+  window.__gxHeroThrottle = () => !aud.paused && ((_heroSkip ^= 1) === 1);
+  const setPlaying = () => document.body.classList.toggle('gx-playing', !aud.paused && !aud.ended);
+  ['play', 'playing', 'pause', 'ended', 'emptied'].forEach((ev) => aud.addEventListener(ev, setPlaying));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && window.__gxHeroKick) window.__gxHeroKick(); });
 
   /* ───────── инициализация ───────── */
   libShow(libView);
