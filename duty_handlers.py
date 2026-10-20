@@ -1,6 +1,15 @@
 """
 duty_handlers.py — всё что связано с нарядами, расписанием, настройками,
 клавиатурами, планировщиком и cmd_start/cmd_getchatid.
+
+Обновления v3.0 (пункты 1, 2, 3, 4, 6, 9 + врачи на октябрь 2026):
+  - Подключено расписание врачей на октябрь 2026 (OCTOBER_DOCTORS)
+  - Пункт 1: Передача дежурной бригады врачей напрямую на карточку сводок (make_reminder_card)
+  - Пункт 2: Разделение контекста Сводок (маршрут + врачи + погода) и Процедурки (этап смены 1/2 или 2/2)
+  - Пункт 3: Расчёт цепочки очереди из 3 следующих дежурных (get_queue_chain) для карточки и текста
+  - Пункт 4: Интеграция личного прогресса ДМБ дежурного и подсчёт оставшихся нарядов до дома
+  - Пункт 6: Единая информативная подпись (caption) к карточке наряда с живым тегом, очередью, ДМБ, врачами и погодой без спама вторым сообщением
+  - Пункт 9: Контекстная генерация ИИ-заголовков (get_ai_header) с учётом дня недели, этапа смены, фамилии отв. врача, погоды и дней до ДМБ
 """
 
 import asyncio
@@ -27,7 +36,9 @@ from config import (
     GAMING_HEADERS_SVODKI, GAMING_HEADERS_PROC, GAMING_ENDINGS,
     DONE_REPLIES, DONE_REPLIES_GAMING, RETRY_PREFIX, RETRY_PREFIX_GAMING,
     PERSONAL_SVODKI, PERSONAL_SVODKI_GAMING, PERSONAL_PROC, PERSONAL_PROC_GAMING,
-    MONDAY_INTROS, SUNDAY_INTROS, JULY_DOCTORS, AUGUST_DOCTORS, SEPTEMBER_DOCTORS, EASTER_EGGS,
+    MONDAY_INTROS, SUNDAY_INTROS,
+    JULY_DOCTORS, AUGUST_DOCTORS, SEPTEMBER_DOCTORS, OCTOBER_DOCTORS,
+    EASTER_EGGS,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Импортируем генераторы карточек
 try:
     from card_generator import make_reminder_card, THEME_KEYS
-    logger.info(f"🟢 card_generator импортирован, тем: {len(THEME_KEYS)}")
+    logger.info(f"🟢 card_generator v3.0 импортирован, тем: {len(THEME_KEYS)}")
 except Exception:
     logger.error("🔴 card_generator недоступен:\n" + traceback.format_exc())
     make_reminder_card = None
@@ -50,6 +61,7 @@ try:
         get_next_milestone,
         format_dembel_caption,
         DEMBEL_DATES,
+        _time_left as _dembel_time_left,
     )
     logger.info(f"🟢 dembel_generator v3.0 импортирован, людей: {len(DEMBEL_DATES)}")
 except Exception:
@@ -61,6 +73,7 @@ except Exception:
     get_next_milestone = None
     format_dembel_caption = None
     DEMBEL_DATES = {}
+    _dembel_time_left = None
 
 
 # ── FSM ───────────────────────────────────────────────────────────────────────
@@ -185,6 +198,14 @@ def get_ending() -> str:
     mood = get_daily_mood()
     return random.choice(MOODS[mood]["endings"] + GAMING_ENDINGS)
 
+def _plural_ru(n: int, forms: tuple[str, str, str]) -> str:
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return forms[0]
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return forms[1]
+    return forms[2]
+
 # ── Duty schedule ─────────────────────────────────────────────────────────────
 def get_svodki_idx(target_date: date) -> int:
     data = load_data()
@@ -236,11 +257,152 @@ def weekday_divider(d: date) -> str:
 def person_tag(name: str) -> str:
     return f"{PERSON_EMOJI.get(name,'👤')} *{name}*"
 
+def format_person_mention(name: str, data: dict | None = None) -> str:
+    """
+    Пункт 6: Возвращает живой кликабельный тег [Имя](tg://user?id=...), если боец
+    зарегистрировал свой ID в настройках, либо жирный тег с эмодзи.
+    """
+    if data is None:
+        data = load_data()
+    em = PERSON_EMOJI.get(name, "👤")
+    uid = data.get("personal_ids", {}).get(name)
+    if uid:
+        return f"{em} [{name}](tg://user?id={uid})"
+    return f"{em} *{name}*"
+
 def progress_bar(current: int, total: int) -> str:
     filled = round((current / total) * 8)
     return f"`[{'▓'*filled}{'░'*(8-filled)}]` {current}/{total}"
 
+
+# ── Пункт 3: Цепочка очереди («Кто за тобой») ─────────────────────────────────
+def get_queue_chain(duty_type: str, from_date: date, count: int = 3) -> list[dict]:
+    """
+    Возвращает список из `count` следующих дежурных (после текущего на `from_date`)
+    с точным количеством дней до начала их смены:
+    [{"name": "Глеб", "days": 1, "emoji": "💣"}, ...]
+    """
+    current_person = get_svodki_person(from_date) if duty_type == "svodki" else get_procedura_person(from_date)
+    chain: list[dict] = []
+    seen = {current_person}
+    max_scan = 30
+
+    for d_offset in range(1, max_scan + 1):
+        check_date = from_date + timedelta(days=d_offset)
+        p = get_svodki_person(check_date) if duty_type == "svodki" else get_procedura_person(check_date)
+        if p not in seen:
+            seen.add(p)
+            chain.append({
+                "name": p,
+                "days": d_offset,
+                "emoji": PERSON_EMOJI.get(p, "👤"),
+            })
+            if len(chain) >= count:
+                break
+    return chain
+
+
+def format_queue_chain_text(queue_chain: list[dict]) -> str:
+    """Форматирует цепочку очереди со стрелками: 💣 Глеб (завтра) ➔ 🫡 Дима (+2д) ➔ ⚡ Денис (+3д)"""
+    if not queue_chain:
+        return "—"
+    parts = []
+    for item in queue_chain:
+        d = item["days"]
+        d_str = "завтра" if d == 1 else f"+{d}д"
+        parts.append(f"{item.get('emoji', '👤')} {item['name']} (`{d_str}`)")
+    return " ➔ ".join(parts)
+
+
+# ── Пункт 4: Мини-прогресс ДМБ дежурного + остаток нарядов до дома ────────────
+def get_person_dembel_brief(person: str, duty_type: str, from_date: date) -> dict | None:
+    """
+    Рассчитывает для дежурного его личный прогресс ДМБ и точное число оставшихся
+    нарядов (сводок или дежурных дней процедурки) до даты его ДМБ.
+    """
+    target = DEMBEL_DATES.get(person)
+    if not target:
+        return None
+
+    if _dembel_time_left:
+        tl = _dembel_time_left(target)
+    else:
+        days_left = max(0, (target - from_date).days)
+        done = days_left <= 0
+        prog = min(1.0, max(0.0, (365 - days_left) / 365.0))
+        tl = {
+            "done": done,
+            "days": days_left,
+            "hours": 0,
+            "progress": prog,
+            "rank": {"short": "ДОМА" if done else "В СТРОЮ"},
+        }
+
+    duties_left = 0
+    if not tl["done"]:
+        rem_days = max(0, (target - from_date).days)
+        for d in range(1, rem_days + 1):
+            future_d = from_date + timedelta(days=d)
+            if duty_type == "svodki":
+                if get_svodki_person(future_d) == person:
+                    duties_left += 1
+            else:
+                if get_procedura_person(future_d) == person:
+                    duties_left += 1
+
+    pct_str = f"{tl['progress'] * 100:.2f}%"
+    target_str = target.strftime("%d.%m.%Y")
+    if tl["done"]:
+        caption_line = f"🏠 *ДМБ ({target_str}):* `100%` — *ГРАЖДАНСКИЙ (дома!)*"
+    else:
+        if duties_left > 0:
+            forms = ("сводка", "сводки", "сводок") if duty_type == "svodki" else ("дежурство", "дежурства", "дежурств")
+            tail = f"ещё `~{duties_left}` {_plural_ru(duties_left, forms)} до дома"
+        else:
+            tail = "*это крайний наряд перед ДМБ!*"
+        caption_line = (
+            f"🎖 *До ДМБ ({target_str}):* `{tl['days']} дн. {tl['hours']} ч.` (`{pct_str}`) · {tail}"
+        )
+
+    return {
+        "has_dembel": True,
+        "done": tl["done"],
+        "days": tl["days"],
+        "hours": tl["hours"],
+        "progress": tl["progress"],
+        "target_str": target_str,
+        "rank_short": tl.get("rank", {}).get("short", ""),
+        "duties_left": duties_left,
+        "caption_line": caption_line,
+    }
+
+
 # ── Message builders ──────────────────────────────────────────────────────────
+_DOCTORS_BY_MONTH = {
+    7:  JULY_DOCTORS,
+    8:  AUGUST_DOCTORS,
+    9:  SEPTEMBER_DOCTORS,
+    10: OCTOBER_DOCTORS,
+}
+
+
+def get_doctors_for_date(target_date: date) -> tuple | None:
+    return _DOCTORS_BY_MONTH.get(target_date.month, {}).get(target_date.day)
+
+
+def format_doctors_block(target_date: date) -> str:
+    docs = get_doctors_for_date(target_date)
+    if not docs:
+        return ""
+    date_str = target_date.strftime("%d.%m.%Y")
+    roles = ("Отв. врач", "I хирург", "II хирург")
+    lines = [f"🏥 *Дежурные врачи на {date_str}:*"]
+    for idx, doc in enumerate(docs):
+        role_lbl = f"{roles[idx]}: " if idx < len(roles) else ""
+        lines.append(f"  • {role_lbl}*{doc}*")
+    return "\n".join(lines)
+
+
 def build_duty_message(target_date: date, label: str) -> str:
     svodki   = get_svodki_person(target_date)
     proc     = get_procedura_person(target_date)
@@ -251,30 +413,32 @@ def build_duty_message(target_date: date, label: str) -> str:
     sv_em = PERSON_EMOJI.get(svodki, "👤")
     pr_em = PERSON_EMOJI.get(proc, "👤")
     bar = progress_bar(proc_day, 2)
-    sv_next = next_person_svodki(svodki)
-    pr_next = next_person_proc(proc)
     sv_days = days_until_svodki(svodki, target_date)
     pr_days = days_until_procedura(proc, target_date)
 
-    # Врачи
-    month = target_date.month
-    day   = target_date.day
-    _DOCTORS_BY_MONTH = {7: JULY_DOCTORS, 8: AUGUST_DOCTORS, 9: SEPTEMBER_DOCTORS}
-    docs  = _DOCTORS_BY_MONTH.get(month, {}).get(day)
-    doc_line = f"\n\n🏥 *Врачи на {date_str}:*\n" + "\n".join(f"  • {d}" for d in docs) if docs else ""
+    sv_chain = format_queue_chain_text(get_queue_chain("svodki", target_date, 3))
+    pr_chain = format_queue_chain_text(get_queue_chain("proc", target_date, 3))
+
+    sv_dmb = get_person_dembel_brief(svodki, "svodki", target_date)
+    pr_dmb = get_person_dembel_brief(proc, "proc", target_date)
+    sv_dmb_line = f"\n  {sv_dmb['caption_line']}" if sv_dmb else ""
+    pr_dmb_line = f"\n  {pr_dmb['caption_line']}" if pr_dmb else ""
+
+    doc_block = format_doctors_block(target_date)
+    doc_line = f"\n\n{doc_block}" if doc_block else ""
 
     return (
         f"📋 *Наряд {label}* — {icon} {day_name}, {date_str}\n"
         f"{div}\n\n"
-        f"🤷‍♀️ *Дежурный №{SVODKI_LIST.index(svodki)+1} по сводкам:*\n"
+        f"🤷‍♀️ *Дежурный №{SVODKI_LIST.index(svodki)+1} по сводкам (18:00):*\n"
         f"  {sv_em} *{svodki}*\n"
-        f"  📊 нарядов всего: {get_total_duties(svodki)}\n"
-        f"  ⏭ следующий: {PERSON_EMOJI.get(sv_next,'👤')} {sv_next} через {sv_days} д.\n\n"
-        f"⚡️ *Дежурный №{PROCEDURA_LIST.index(proc)+1} по процедурке:*\n"
+        f"  📊 нарядов всего: *{get_total_duties(svodki)}* (свой цикл через {sv_days} д.)\n"
+        f"  ⏭ очередь: {sv_chain}{sv_dmb_line}\n\n"
+        f"⚡️ *Дежурный №{PROCEDURA_LIST.index(proc)+1} по процедурке (22:00):*\n"
         f"  {pr_em} *{proc}*\n"
-        f"  {bar} день {proc_day}/2\n"
-        f"  📊 нарядов всего: {get_total_duties(proc)}\n"
-        f"  ⏭ следующий: {PERSON_EMOJI.get(pr_next,'👤')} {pr_next} через {pr_days} д.\n"
+        f"  {bar} ({'экватор смены' if proc_day == 1 else 'сдача поста'})\n"
+        f"  📊 нарядов всего: *{get_total_duties(proc)}* (свой цикл через {pr_days} д.)\n"
+        f"  ⏭ очередь: {pr_chain}{pr_dmb_line}\n"
         f"{div}{doc_line}"
     )
 
@@ -289,9 +453,11 @@ def build_week_schedule() -> str:
         day_name, icon, _, _ = WEEKDAY_STYLE[d.weekday()]
         sv_em = PERSON_EMOJI.get(sv, "👤")
         pr_em = PERSON_EMOJI.get(pr, "👤")
+        docs = get_doctors_for_date(d)
+        doc_short = f"\n  🏥 Врачи: {', '.join(docs)}" if docs else ""
         lines.append(
             f"{icon} *{d.strftime('%d.%m')} {day_name}*\n"
-            f"  🤷‍♀️ {sv_em} {sv}  ⚡️ {pr_em} {pr} (д.{pday}/2)\n"
+            f"  🤷‍♀️ {sv_em} {sv}  ⚡️ {pr_em} {pr} (д.{pday}/2){doc_short}\n"
         )
     return "\n".join(lines)
 
@@ -353,11 +519,14 @@ def build_pinned_content() -> str:
     mood_lbl = get_mood_label()
     filled   = round((proc_day / 2) * 8)
     bar      = "▓" * filled + "░" * (8 - filled)
+    doc_block = format_doctors_block(today)
+    doc_section = f"\n{doc_block}\n" if doc_block else ""
     return (
         f"📌 *АКТУАЛЬНЫЙ НАРЯД*\n{icon} {day_name}, {date_str}\n"
         f"_настроение бота: {mood_lbl}_\n{div}\n\n"
         f"🤷‍♀️ *Дежурный №{SVODKI_LIST.index(svodki)+1} по сводкам:*\n  {sv_em} *{svodki}*\n\n"
-        f"⚡️ *Дежурный №{PROCEDURA_LIST.index(proc)+1} по процедурке:*\n  {pr_em} *{proc}*\n  `[{bar}]` день {proc_day}/2\n\n"
+        f"⚡️ *Дежурный №{PROCEDURA_LIST.index(proc)+1} по процедурке:*\n  {pr_em} *{proc}*\n  `[{bar}]` день {proc_day}/2\n"
+        f"{doc_section}\n"
         f"{div}\n_обновляется автоматически каждый день_"
     )
 
@@ -443,17 +612,70 @@ async def update_pinned_message(bot):
     except Exception as e:
         logger.error(f"ошибка создания закрепа: {e}")
 
-async def get_ai_header(person: str, duty_type: str):
+
+# ── Пункт 9: Контекстная генерация ИИ-заголовка (Gemini) ──────────────────────
+async def get_ai_header(
+    person: str,
+    duty_type: str,
+    weekday_name: str = "",
+    proc_day: int = 1,
+    doctors: tuple | None = None,
+    dembel_info: dict | None = None,
+    weather_hint: str | None = None,
+    total_duties: int = 0,
+) -> str | None:
+    """
+    Генерирует короткую, меткую и смешную фразу-заголовок для карточки наряда
+    с учётом реального контекста сегодняшнего вечера:
+      - день недели и тип наряда (сводки к 18:00 или процедурка к 22:00)
+      - день двухдневной смены для процедурки (1/2 или 2/2)
+      - фамилия сегодняшнего ответственного врача (для сводок)
+      - сколько дней и нарядов осталось бойцу до ДМБ
+      - погода на улице
+    """
     try:
         from google import genai
         key = os.getenv("GEMINI_API_KEY")
-        if not key: return None
-        client   = genai.Client(api_key=key)
-        duty_name = "сводки" if duty_type == "svodki" else "процедурку"
+        if not key:
+            return None
+        client = genai.Client(api_key=key)
+
+        ctx_parts = []
+        if weekday_name:
+            ctx_parts.append(f"День недели: {weekday_name}")
+
+        if duty_type == "svodki":
+            duty_desc = "собрать и отнести сводки по отделениям к 18:00"
+            if doctors and len(doctors) > 0:
+                ctx_parts.append(f"Ответственный дежурный врач сегодня: {doctors[0]}")
+            if weather_hint:
+                ctx_parts.append(f"Погода на улице: {weather_hint[:90]}")
+        else:
+            stage_desc = (
+                "день 1 из 2 (первый вечер смены, экватор)"
+                if proc_day == 1
+                else "день 2 из 2 (финальный вечер смены, сдача поста)"
+            )
+            duty_desc = f"уборка процедурки в 22:00 ({stage_desc})"
+
+        if dembel_info and dembel_info.get("has_dembel"):
+            if dembel_info.get("done"):
+                ctx_parts.append(f"У бойца {person} уже наступил ДМБ (100% выслуги)!")
+            else:
+                d_left = dembel_info.get("days", 0)
+                n_left = dembel_info.get("duties_left", 0)
+                ctx_parts.append(f"До дембеля бойцу осталось {d_left} дн. (осталось примерно {n_left} таких нарядов)")
+
+        if total_duties > 0:
+            ctx_parts.append(f"Уже выполнено нарядов: {total_duties}")
+
+        context_str = "; ".join(ctx_parts) if ctx_parts else "обычный вечерний наряд"
+
         prompt = (
-            f"Напиши ОДНУ короткую, смешную и дерзкую фразу (максимум 7-8 слов), "
-            f"чтобы напомнить дежурному по имени {person} выполнить наряд: {duty_name}. "
-            "Начни с эмодзи. Без кавычек. Можно отсылки к CS2, Dota 2 или Genshin Impact."
+            f"Напиши ОДНУ короткую, смешную и дерзкую фразу-заголовок (максимум 8–10 слов), "
+            f"чтобы напомнить дежурному по имени {person} выполнить наряд: {duty_desc}.\n"
+            f"Контекст вечера (обыграй 1–2 детали отсюда): {context_str}.\n"
+            "Начни с подходящего эмодзи. Без кавычек. Можно сленг CS2, Dota 2, JDM/авто или Genshin."
         )
         response = await client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         return response.text.strip() if response.text else None
@@ -461,27 +683,43 @@ async def get_ai_header(person: str, duty_type: str):
         logger.error(f"Ошибка Gemini header: {e}")
         return None
 
+
 async def get_weather_advice_for_reminder(city: str = "Одинцово") -> str | None:
     try:
         from google import genai
         from google.genai import types as gt
         key = os.getenv("GEMINI_API_KEY")
-        if not key: return None
+        if not key:
+            return None
         client = genai.Client(api_key=key)
         prompt = (
-            f"Узнай актуальную погоду в {city}. Напиши 1-2 предложения с саркастичным советом "
-            "как одеться дежурному. Стиль: геймерский, немного токсичный."
+            f"Узнай актуальную погоду в {city} прямо сейчас. "
+            "В начале укажи температуру и осадки (например: +8°C, пасмурно), а затем 1 короткое "
+            "саркастичное предложение в геймерском стиле, как одеться дежурному для похода со сводками."
         )
         r = await client.aio.models.generate_content(
             model="gemini-2.5-flash", contents=prompt,
             config=gt.GenerateContentConfig(tools=[{"google_search": {}}])
         )
-        return r.text.strip()
+        return r.text.strip() if r.text else None
     except Exception as e:
         logger.error(f"Ошибка погоды в reminder: {e}")
         return None
 
-# ── Reminders ─────────────────────────────────────────────────────────────────
+
+def _extract_short_weather(weather_text: str | None) -> str | None:
+    """Выделяет краткую сводку погоды (до 34 символов) для плашки на самой картинке."""
+    if not weather_text:
+        return None
+    first_line = weather_text.replace("*", "").replace("_", "").split("\n")[0].strip()
+    for sep in (". ", " — ", " - ", "! "):
+        if sep in first_line:
+            first_line = first_line.split(sep)[0].strip()
+            break
+    return first_line[:36]
+
+
+# ── Reminders (Пункт 6: единая подпись к карточке без спама 2-м сообщением) ───
 async def _send_personal(bot, person: str, duty_type: str):
     data = load_data()
     uid  = data.get("personal_ids", {}).get(person)
@@ -490,15 +728,84 @@ async def _send_personal(bot, person: str, duty_type: str):
     try: await bot.send_message(uid, random.choice(pool).format(name=person))
     except Exception as e: logger.warning(f"личное сообщение {person}: {e}")
 
+
+def _build_unified_reminder_caption(
+    duty_type: str,
+    person: str,
+    position_label: str,
+    time_label: str,
+    header: str,
+    ending: str,
+    total_duties: int,
+    next_days: int,
+    proc_day: int,
+    queue_chain: list[dict],
+    dembel_info: dict | None,
+    doctors: tuple | None,
+    weather_text: str | None,
+    today: date,
+    retry: bool,
+    data: dict,
+) -> str:
+    """
+    Пункт 6: Собирает всю важную информацию вечернего напоминания в единую
+    структурированную подпись (caption) к картинке (с контролем лимита 1024 символа).
+    """
+    mention = format_person_mention(person, data)
+    chain_str = format_queue_chain_text(queue_chain)
+    retry_tag = "⚠️ *ПОВТОРНОЕ НАПОМИНАНИЕ (RETRY)*\n" if retry else ""
+
+    if duty_type == "svodki":
+        role_line = f"📋 *{position_label}* · сдать до `{time_label}`"
+    else:
+        bar = progress_bar(proc_day, 2)
+        stage_txt = "экватор смены" if proc_day == 1 else "сдача поста"
+        role_line = f"🧹 *{position_label}* · до `{time_label}`\n📈 Смена: {bar} ({stage_txt})"
+
+    lines = [
+        f"{retry_tag}*{header}*",
+        "",
+        f"👤 Дежурный: {mention}",
+        role_line,
+        f"📊 В зачёте: *{total_duties}* {_plural_ru(total_duties, ('наряд', 'наряда', 'нарядов'))} · свой след. цикл через `{next_days} дн.`",
+        f"⏭ Очередь следом: {chain_str}",
+    ]
+
+    if dembel_info and dembel_info.get("caption_line"):
+        lines.append(dembel_info["caption_line"])
+
+    if duty_type == "svodki" and doctors:
+        doc_block = format_doctors_block(today)
+        if doc_block:
+            lines.append("")
+            lines.append(doc_block)
+
+    if duty_type == "svodki" and weather_text:
+        w_clean = weather_text.strip()
+        lines.append("")
+        lines.append(f"☁️ *Погода на улице:* {w_clean}")
+
+    lines.append("")
+    lines.append(f"_{ending}_")
+
+    caption = "\n".join(lines)
+    if len(caption) > 1015:
+        caption = caption[:1010].rsplit("\n", 1)[0] + "\n…"
+    return caption
+
+
 async def _send_reminder(bot, duty_type: str, retry: bool = False):
     data = load_data()
-    if not data.get("reminders_enabled", True): return
+    if not data.get("reminders_enabled", True):
+        return
     chat_id = data.get("chat_id", CHAT_ID)
     if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
-        logger.warning("CHAT_ID не настроен!"); return
+        logger.warning("CHAT_ID не настроен!")
+        return
 
     today = datetime.now(TIMEZONE).date()
     wd    = today.weekday()
+    weekday_name = WEEKDAY_STYLE[wd][0]
     easter = random.random() < 0.05 and not retry
 
     if duty_type == "svodki":
@@ -511,6 +818,7 @@ async def _send_reminder(bot, duty_type: str, retry: bool = False):
         proc_day       = 1
         headers_pool   = SVODKI_HEADERS_BY_DAY[wd] + GAMING_HEADERS_SVODKI
         prev_key       = "last_svodki_msg_id"
+        doctors        = get_doctors_for_date(today)
     else:
         person         = get_procedura_person(today)
         proc_day       = get_duty_day_number(today)
@@ -521,37 +829,77 @@ async def _send_reminder(bot, duty_type: str, retry: bool = False):
         time_label     = "22:00"
         headers_pool   = PROC_HEADERS_BY_DAY[wd] + GAMING_HEADERS_PROC
         prev_key       = "last_proc_msg_id"
+        doctors        = None
 
+    # Пункты 3 и 4: цепочка из 3 следующих дежурных и мини-прогресс ДМБ бойца
+    queue_chain = get_queue_chain(duty_type, today, count=3)
+    dembel_info = get_person_dembel_brief(person, duty_type, today)
+
+    # Для сводок заранее получаем метео-сводку, чтобы встроить её в ИИ-заголовок, карточку и единую подпись (Пункт 6)
+    weather_text = None
+    if duty_type == "svodki" and not retry:
+        weather_text = await get_weather_advice_for_reminder()
+    weather_short = _extract_short_weather(weather_text)
+
+    # Пункт 9: Контекстный ИИ-заголовок
     retry_pool = RETRY_PREFIX + RETRY_PREFIX_GAMING
-    header = await get_ai_header(person, duty_type) if not retry else None
+    header = None
+    if not retry:
+        header = await get_ai_header(
+            person=person,
+            duty_type=duty_type,
+            weekday_name=weekday_name,
+            proc_day=proc_day,
+            doctors=doctors,
+            dembel_info=dembel_info,
+            weather_hint=weather_short,
+            total_duties=total,
+        )
     if not header:
         header = random.choice(retry_pool) if retry else random.choice(headers_pool)
-    ending    = get_ending()
+    ending     = get_ending()
     mood_label = get_mood_label()
 
+    caption = _build_unified_reminder_caption(
+        duty_type=duty_type,
+        person=person,
+        position_label=position_label,
+        time_label=time_label,
+        header=header,
+        ending=ending,
+        total_duties=total,
+        next_days=next_d,
+        proc_day=proc_day,
+        queue_chain=queue_chain,
+        dembel_info=dembel_info,
+        doctors=doctors,
+        weather_text=weather_text,
+        today=today,
+        retry=retry,
+        data=data,
+    )
+
     if easter:
-        msg_text = random.choice(EASTER_EGGS)(person, duty_type)
+        msg_text = random.choice(EASTER_EGGS)(person, duty_type) + "\n\n" + caption
         prev_id  = data.get(prev_key)
         if prev_id:
             try: await bot.delete_message(chat_id, prev_id)
             except: pass
-        sent = await bot.send_message(chat_id, msg_text, parse_mode="Markdown",
-                                      reply_markup=confirmation_keyboard(duty_type))
+        sent = await bot.send_message(
+            chat_id, msg_text, parse_mode="Markdown",
+            reply_markup=confirmation_keyboard(duty_type),
+        )
         data[prev_key] = sent.message_id
         save_data(data)
         await update_pinned_message(bot)
         await _send_personal(bot, person, duty_type)
-        if duty_type == "svodki" and not retry:
-            wt = await get_weather_advice_for_reminder()
-            if wt: await bot.send_message(chat_id, f"☁️ *Обстановка на улице:*\n{wt}", parse_mode="Markdown")
         return
 
-    date_label = today.strftime("%d.%m.%Y") + " • " + WEEKDAY_STYLE[wd][0]
+    date_label = today.strftime("%d.%m.%Y") + " • " + weekday_name
     theme_key  = random.choice(THEME_KEYS)
     img_path   = os.path.join(TEMP_DIR, f"card_{duty_type}_{int(time.time())}.jpg")
 
-    caption  = f"🔔 Напоминание по {duty_type.upper()} для *{person}*"
-    prev_id  = data.get(prev_key)
+    prev_id = data.get(prev_key)
     if prev_id:
         try: await bot.delete_message(chat_id, prev_id)
         except: pass
@@ -559,37 +907,45 @@ async def _send_reminder(bot, duty_type: str, retry: bool = False):
     if make_reminder_card:
         try:
             make_reminder_card(
-                duty_type=duty_type, person=person, position_label=position_label,
-                time_label=time_label, header_text=header, ending_text=ending,
-                date_label=date_label, mood_label=mood_label,
+                duty_type=duty_type,
+                person=person,
+                position_label=position_label,
+                time_label=time_label,
+                header_text=header,
+                ending_text=ending,
+                date_label=date_label,
+                mood_label=mood_label,
                 proc_day=proc_day if duty_type == "proc" else 1,
-                next_person=next_n, next_days=next_d, total_duties=total,
-                theme_key=theme_key, output_path=img_path
+                next_person=next_n,
+                next_days=next_d,
+                total_duties=total,
+                theme_key=theme_key,
+                output_path=img_path,
+                doctors=doctors,
+                queue_chain=queue_chain,
+                dembel_info=dembel_info,
+                weather_short=weather_short,
             )
             photo = FSInputFile(img_path)
-            sent  = await bot.send_photo(chat_id, photo=photo, caption=caption,
-                                         parse_mode="Markdown", reply_markup=confirmation_keyboard(duty_type))
+            sent  = await bot.send_photo(
+                chat_id, photo=photo, caption=caption,
+                parse_mode="Markdown", reply_markup=confirmation_keyboard(duty_type),
+            )
             data[prev_key] = sent.message_id
             save_data(data)
             try: os.remove(img_path)
             except: pass
             await update_pinned_message(bot)
             await _send_personal(bot, person, duty_type)
-            if duty_type == "svodki" and not retry:
-                wt = await get_weather_advice_for_reminder()
-                if wt: await bot.send_message(chat_id, f"☁️ *Обстановка на улице:*\n{wt}", parse_mode="Markdown")
             return
         except Exception as e:
             logger.error(f"Ошибка карточки: {e}")
 
-    # Текстовый fallback
-    msg_text = (
-        f"*{header}*\n\n👤 {person}\n📋 {position_label}\n"
-        f"⏰ {time_label}\n📊 нарядов всего: {total}\n"
-        f"⏭ следующий: {next_n} через {next_d} д.\n\n_{ending}_"
+    # Текстовый fallback (также использует единую подпись)
+    sent = await bot.send_message(
+        chat_id, caption, parse_mode="Markdown",
+        reply_markup=confirmation_keyboard(duty_type),
     )
-    sent = await bot.send_message(chat_id, msg_text, parse_mode="Markdown",
-                                  reply_markup=confirmation_keyboard(duty_type))
     data[prev_key] = sent.message_id
     save_data(data)
     await update_pinned_message(bot)
@@ -627,7 +983,7 @@ async def send_sunday_summary(bot):
     except Exception as e: logger.error(f"воскресный итог: {e}")
 
 
-# ── Автоматические утренние оповещения о круглых датах ДМБ (Пункт 5) ─────────
+# ── Автоматические утренние оповещения о круглых датах ДМБ ───────────────────
 async def check_dembel_milestones(bot):
     """
     Проверяет, наступила ли сегодня у кого-то из DEMBEL_DATES круглая дата
@@ -679,7 +1035,6 @@ async def check_dembel_milestones(bot):
                 pass
 
     if changed:
-        # Храним последние 120 ключей, чтобы файл не разрастался
         data["dembel_milestones_sent"] = sent_keys[-120:]
         save_data(data)
 
@@ -694,11 +1049,20 @@ def _startup_selftest():
     if not make_reminder_card: return
     test_path = os.path.join(TEMP_DIR, "_selftest.jpg")
     try:
+        today = datetime.now(TIMEZONE).date()
         make_reminder_card(
-            duty_type="svodki", person="Тест", position_label="самопроверка",
-            time_label="00:00", header_text="проверка", ending_text="всё ок",
-            date_label=datetime.now(TIMEZONE).strftime("%d.%m.%Y"), mood_label="проверка",
-            theme_key=random.choice(THEME_KEYS), output_path=test_path,
+            duty_type="svodki",
+            person="Игорь",
+            position_label="самопроверка",
+            time_label="18:00",
+            header_text="проверка генератора карточек v3.0",
+            ending_text="всё ок",
+            date_label=today.strftime("%d.%m.%Y"),
+            mood_label="проверка",
+            doctors=get_doctors_for_date(today),
+            queue_chain=[{"name": "Ильнар", "days": 1}, {"name": "Арсений", "days": 2}, {"name": "Глеб", "days": 3}],
+            theme_key=random.choice(THEME_KEYS),
+            output_path=test_path,
         )
         size = os.path.getsize(test_path)
         logger.info(f"✅ САМОПРОВЕРКА КАРТИНОК ПРОЙДЕНА: {test_path} ({size} байт)")
@@ -795,8 +1159,8 @@ def _dembel_list_keyboard(active_person: str | None = None, is_summary: bool = F
     """
     Строит клавиатуру дембель-таймера.
     Все кнопки используют префикс dembel_card:, поэтому main.py менять не нужно:
-      - dembel_card:__refresh__:<person> (или __all__) — перерисовать текущую карточку (Пункт 3)
-      - dembel_card:__all__ — сводный дашборд всех бойцов (Пункт 4)
+      - dembel_card:__refresh__:<person> (или __all__) — перерисовать текущую карточку
+      - dembel_card:__all__ — сводный дашборд всех бойцов
       - dembel_card:<person> — карточка конкретного бойца
     """
     buttons: list[list[InlineKeyboardButton]] = []
@@ -853,7 +1217,6 @@ async def cmd_dembel(message: types.Message):
         await message.answer("❌ Дембель-таймер недоступен.")
         return
 
-    # Заодно проверяем сегодняшние круглые даты
     await check_dembel_milestones(message.bot)
 
     raw = (message.text or "").replace("/dembel", "").strip()
