@@ -17,7 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
-    KeyboardButton, ReplyKeyboardMarkup,
+    InputMediaPhoto, KeyboardButton, ReplyKeyboardMarkup,
 )
 
 from config import (
@@ -42,13 +42,25 @@ except Exception:
     THEME_KEYS = ["default"]
 
 try:
-    from dembel_generator import make_dembel_card, get_all_timers, DEMBEL_DATES
-    logger.info(f"🟢 dembel_generator импортирован, людей: {len(DEMBEL_DATES)}")
+    from dembel_generator import (
+        make_dembel_card,
+        make_dembel_summary_card,
+        get_all_timers,
+        get_today_milestones,
+        get_next_milestone,
+        format_dembel_caption,
+        DEMBEL_DATES,
+    )
+    logger.info(f"🟢 dembel_generator v3.0 импортирован, людей: {len(DEMBEL_DATES)}")
 except Exception:
-    logger.error("🔴 dembel_generator недоступен")
+    logger.error("🔴 dembel_generator недоступен:\n" + traceback.format_exc())
     make_dembel_card = None
-    get_all_timers   = None
-    DEMBEL_DATES     = {}
+    make_dembel_summary_card = None
+    get_all_timers = None
+    get_today_milestones = None
+    get_next_milestone = None
+    format_dembel_caption = None
+    DEMBEL_DATES = {}
 
 
 # ── FSM ───────────────────────────────────────────────────────────────────────
@@ -65,13 +77,15 @@ def load_data() -> dict:
         data.setdefault("ai_random_replies_enabled", True)
         data.setdefault("track_cache", {})
         data.setdefault("user_history", {})
+        data.setdefault("dembel_milestones_sent", [])
         return data
     data = {
         "start_date": date.today().isoformat(), "svodki_start_index": 0,
         "procedura_start_index": 0, "chat_id": CHAT_ID,
         "reminders_enabled": True, "ai_random_replies_enabled": True,
         "personal_ids": {}, "log": {}, "pending_retry": {}, "duty_counts": {},
-        "pinned_msg_id": None, "daily_mood": {}, "track_cache": {}, "user_history": {}
+        "pinned_msg_id": None, "daily_mood": {}, "track_cache": {}, "user_history": {},
+        "dembel_milestones_sent": [],
     }
     save_data(data)
     return data
@@ -145,7 +159,7 @@ def add_artist_sub(user_id, artist: str) -> bool:
 
 def remove_artist_sub(user_id, artist: str):
     data = load_data()
-    subs = data.setdefault("artist_subs", {}).setdefault(str(user_id), [])
+    subs = data.setdefault("artist_subs", {}).get(str(user_id), [])
     if artist in subs:
         subs.remove(artist); save_data(data)
 
@@ -612,7 +626,68 @@ async def send_sunday_summary(bot):
     try: await bot.send_message(chat_id, build_sunday_summary(), parse_mode="Markdown")
     except Exception as e: logger.error(f"воскресный итог: {e}")
 
-async def daily_pinned_update(bot): await update_pinned_message(bot)
+
+# ── Автоматические утренние оповещения о круглых датах ДМБ (Пункт 5) ─────────
+async def check_dembel_milestones(bot):
+    """
+    Проверяет, наступила ли сегодня у кого-то из DEMBEL_DATES круглая дата
+    (ДМБ, Светофор 3д, Космос 10д, 30д, Полтинник 50д, Стодневка 100д, Экватор 182д, 200д),
+    и отправляет поздравление с карточкой в рабочий чат ровно 1 раз.
+    """
+    if not get_today_milestones:
+        return
+    data = load_data()
+    if not data.get("reminders_enabled", True):
+        return
+    chat_id = data.get("chat_id", CHAT_ID)
+    if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
+        return
+
+    sent_keys: list[str] = data.setdefault("dembel_milestones_sent", [])
+    events = get_today_milestones()
+    changed = False
+
+    for ev in events:
+        if ev["key"] in sent_keys:
+            continue
+        person = ev["person"]
+        caption = (
+            f"🎉 *РУБЕЖ ДМБ — {person.upper()}!*\n"
+            f"{ev['title']}\n\n"
+            + (format_dembel_caption(person) if format_dembel_caption else "")
+        )
+        img_path = os.path.join(TEMP_DIR, f"milestone_{int(time.time())}.jpg")
+        try:
+            if make_dembel_card:
+                make_dembel_card(person, output_path=img_path, theme_key=random.choice(THEME_KEYS))
+                photo = FSInputFile(img_path)
+                await bot.send_photo(
+                    chat_id, photo=photo, caption=caption,
+                    parse_mode="Markdown", reply_markup=_dembel_list_keyboard(active_person=person),
+                )
+            else:
+                await bot.send_message(chat_id, caption, parse_mode="Markdown")
+            sent_keys.append(ev["key"])
+            changed = True
+        except Exception as e:
+            logger.error(f"Ошибка отправки вехи ДМБ ({person}): {e}")
+        finally:
+            try:
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+            except Exception:
+                pass
+
+    if changed:
+        # Храним последние 120 ключей, чтобы файл не разрастался
+        data["dembel_milestones_sent"] = sent_keys[-120:]
+        save_data(data)
+
+
+async def daily_pinned_update(bot):
+    await update_pinned_message(bot)
+    await check_dembel_milestones(bot)
+
 
 # ── Selftest ──────────────────────────────────────────────────────────────────
 def _startup_selftest():
@@ -646,6 +721,7 @@ async def cmd_start(message: types.Message):
     start_text = (
         "👋 *Йоу. Я здесь. Слушаю.*\n\n"
         "📋 *Наряды* — слежу за сводками и процедуркой. 18:00 и 22:00, каждый день.\n\n"
+        "🎖 *Дембель* — `/dembel` (индивидуальные карточки HUD v3.0 + общая таблица).\n\n"
         "🤖 *ИИ-чат* — реплай на моё сообщение, отвечу на всё.\n\n"
         "🎵 *Музыка:*\n"
         "`/find <название>` — поиск треков\n"
@@ -713,40 +789,127 @@ async def cmd_settings(message: types.Message):
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=settings_keyboard(data))
 
-# ── Dembel ────────────────────────────────────────────────────────────────────
-def _dembel_list_keyboard() -> InlineKeyboardMarkup:
-    buttons, row = [], []
+
+# ── Dembel (HUD v3.0: обновление на месте, общая таблица, вехи и звания) ─────
+def _dembel_list_keyboard(active_person: str | None = None, is_summary: bool = False) -> InlineKeyboardMarkup:
+    """
+    Строит клавиатуру дембель-таймера.
+    Все кнопки используют префикс dembel_card:, поэтому main.py менять не нужно:
+      - dembel_card:__refresh__:<person> (или __all__) — перерисовать текущую карточку (Пункт 3)
+      - dembel_card:__all__ — сводный дашборд всех бойцов (Пункт 4)
+      - dembel_card:<person> — карточка конкретного бойца
+    """
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    top_row: list[InlineKeyboardButton] = []
+    if active_person:
+        top_row.append(
+            InlineKeyboardButton(
+                text="🔄 Обновить таймер",
+                callback_data=f"dembel_card:__refresh__:{active_person}",
+            )
+        )
+    elif is_summary:
+        top_row.append(
+            InlineKeyboardButton(
+                text="🔄 Обновить таблицу",
+                callback_data="dembel_card:__refresh__:__all__",
+            )
+        )
+    top_row.append(
+        InlineKeyboardButton(
+            text="📊 Общая таблица ДМБ",
+            callback_data="dembel_card:__all__",
+        )
+    )
+    buttons.append(top_row)
+
+    timers_map = {t["person"]: t for t in get_all_timers()} if get_all_timers else {}
+    row: list[InlineKeyboardButton] = []
     for person in DEMBEL_DATES:
-        row.append(InlineKeyboardButton(text=f"🎖 {person}", callback_data=f"dembel_card:{person}"))
-        if len(row) == 2: buttons.append(row); row = []
-    if row: buttons.append(row)
+        t = timers_map.get(person)
+        if t and t.get("done"):
+            icon = "🏠"
+            suffix = " (дома)"
+        else:
+            icon = "🟢" if person == active_person else "🎖"
+            suffix = f" ({t['days']}д)" if t else ""
+        row.append(
+            InlineKeyboardButton(
+                text=f"{icon} {person}{suffix}",
+                callback_data=f"dembel_card:{person}",
+            )
+        )
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 async def cmd_dembel(message: types.Message):
     if not get_all_timers:
-        await message.answer("❌ Дембель-таймер недоступен."); return
+        await message.answer("❌ Дембель-таймер недоступен.")
+        return
+
+    # Заодно проверяем сегодняшние круглые даты
+    await check_dembel_milestones(message.bot)
+
     raw = (message.text or "").replace("/dembel", "").strip()
     if raw:
+        if raw.lower() in ("all", "все", "общий", "таблица", "дашборд"):
+            await _send_dembel_summary(message, edit_in_place=False)
+            return
         match = next((p for p in DEMBEL_DATES if p.lower() == raw.lower()), None)
         if not match:
-            await message.answer(f"❌ Не нашёл «{raw}».\nЕсть: {', '.join(DEMBEL_DATES)}"); return
-        await _send_dembel_card(message, match); return
-    timers = get_all_timers()
-    lines  = ["🎖 *ДЕМБЕЛЬ-ТАЙМЕР*\n"]
-    for t in timers:
-        if t["done"]: lines.append(f"🏠 *{t['person']}* — дома!")
-        else: lines.append(f"⏳ *{t['person']}* — {t['days']} дн. {t['hours']} ч. (дембель {t['target'].strftime('%d.%m.%Y')})")
-    lines.append("\n_Жми на имя — пришлю карточку_")
-    await message.answer("\n".join(lines), parse_mode="Markdown", reply_markup=_dembel_list_keyboard())
+            await message.answer(f"❌ Не нашёл «{raw}».\nЕсть: {', '.join(DEMBEL_DATES)}")
+            return
+        await _send_dembel_card(message, match, edit_in_place=False)
+        return
 
-async def _send_dembel_card(source, person: str):
+    timers = get_all_timers()
+    done_cnt = sum(1 for t in timers if t["done"])
+    avg_pct = sum(t["progress"] for t in timers) / max(1, len(timers)) * 100.0
+    lines = [
+        f"🎖 *ДЕМБЕЛЬ-ТАЙМЕР (1 ГОД · 365 ДНЕЙ)*",
+        f"📊 Средний прогресс: *{avg_pct:.2f}%*  |  🏠 Дома: *{done_cnt}/{len(timers)}*\n",
+    ]
+    for idx, t in enumerate(timers, 1):
+        rank_short = t.get("rank", {}).get("short", "")
+        if t["done"]:
+            lines.append(f"🏆 *{t['person']}* — *ГРАЖДАНСКИЙ (дома с {t['target'].strftime('%d.%m.%Y')})*")
+        else:
+            pct_str = f"{t['progress'] * 100:.2f}%"
+            lines.append(
+                f"`#{idx}` *{t['person']}* ({rank_short}, `{pct_str}`) — "
+                f"*{t['days']} дн. {t['hours']} ч.* (до `{t['target'].strftime('%d.%m.%Y')}`)"
+            )
+    lines.append("\n_Нажми на имя для карточки HUD v3.0 или открой общую таблицу:_")
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=_dembel_list_keyboard(),
+    )
+
+
+async def _send_dembel_card(source: types.Message, person: str, edit_in_place: bool = False):
     chat_id = source.chat.id
     bot     = source.bot
-    status  = await bot.send_message(chat_id, f"🎨 Рисую карточку для *{person}*...", parse_mode="Markdown")
-    _map = str.maketrans({"а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"e","ж":"zh","з":"z","и":"i","й":"y","к":"k","л":"l","м":"m","н":"n","о":"o","п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"h","ц":"c","ч":"ch","ш":"sh","щ":"sch","ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya"})
+    _map = str.maketrans({
+        "а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"e","ж":"zh","з":"z",
+        "и":"i","й":"y","к":"k","л":"l","м":"m","н":"n","о":"o","п":"p","р":"r",
+        "с":"s","т":"t","у":"u","ф":"f","х":"h","ц":"c","ч":"ch","ш":"sh","щ":"sch",
+        "ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya",
+    })
     translit = person.lower().translate(_map)
     safe_slug = "".join(c for c in translit if c.isalnum()) or "person"
-    img_path  = os.path.join(TEMP_DIR, f"dembel_{safe_slug}_{int(time.time())}.jpg")
+    img_path  = os.path.join(TEMP_DIR, f"dembel_{safe_slug}_{int(time.time()*1000)}.jpg")
+
+    status = None
+    if not (edit_in_place and source.photo):
+        status = await bot.send_message(chat_id, f"🎨 Рисую карточку для *{person}*...", parse_mode="Markdown")
+
     try:
         if make_dembel_card:
             make_dembel_card(person, output_path=img_path, theme_key=random.choice(THEME_KEYS))
@@ -754,30 +917,123 @@ async def _send_dembel_card(source, person: str):
             raise RuntimeError("make_dembel_card недоступен")
     except Exception as e:
         logger.error(f"Ошибка дембель-карточки {person}: {e}")
-        try: await status.delete()
-        except: pass
+        if status:
+            try: await status.delete()
+            except: pass
         timers = {t["person"]: t for t in get_all_timers()}
         t = timers.get(person, {})
         text = f"🏠 *{person}* — дома!" if t.get("done") else f"⏳ *{person}* — {t.get('days','?')} дн. {t.get('hours','?')} ч."
         await bot.send_message(chat_id, text, parse_mode="Markdown")
         return
-    try: await status.delete()
-    except: pass
+
+    if status:
+        try: await status.delete()
+        except: pass
+
+    caption = format_dembel_caption(person) if format_dembel_caption else f"🎖 Дембель-таймер · *{person}*"
+    kb = _dembel_list_keyboard(active_person=person)
+
     try:
         photo = FSInputFile(img_path)
-        await bot.send_photo(chat_id, photo=photo, caption=f"🎖 Дембель-таймер · *{person}*",
-                             parse_mode="Markdown", reply_markup=_dembel_list_keyboard())
+        if edit_in_place and source.photo:
+            media = InputMediaPhoto(media=photo, caption=caption, parse_mode="Markdown")
+            await source.edit_media(media=media, reply_markup=kb)
+        else:
+            await bot.send_photo(
+                chat_id, photo=photo, caption=caption,
+                parse_mode="Markdown", reply_markup=kb,
+            )
     except Exception as e:
-        logger.error(f"Ошибка отправки дембель-карточки: {e}")
-        await bot.send_message(chat_id, f"❌ Не получилось отправить карточку для {person}.")
+        logger.error(f"Ошибка отправки/обновления дембель-карточки: {e}")
+        try:
+            photo = FSInputFile(img_path)
+            await bot.send_photo(
+                chat_id, photo=photo, caption=caption,
+                parse_mode="Markdown", reply_markup=kb,
+            )
+        except Exception:
+            await bot.send_message(chat_id, f"❌ Не получилось отправить карточку для {person}.")
     finally:
         try: os.remove(img_path)
         except: pass
 
+
+async def _send_dembel_summary(source: types.Message, edit_in_place: bool = False):
+    chat_id = source.chat.id
+    bot     = source.bot
+    img_path = os.path.join(TEMP_DIR, f"dembel_summary_{int(time.time()*1000)}.jpg")
+
+    status = None
+    if not (edit_in_place and source.photo):
+        status = await bot.send_message(chat_id, "📊 Собираю общую таблицу ДМБ...", parse_mode="Markdown")
+
+    try:
+        if make_dembel_summary_card:
+            make_dembel_summary_card(output_path=img_path, theme_key=random.choice(THEME_KEYS))
+        else:
+            raise RuntimeError("make_dembel_summary_card недоступен")
+    except Exception as e:
+        logger.error(f"Ошибка общей таблицы ДМБ: {e}")
+        if status:
+            try: await status.delete()
+            except: pass
+        await bot.send_message(chat_id, "❌ Не удалось сгенерировать общую таблицу ДМБ.")
+        return
+
+    if status:
+        try: await status.delete()
+        except: pass
+
+    timers = get_all_timers()
+    done_cnt = sum(1 for t in timers if t["done"])
+    avg_pct = sum(t["progress"] for t in timers) / max(1, len(timers)) * 100.0
+    next_up = next((t for t in timers if not t["done"]), None)
+    next_line = (
+        f"⏳ Ближайший ДМБ: *{next_up['person']}* — осталось `{next_up['days']} дн. {next_up['hours']} ч.` (`{next_up['target'].strftime('%d.%m.%Y')}`)"
+        if next_up else "🎉 Все бойцы дома!"
+    )
+    caption = (
+        f"📊 *ОБЩАЯ ТАБЛИЦА ДМБ (1 ГОД)*\n"
+        f"📈 Средний прогресс: *{avg_pct:.4f}%*  |  🏠 Дома: *{done_cnt}/{len(timers)}*\n"
+        f"{next_line}"
+    )
+    kb = _dembel_list_keyboard(is_summary=True)
+
+    try:
+        photo = FSInputFile(img_path)
+        if edit_in_place and source.photo:
+            media = InputMediaPhoto(media=photo, caption=caption, parse_mode="Markdown")
+            await source.edit_media(media=media, reply_markup=kb)
+        else:
+            await bot.send_photo(
+                chat_id, photo=photo, caption=caption,
+                parse_mode="Markdown", reply_markup=kb,
+            )
+    except Exception as e:
+        logger.error(f"Ошибка отправки общей таблицы ДМБ: {e}")
+    finally:
+        try: os.remove(img_path)
+        except: pass
+
+
 async def callback_dembel_card(callback: types.CallbackQuery):
-    person = callback.data.split(":", 1)[1]
-    await callback.answer()
-    await _send_dembel_card(callback.message, person)
+    payload = callback.data.split(":", 1)[1]
+    is_photo_msg = bool(callback.message and callback.message.photo)
+
+    if payload == "__all__" or payload == "__refresh__:__all__":
+        await callback.answer("🔄 Обновляю общую таблицу ДМБ...")
+        await _send_dembel_summary(callback.message, edit_in_place=is_photo_msg)
+        return
+
+    if payload.startswith("__refresh__:"):
+        person = payload.split(":", 1)[1]
+        await callback.answer(f"🔄 Обновляю таймер: {person}...")
+        await _send_dembel_card(callback.message, person, edit_in_place=is_photo_msg)
+        return
+
+    person = payload
+    await callback.answer(f"🎖 {person}")
+    await _send_dembel_card(callback.message, person, edit_in_place=is_photo_msg)
 
 # ── Settings callbacks ─────────────────────────────────────────────────────────
 async def callback_toggle_reminders(callback: types.CallbackQuery):
