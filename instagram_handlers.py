@@ -10,24 +10,32 @@ instagram_handlers.py — хендлеры Telegram-бота для аноним
 """
 
 import asyncio
+import hashlib
 import io
 import logging
 import random
 import re
 import time
 import os
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile, InputMediaPhoto, InputMediaVideo, InputMediaDocument,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+
+try:  # aiogram 3.x: пропустить хендлер и отдать сообщение следующему (media_downloader, ИИ-чат)
+    from aiogram.dispatcher.event.bases import SkipHandler
+except Exception:  # pragma: no cover
+    SkipHandler = None
 
 from instagram_viewer import (
     init_ig_db,
@@ -37,9 +45,86 @@ from instagram_viewer import (
     ig_all_subscriptions, ig_mark_sent, ig_already_sent,
     validate_session, get_sessions_status,
     set_session_dead_callback,
+    ig_mark_sent_many, ig_get_check_states, ig_set_check_state, ig_cleanup_sent,
+    get_pool_health, get_media_by_url,
 )
 
 logger = logging.getLogger(__name__)
+
+# ── НАСТРОЙКИ ФОНОВОЙ ПРОВЕРКИ ────────────────────────────────────────────────
+IG_CHECK_BASE        = int(os.getenv("IG_CHECK_BASE", str(30 * 60)))   # базовый интервал на ник, сек
+IG_CHECK_TICK        = int(os.getenv("IG_CHECK_TICK", str(10 * 60)))   # как часто планировщик смотрит «кто пора»
+IG_MAX_PER_TICK      = int(os.getenv("IG_MAX_PER_TICK", "12"))         # максимум ников за один тик
+IG_NIGHT_START       = int(os.getenv("IG_NIGHT_START", "1"))           # ночью проверяем реже (локальные часы)
+IG_NIGHT_END         = int(os.getenv("IG_NIGHT_END", "7"))
+IG_POST_MAX_AGE_DAYS = int(os.getenv("IG_POST_MAX_AGE_DAYS", "7"))      # старше — не считаем «новым» постом
+IG_STORY_MAX_FAILS   = int(os.getenv("IG_STORY_MAX_FAILS", "3"))        # после стольких неудач историю бросаем
+IG_ALERT_ERRORS      = int(os.getenv("IG_ALERT_ERRORS", "8"))           # ошибок/час для алерта админам
+IG_AUTO_LINKS        = os.getenv("IG_AUTO_LINKS", "1") != "0"           # авто-скачивание по ссылкам на посты/рилсы
+
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> None:
+    """create_task с удержанием ссылки (иначе задачу может собрать GC)."""
+    t = asyncio.create_task(coro)
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+
+
+def _ig_tz():
+    name = os.getenv("IG_TZ", "")
+    if not name:
+        try:
+            from config import TIMEZONE as _cfg_tz
+            if hasattr(_cfg_tz, "utcoffset"):
+                return _cfg_tz
+            name = str(_cfg_tz)
+        except Exception:
+            name = "Europe/Moscow"
+    try:
+        import pytz
+        return pytz.timezone(name)
+    except Exception:
+        return timezone(timedelta(hours=3))
+
+
+def _ig_local_hour() -> int:
+    try:
+        return datetime.now(_ig_tz()).hour
+    except Exception:
+        return datetime.now().hour
+
+
+# ── АВАТАРКА: состояние в last_seen (пункт 3) ────────────────────────────────
+# CDN-ссылка на одну и ту же картинку меняется (подпись, срок жизни, хост),
+# поэтому сравнивать целиком URL нельзя. Храним «av2|<path>|<sha1-16>»:
+# path — стабильная часть URL, sha1 — хэш байтов картинки.
+
+def _avatar_path(url: str) -> str:
+    try:
+        return urlparse(url).path or ""
+    except Exception:
+        return ""
+
+
+def _avatar_state_parse(last_seen: str) -> tuple[str, str]:
+    if not last_seen:
+        return "", ""
+    if last_seen.startswith("av2|"):
+        parts = last_seen.split("|")
+        return (parts[1] if len(parts) > 1 else ""), (parts[2] if len(parts) > 2 else "")
+    if last_seen.startswith("http"):          # старый формат — голый URL
+        return _avatar_path(last_seen), ""
+    return "", ""
+
+
+def _avatar_state_fmt(path: str, digest: str) -> str:
+    return f"av2|{path}|{digest}"
+
+
+def _sha(data: bytes | None) -> str:
+    return hashlib.sha1(data).hexdigest()[:16] if data else ""
 
 
 # ── ГЛОБАЛЬНАЯ ССЫЛКА НА БОТА (для алертов) ──────────────────────────────────
@@ -103,7 +188,10 @@ def _clean_username(text: str) -> str:
     text = text.strip().lstrip("@")
     m = re.search(r"instagram\.com/([A-Za-z0-9_.]+)", text)
     if m:
-        return m.group(1).lower()
+        first = m.group(1).lower()
+        if first in {"p", "reel", "reels", "tv", "stories", "explore", "share"}:
+            return ""
+        return first
     return re.sub(r"[^A-Za-z0-9_.]", "", text).lower()
 
 
@@ -257,6 +345,12 @@ async def process_ig_username(message: types.Message, state: FSMContext):
             await message.bot.delete_message(message.chat.id, prompt_id)
     except Exception:
         pass
+
+    link = _extract_media_link(message.text or "")
+    if link:
+        if not await _send_ig_media(message, link):
+            await message.answer("не смог достать этот пост — попробуй позже или кинь другую ссылку")
+        return
 
     username = _clean_username(message.text or "")
     if not username:
@@ -495,6 +589,9 @@ async def callback_ig_sub(callback: types.CallbackQuery):
         ig_subscribe(uid, ig_username, sub_type)
         labels = {"stories": "истории", "posts": "посты", "avatar": "аватарку"}
         await callback.answer(f"🔔 Подписался на {labels.get(sub_type, sub_type)} @{ig_username}!")
+        # Запоминаем текущее состояние, чтобы не завалить уведомлениями о старом
+        if sub_type in ("posts", "avatar"):
+            _spawn(_seed_subscription(uid, ig_username, sub_type))
 
     try:
         await callback.message.edit_reply_markup(
@@ -570,19 +667,78 @@ async def cmd_ig_subs(message: types.Message):
 
 # ── ФОНОВЫЙ ОПРОС ПОДПИСОК ────────────────────────────────────────────────────
 
+async def _seed_subscription(user_id: str, ig_username: str, sub_type: str) -> None:
+    """
+    Пункты 1/3: сразу после подписки запоминаем текущее состояние, чтобы
+    не слать «новыми» посты, которые уже были, и не ловить ложную смену аватарки.
+    """
+    try:
+        if sub_type == "posts":
+            data = await get_posts(ig_username)
+            ids = [f"post_{p['id']}" for p in data.get("posts", []) if p.get("id")]
+            ig_mark_sent_many(user_id, ids)
+            ig_update_last_seen(user_id, ig_username, "posts", "seeded")
+        elif sub_type == "avatar":
+            info = await get_user_info(ig_username)
+            url = (info or {}).get("avatar_url", "")
+            if url:
+                img = await _download(url)
+                ig_update_last_seen(
+                    user_id, ig_username, "avatar",
+                    _avatar_state_fmt(_avatar_path(url), _sha(img)),
+                )
+    except Exception as e:
+        logger.warning(f"seed {sub_type} @{ig_username}: {e}")
+
+
+def _ig_check_interval(user_subs: list[dict], last_activity: float, now: float) -> float:
+    """
+    Пункт 8: адаптивный интервал проверки ника.
+    Активные — каждые IG_CHECK_BASE, тихие реже; ночью вдвое реже.
+    Если есть подписка на истории — не реже раза в час (истории живут сутки).
+    """
+    base = float(IG_CHECK_BASE)
+    idle_days = (now - last_activity) / 86400 if last_activity else 0.0
+    if idle_days >= 14:
+        iv = base * 6
+    elif idle_days >= 3:
+        iv = base * 2
+    else:
+        iv = base
+    if any(s["sub_type"] == "stories" for s in user_subs):
+        iv = min(iv, base * 2)
+    if IG_NIGHT_START <= _ig_local_hour() < IG_NIGHT_END:
+        iv *= 2
+    return iv
+
+
+_ALERT_TASK_STARTED = False
+
+
 async def ig_checker_task(bot: Bot):
     """
-    Фоновая задача: каждые 30 минут проверяет подписки.
-    Новые посты / истории / смена аватарки → уведомление.
+    Фоновая задача проверки подписок.
+    Раз в IG_CHECK_TICK смотрит, каких ников пора проверить (у каждого свой
+    адаптивный интервал), и проверяет не больше IG_MAX_PER_TICK за раз.
+    Заодно запускает алерты о здоровье пула и ежедневную чистку БД.
     """
-    CHECK_INTERVAL = 30 * 60
+    global _ALERT_TASK_STARTED
     logger.info("🟡 Instagram checker запущен")
+    if not _ALERT_TASK_STARTED:
+        _ALERT_TASK_STARTED = True
+        _spawn(ig_pool_alert_task(bot))
+
+    last_cleanup = 0.0
+    await asyncio.sleep(90)   # состояние проверок хранится в БД — долго ждать не нужно
     while True:
-        await asyncio.sleep(CHECK_INTERVAL)
         try:
+            if time.time() - last_cleanup > 24 * 3600:
+                last_cleanup = time.time()
+                ig_cleanup_sent()
             await _run_ig_check(bot)
         except Exception as e:
             logger.error(f"ig_checker_task error: {e}")
+        await asyncio.sleep(IG_CHECK_TICK)
 
 
 async def _run_ig_check(bot: Bot):
@@ -594,95 +750,381 @@ async def _run_ig_check(bot: Bot):
     for s in subs:
         by_username.setdefault(s["ig_username"], []).append(s)
 
-    for ig_username, user_subs in by_username.items():
-        try:
-            await _check_user(bot, ig_username, user_subs)
-        except Exception as e:
-            logger.error(f"ig check {ig_username}: {e}")
-        await asyncio.sleep(3)
+    now = time.time()
+    states = ig_get_check_states()
+    due = []
+    for uname, user_subs in by_username.items():
+        last_checked, last_activity = states.get(uname, (0.0, 0.0))
+        interval = _ig_check_interval(user_subs, last_activity or now, now)
+        if now - last_checked >= interval:
+            due.append((last_checked, uname, user_subs))
 
-
-async def _check_user(bot: Bot, ig_username: str, subs: list[dict]):
-    """Проверка новых постов / историй / аватарки для одного ig_username."""
-    info = await get_user_info(ig_username)
-    if not info:
+    if not due:
         return
+    due.sort(key=lambda t: t[0])          # самые давно не проверявшиеся — первыми
+    due = due[:IG_MAX_PER_TICK]
+    logger.info(f"[ig-check] к проверке: {len(due)} из {len(by_username)} ников")
 
+    for _, uname, user_subs in due:
+        found = False
+        try:
+            found = await _check_user(bot, uname, user_subs)
+        except Exception as e:
+            logger.error(f"ig check {uname}: {e}")
+        t = time.time()
+        ig_set_check_state(uname, t, t if found else None)
+        await asyncio.sleep(random.uniform(2, 5))
+
+
+async def _check_user(bot: Bot, ig_username: str, subs: list[dict]) -> bool:
+    """Проверка аватарки / историй / постов для одного ника. True — было что-то новое."""
+    info = await get_user_info(ig_username, force=True)
+    if not info:
+        return False
+
+    found = False
     for sub in subs:
-        user_id  = sub["user_id"]
-        sub_type = sub["sub_type"]
+        user_id   = sub["user_id"]
+        sub_type  = sub["sub_type"]
         last_seen = sub.get("last_seen", "")
+        try:
+            if sub_type == "avatar":
+                found |= await _check_avatar(bot, user_id, ig_username, info, last_seen)
+            elif sub_type == "stories":
+                found |= await _check_stories(bot, user_id, ig_username)
+            elif sub_type == "posts":
+                found |= await _check_posts(bot, user_id, ig_username, last_seen)
+        except Exception as e:
+            logger.error(f"ig check {ig_username}/{sub_type} → {user_id}: {e}")
+    return found
 
-        if sub_type == "avatar":
-            current_avatar = info.get("avatar_url", "")
-            if current_avatar and current_avatar != last_seen:
-                ig_update_last_seen(user_id, ig_username, "avatar", current_avatar)
-                data = await get_avatar_bytes(ig_username)
-                if not data:
-                    data = await _download(current_avatar)
-                if data:
-                    try:
-                        await bot.send_photo(
-                            user_id,
-                            BufferedInputFile(data, filename="avatar.jpg"),
-                            caption=f"👤 *@{ig_username}* сменил(а) аватарку!",
-                            parse_mode="Markdown"
-                        )
-                    except Exception as e:
-                        logger.warning(f"IG avatar notify {user_id}: {e}")
 
-        elif sub_type == "stories":
-            stories = await get_stories(ig_username)
-            if not stories:
-                continue
-            new_stories = [s for s in stories if s["id"] and not ig_already_sent(user_id, f"story_{s['id']}")]
-            if not new_stories:
-                continue
+async def _check_avatar(bot: Bot, user_id: str, ig_username: str, info: dict, last_seen: str) -> bool:
+    cur_url = info.get("avatar_url", "")
+    if not cur_url:
+        return False
+    cur_path = _avatar_path(cur_url)
+    old_path, old_hash = _avatar_state_parse(last_seen)
 
-            await bot.send_message(
+    if old_path == cur_path:
+        # та же картинка; старый формат last_seen просто мигрируем
+        if not last_seen.startswith("av2|"):
+            ig_update_last_seen(user_id, ig_username, "avatar", _avatar_state_fmt(cur_path, old_hash))
+        return False
+
+    # путь поменялся — сверяем содержимое, а не ссылку
+    data = await _download(cur_url) or await get_avatar_bytes(ig_username)
+    new_hash = _sha(data)
+
+    if not old_path:
+        # состояния не было (старая подписка) — молча запоминаем
+        ig_update_last_seen(user_id, ig_username, "avatar", _avatar_state_fmt(cur_path, new_hash))
+        return False
+
+    if data and old_hash and new_hash == old_hash:
+        # CDN перетасовал ссылку, картинка та же — не уведомляем
+        ig_update_last_seen(user_id, ig_username, "avatar", _avatar_state_fmt(cur_path, new_hash))
+        return False
+
+    ig_update_last_seen(user_id, ig_username, "avatar", _avatar_state_fmt(cur_path, new_hash))
+    try:
+        if data:
+            await bot.send_photo(
                 user_id,
-                f"📸 *@{ig_username}* добавил(а) {len(new_stories)} новых историй!",
-                parse_mode="Markdown"
+                BufferedInputFile(data, filename="avatar.jpg"),
+                caption=f"👤 *@{ig_username}* сменил(а) аватарку!",
+                parse_mode="Markdown",
             )
-            for story in new_stories[:10]:
-                data = await _download(story.get("url", ""))
-                if not data:
-                    continue
-                try:
-                    if story["type"] == "video":
-                        await bot.send_video(
-                            user_id,
-                            BufferedInputFile(data, filename="story.mp4"),
-                            caption=f"📸 История @{ig_username}"
-                        )
-                    else:
-                        await bot.send_photo(
-                            user_id,
-                            BufferedInputFile(data, filename="story.jpg"),
-                            caption=f"📸 История @{ig_username}"
-                        )
-                    ig_mark_sent(user_id, f"story_{story['id']}")
-                except Exception as e:
-                    logger.warning(f"IG story notify {user_id}: {e}")
-                await asyncio.sleep(0.5)
+        else:
+            await bot.send_message(
+                user_id, f"👤 *@{ig_username}* сменил(а) аватарку!", parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.warning(f"IG avatar notify {user_id}: {e}")
+    return True
 
-        elif sub_type == "posts":
-            posts = info.get("posts", [])
-            if not posts:
-                continue
-            active_filter = _get_filter(user_id, ig_username, "posts")
-            new_posts = [
-                p for p in posts
-                if p["id"]
-                and not ig_already_sent(user_id, f"post_{p['id']}")
-                and _post_passes_filter(p, active_filter)
-            ]
-            if not new_posts:
-                continue
-            for post in new_posts[:5]:
-                await _notify_new_post_styled(bot, user_id, ig_username, post)
-                ig_mark_sent(user_id, f"post_{post['id']}")
-                await asyncio.sleep(0.8)
+
+# Пункт 7: счётчик неудач по историям — чтобы не крутить одну и ту же вечно
+_STORY_FAILS: dict[tuple, int] = {}
+
+
+def _story_fail(user_id: str, story_id: str) -> bool:
+    """Записать неудачу. True — лимит исчерпан, историю помечаем отправленной (бросаем)."""
+    key = (user_id, story_id)
+    n = _STORY_FAILS.get(key, 0) + 1
+    if n >= IG_STORY_MAX_FAILS:
+        _STORY_FAILS.pop(key, None)
+        ig_mark_sent(user_id, f"story_{story_id}")
+        logger.warning(f"story {story_id} → {user_id}: {n} неудач подряд, пропускаю")
+        return True
+    _STORY_FAILS[key] = n
+    return False
+
+
+async def _check_stories(bot: Bot, user_id: str, ig_username: str) -> bool:
+    stories = await get_stories(ig_username)
+    if not stories:
+        return False
+    new_stories = [
+        s for s in stories
+        if s.get("id") and not ig_already_sent(user_id, f"story_{s['id']}")
+    ]
+    if not new_stories:
+        return False
+
+    # Сначала качаем — и только потом пишем «добавил(а) N историй»,
+    # иначе при недоступном CDN заголовок прилетал бы каждый цикл без самих историй.
+    ready = []
+    for story in new_stories[:10]:
+        data = await _download(story.get("url", ""))
+        if data:
+            ready.append((story, data))
+        else:
+            _story_fail(user_id, story["id"])
+        await asyncio.sleep(0.3)
+    if not ready:
+        return False
+
+    await bot.send_message(
+        user_id,
+        f"📸 *@{ig_username}* добавил(а) {len(ready)} новых историй!",
+        parse_mode="Markdown",
+    )
+    for story, data in ready:
+        try:
+            if story["type"] == "video":
+                await bot.send_video(
+                    user_id, BufferedInputFile(data, filename="story.mp4"),
+                    caption=f"📸 История @{ig_username}",
+                )
+            else:
+                await bot.send_photo(
+                    user_id, BufferedInputFile(data, filename="story.jpg"),
+                    caption=f"📸 История @{ig_username}",
+                )
+            ig_mark_sent(user_id, f"story_{story['id']}")
+            _STORY_FAILS.pop((user_id, story["id"]), None)
+        except Exception as e:
+            logger.warning(f"IG story notify {user_id}: {e}")
+            _story_fail(user_id, story["id"])
+        await asyncio.sleep(0.5)
+    return True
+
+
+async def _check_posts(bot: Bot, user_id: str, ig_username: str, last_seen: str) -> bool:
+    # Пункт 1: раньше тут брали info["posts"], а он ВСЕГДА пустой — посты не приходили.
+    data = await get_posts(ig_username)
+    if data.get("private"):
+        return False
+    posts = data.get("posts", [])
+    if not posts:
+        return False
+
+    if last_seen != "seeded":
+        # старая подписка / сидинг не успел — молча запоминаем текущие посты
+        ig_mark_sent_many(user_id, [f"post_{p['id']}" for p in posts if p.get("id")])
+        ig_update_last_seen(user_id, ig_username, "posts", "seeded")
+        return False
+
+    active_filter = _get_filter(user_id, ig_username, "posts")
+    cutoff = time.time() - IG_POST_MAX_AGE_DAYS * 86400
+    new_posts = [
+        p for p in posts
+        if p.get("id")
+        and not ig_already_sent(user_id, f"post_{p['id']}")
+        and (not p.get("timestamp") or p["timestamp"] >= cutoff)   # закреп/старьё не считаем новым
+        and _post_passes_filter(p, active_filter)
+    ]
+    if not new_posts:
+        return False
+
+    # берём 5 самых свежих, но шлём от старых к новым
+    batch = sorted(new_posts, key=lambda p: p.get("timestamp", 0), reverse=True)[:5]
+    batch.reverse()
+    for post in batch:
+        await _notify_new_post_styled(bot, user_id, ig_username, post)
+        ig_mark_sent(user_id, f"post_{post['id']}")
+        await asyncio.sleep(0.8)
+    return True
+
+
+# ── АЛЕРТЫ О ЗДОРОВЬЕ ПУЛА (пункт 10) ─────────────────────────────────────────
+
+async def _alert_admins(bot: Bot, text: str) -> None:
+    for uid in _get_admin_ids():
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"pool alert {uid}: {e}")
+
+
+async def ig_pool_alert_task(bot: Bot):
+    """
+    Раз в 10 минут смотрит на здоровье пула. Шлёт админам алерт, если:
+      • все аккаунты мертвы;
+      • много «неожиданных»/сетевых ошибок и давно нет ни одного успешного запроса;
+      • 429 на половине аккаунтов и больше.
+    Повторы одного и того же алерта — не чаще раза в 3 часа; когда всё починилось — сообщение «снова работает».
+    """
+    import html as _html
+    COOLDOWN = 3 * 3600
+    last_alert: dict[str, float] = {}
+    active: set[str] = set()
+    await asyncio.sleep(5 * 60)
+
+    while True:
+        try:
+            h = get_pool_health(3600)
+            now = time.time()
+            problems: dict[str, str] = {}
+
+            if h["initialized"] and h["total"] and h["live"] == 0:
+                problems["dead_all"] = "все аккаунты пула мертвы — обнови куки через /ig_refresh"
+
+            bad = h["errors"].get("unexpected", 0) + h["errors"].get("net", 0)
+            ok_ago = h["last_ok_ago"]
+            if bad >= IG_ALERT_ERRORS and (ok_ago is None or ok_ago > 900):
+                le = h["last_error"] or {}
+                since = "ни разу" if ok_ago is None else f"{int(ok_ago // 60)} мин назад"
+                problems["errors"] = (
+                    f"{bad} ошибок за час, последний успешный запрос: {since}\n"
+                    f"последняя ошибка: <code>{_html.escape(str(le.get('kind', '?')))}</code> — "
+                    f"<code>{_html.escape(str(le.get('msg', ''))[:250])}</code>"
+                )
+
+            if h["total"] and h["rate_limited"] and h["rate_limited"] * 2 >= h["total"]:
+                problems["rate"] = f"429 на {h['rate_limited']} из {h['total']} аккаунтов — IG душит, подожди или добавь аккаунты"
+
+            for key, msg in problems.items():
+                if now - last_alert.get(key, 0) >= COOLDOWN:
+                    last_alert[key] = now
+                    active.add(key)
+                    await _alert_admins(bot, f"🚨 <b>instagram: проблема</b>\n\n{msg}")
+
+            if active and not problems:
+                active.clear()
+                last_alert.clear()
+                await _alert_admins(bot, "✅ <b>instagram</b> снова работает")
+        except Exception as e:
+            logger.error(f"ig_pool_alert_task error: {e}")
+        await asyncio.sleep(10 * 60)
+
+
+# ── СКАЧИВАНИЕ ПОСТА / РИЛСА ПО ССЫЛКЕ (пункт 9) ──────────────────────────────
+
+_IG_MEDIA_RE = re.compile(
+    r"https?://(?:www\.)?instagram\.com/(?:[A-Za-z0-9_.]+/)?(?:p|reel|reels|tv)/[A-Za-z0-9_-]+[^\s]*",
+    re.I,
+)
+_TG_FILE_LIMIT = 49 * 1024 * 1024
+
+
+def _extract_media_link(text: str) -> str | None:
+    m = _IG_MEDIA_RE.search(text or "")
+    return m.group(0) if m else None
+
+
+async def _is_ig_media_link(message: types.Message) -> bool:
+    t = message.text or ""
+    return bool(t) and not t.startswith("/") and bool(_extract_media_link(t))
+
+
+async def _send_ig_media(message: types.Message, link: str) -> bool:
+    """
+    Достать пост/рилс по ссылке и отправить в чат (карусель — альбомом).
+    Возвращает False, если ничего не отправили (тогда вызывающий может уступить дорогу другим хендлерам).
+    """
+    import html as _html
+    try:
+        await message.bot.send_chat_action(message.chat.id, "upload_video")
+    except Exception:
+        pass
+
+    post = await get_media_by_url(link)
+    if not post or not post.get("media"):
+        return False
+
+    files: list[tuple[str, bytes]] = []
+    too_big = 0
+    for m in post["media"][:10]:
+        kind = m.get("type", "photo")
+        url = m.get("url") or ""
+        if kind == "video" and not url:
+            kind, url = "photo", m.get("thumb", "")      # видео-ссылки нет — хотя бы превью
+        data = await _download(url or m.get("thumb", ""))
+        if not data:
+            continue
+        if len(data) > _TG_FILE_LIMIT:
+            too_big += 1
+            continue
+        files.append((kind, data))
+    if not files:
+        return False
+
+    user = post.get("username", "")
+    cap_raw = (post.get("caption") or "").strip()[:400]
+    while len(_html.escape(cap_raw)) > 700:
+        cap_raw = cap_raw[:-50]
+    caption = (
+        (f'📸 <a href="https://instagram.com/{user}">@{user}</a>\n' if user else "")
+        + (f"<i>{_html.escape(cap_raw)}</i>\n" if cap_raw else "")
+        + f"❤️ {_fmt_count(post.get('like_count', 0))}   💬 {_fmt_count(post.get('comment_count', 0))}"
+        + (f"\n\n⚠️ {too_big} файл(ов) больше 50 МБ — не влезли" if too_big else "")
+    )[:1020]
+
+    try:
+        if len(files) == 1:
+            kind, data = files[0]
+            kb = (
+                InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                    text=f"👤 профиль @{user}", callback_data=f"ig_profile:{user}")]])
+                if user else None
+            )
+            if kind == "video":
+                await message.reply_video(
+                    BufferedInputFile(data, filename="reel.mp4"),
+                    caption=caption, parse_mode="HTML", reply_markup=kb,
+                )
+            else:
+                await message.reply_photo(
+                    BufferedInputFile(data, filename="post.jpg"),
+                    caption=caption, parse_mode="HTML", reply_markup=kb,
+                )
+        else:
+            group = []
+            for i, (kind, data) in enumerate(files):
+                cls = InputMediaVideo if kind == "video" else InputMediaPhoto
+                fname = f"{i}.mp4" if kind == "video" else f"{i}.jpg"
+                group.append(cls(
+                    media=BufferedInputFile(data, filename=fname),
+                    caption=caption if i == 0 else None,
+                    parse_mode="HTML" if i == 0 else None,
+                ))
+            await message.reply_media_group(group)
+        return True
+    except Exception as e:
+        logger.warning(f"_send_ig_media {link[:60]}: {e}")
+        return False
+
+
+async def handle_ig_media_link(message: types.Message):
+    """Ссылка на пост/рилс в чате → скачиваем. Не вышло — отдаём сообщение дальше по цепочке хендлеров."""
+    link = _extract_media_link(message.text or "")
+    if link and await _send_ig_media(message, link):
+        return
+    if SkipHandler is not None:
+        raise SkipHandler()
+
+
+async def cmd_igdl(message: types.Message):
+    """/igdl <ссылка> — скачать пост или рилс."""
+    parts = (message.text or "").split(maxsplit=1)
+    link = _extract_media_link(parts[1]) if len(parts) > 1 else None
+    if not link:
+        await message.answer("кинь ссылку на пост или рилс: /igdl https://instagram.com/reel/...")
+        return
+    if not await _send_ig_media(message, link):
+        await message.answer("не смог достать этот пост — приватный, удалён или инста сейчас капризничает")
 
 
 # ── HEALTH CHECK TASK ─────────────────────────────────────────────────────────
@@ -1707,6 +2149,26 @@ async def cmd_ig_status(message: types.Message):
             f"    запросов: {s['requests']}"
         )
 
+    try:
+        h = get_pool_health(3600)
+        errs = ", ".join(f"{k}: {v}" for k, v in h["errors"].items()) or "нет"
+        lines.append(
+            f"\n📈 <b>за последний час:</b>\n"
+            f"    успешных запросов: {h['ok']}\n"
+            f"    ошибки: {errs}\n"
+            f"    в 429 сейчас: {h['rate_limited']} из {h['total']}"
+        )
+        le = h["last_error"]
+        if le:
+            import html as _h
+            ago = int((time.time() - le["ts"]) // 60)
+            lines.append(
+                f"    последняя ошибка ({ago} мин назад): "
+                f"<code>{_h.escape(le['kind'])}</code> {_h.escape(le['msg'][:120])}"
+            )
+    except Exception as e:
+        logger.warning(f"ig_status health: {e}")
+
     buttons = []
     for s in statuses:
         if not s["alive"]:
@@ -1755,5 +2217,11 @@ def register_ig_handlers(dp: Dispatcher):
     dp.callback_query.register(callback_ig_refresh_pick,   F.data.startswith("ig_refresh_pick:"))
     dp.callback_query.register(callback_ig_refresh_cancel, F.data == "ig_refresh_cancel")
     dp.message.register(process_ig_cookies,      IGStates.waiting_cookies)
+
+    # Скачивание поста/рилса по ссылке. Регистрируем ПОСЛЕДНИМИ среди текстовых
+    # хендлеров IG, чтобы состояния (username / куки) имели приоритет.
+    dp.message.register(cmd_igdl, Command("igdl"))
+    if IG_AUTO_LINKS:
+        dp.message.register(handle_ig_media_link, StateFilter(None), _is_ig_media_link)
 
     logger.info("✅ Instagram хендлеры зарегистрированы")

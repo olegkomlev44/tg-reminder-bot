@@ -10,6 +10,8 @@ instagram_viewer.py — доступ к Instagram через instagrapi.
     get_posts(username, after_cursor) → dict
     validate_session(login) → bool          ← НОВОЕ
     get_sessions_status()   → list[dict]    ← НОВОЕ
+    get_pool_health()       → dict          ← здоровье пула (алерты)
+    get_media_by_url(url)   → dict | None   ← пост/рилс по ссылке
   + всё из подписок (SQLite)
 
 Установка:
@@ -25,12 +27,15 @@ instagram_viewer.py — доступ к Instagram через instagrapi.
 from __future__ import annotations
 
 import asyncio
+import atexit
+import hashlib
 import json
 import logging
 import os
 import random
 import sqlite3
 import time
+from collections import Counter, deque
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -45,6 +50,17 @@ IG_DELAY_MAX          = float(os.getenv("IG_DELAY_MAX", "8"))       # макс. 
 IG_SAME_ACC_RETRIES   = int(os.getenv("IG_SAME_ACC_RETRIES", "2"))  # попыток на ТОМ ЖЕ акке при ClientError
 IG_RATE_WAIT_MIN      = float(os.getenv("IG_RATE_WAIT_MIN", "20"))  # backoff при 429/PleaseWaitFewMinutes
 IG_RATE_WAIT_MAX      = float(os.getenv("IG_RATE_WAIT_MAX", "45"))
+# Пункт 4: общий лимитер — запросы к IG идут строго по одному, с паузой между стартами
+IG_MIN_INTERVAL       = float(os.getenv("IG_MIN_INTERVAL", "1.5"))   # мин. пауза между стартами запросов
+IG_REQ_TIMEOUT        = float(os.getenv("IG_REQ_TIMEOUT", "60"))     # таймаут одного запроса, сек
+# Пункт 5: ретраи на сетевых ошибках (таймаут, обрыв, DNS)
+IG_NET_RETRIES        = int(os.getenv("IG_NET_RETRIES", "3"))
+# Пункт 6: как часто сохранять обновлённые куки сессии на диск (раз в N успешных запросов)
+IG_DUMP_EVERY         = int(os.getenv("IG_DUMP_EVERY", "15"))
+# Пункт 2: TTL кэша профилей (сек)
+IG_USER_CACHE_TTL     = int(os.getenv("IG_USER_CACHE_TTL", "900"))
+# Пункт 7: сколько дней хранить записи «уже отправлено»
+IG_SENT_KEEP_DAYS     = int(os.getenv("IG_SENT_KEEP_DAYS", "14"))
 
 # ── ЗАВИСИМОСТЬ ───────────────────────────────────────────────────────────────
 try:
@@ -78,6 +94,18 @@ def _unwrap_percent_re() -> None:
         _u._PERCENT_RE = r
     except Exception:
         pass
+
+
+# Пункт 5: сетевые ошибки, на которых надо ретраить, а не падать
+try:
+    import requests as _requests
+    _NET_ERRORS: tuple = (
+        _requests.exceptions.RequestException,
+        ConnectionError,
+        TimeoutError,   # в py3.11 это же asyncio.TimeoutError
+    )
+except ImportError:
+    _NET_ERRORS = (ConnectionError, TimeoutError)
 
 
 # ── КОНФИГ ────────────────────────────────────────────────────────────────────
@@ -166,6 +194,17 @@ class _AccountPool:
         self._request_counts: dict[int, int] = {}
         # Уже известные мёртвые сессии — не спамим алертами повторно
         self._known_dead: set[str] = set()
+        # Пункт 4: гейт — один запрос к IG за раз, FIFO
+        self._gate = asyncio.Lock()
+        self._last_start = 0.0
+        # Пункт 6: учёт сохранения сессий
+        self._loaded_mtime: dict[str, float] = {}
+        self._dump_hash: dict[str, str] = {}
+        self._since_dump: dict[int, int] = {}
+        # Пункт 10: данные для health-алертов
+        self._ok_ts: deque = deque(maxlen=2000)
+        self._err_events: deque = deque(maxlen=300)   # (ts, kind, msg)
+        self._rate_limited_until: dict[int, float] = {}
 
     # ── инициализация ────────────────────────────────────────────────────────
 
@@ -195,6 +234,10 @@ class _AccountPool:
                 f"Создай его через /ig_refresh или положи вручную в {session_file.parent}/"
             )
 
+        try:
+            self._loaded_mtime[login] = session_file.stat().st_mtime
+        except OSError:
+            pass
         settings = json.loads(session_file.read_text())
         cl.set_settings(settings)
 
@@ -248,6 +291,58 @@ class _AccountPool:
             return None
         return cl
 
+    # ── учёт событий (для health) ────────────────────────────────────────────
+
+    def _note_ok(self) -> None:
+        self._ok_ts.append(time.time())
+
+    def _note_err(self, kind: str, msg: str = "") -> None:
+        self._err_events.append((time.time(), kind, (msg or "")[:300]))
+
+    # ── сохранение сессий на диск (пункт 6) ──────────────────────────────────
+
+    def _dump_session(self, idx: int, force: bool = False) -> bool:
+        """
+        Записать актуальные куки/настройки клиента обратно в session.json.
+        Не трогаем файл, если его изменили снаружи (например /ig_refresh),
+        и не пишем для уже мёртвых сессий — чтобы не затереть свежие куки старыми.
+        """
+        try:
+            if idx >= len(self._clients) or idx >= len(self._accounts):
+                return False
+            cl = self._clients[idx]
+            if cl is None:
+                return False
+            login = self._accounts[idx][0]
+            if login in self._known_dead:
+                return False
+
+            path = _session_dir() / f"{login}.json"
+            if path.exists() and path.stat().st_mtime > self._loaded_mtime.get(login, 0) + 1:
+                logger.info(f"[pool] сессия {login} изменена снаружи — не перезаписываю")
+                return False
+
+            data = json.dumps(cl.get_settings(), ensure_ascii=False, indent=2, default=str)
+            digest = hashlib.sha1(data.encode("utf-8")).hexdigest()
+            if not force and self._dump_hash.get(login) == digest:
+                return False
+
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(data, encoding="utf-8")
+            os.replace(tmp, path)
+            self._loaded_mtime[login] = path.stat().st_mtime
+            self._dump_hash[login] = digest
+            logger.info(f"[pool] 💾 сессия {login} сохранена")
+            return True
+        except Exception as e:
+            logger.warning(f"[pool] не удалось сохранить сессию #{idx}: {e}")
+            return False
+
+    def flush_sessions(self) -> None:
+        """Синхронно сохранить все сессии (вызывается при выходе)."""
+        for i in range(len(self._clients)):
+            self._dump_session(i)
+
     # ── НОВОЕ: безопасный горячий перезапуск ─────────────────────────────────
 
     async def reload_client(self, login: str) -> tuple[bool, str]:
@@ -283,6 +378,7 @@ class _AccountPool:
         # Тестируем — реальный запрос к IG
         try:
             def _ping(cl: Client):
+                _unwrap_percent_re()
                 return cl.user_info_by_username(login)
 
             await asyncio.get_event_loop().run_in_executor(
@@ -310,59 +406,89 @@ class _AccountPool:
 
     # ── выполнение запроса с ротацией ────────────────────────────────────────
 
-    async def run(self, fn, *args, retries: int = IG_SAME_ACC_RETRIES + 3, **kwargs):
+    async def run(self, fn, *args, retries: int | None = None, **kwargs):
         """
         Запустить fn(client, *args, **kwargs) в executor.
-        При 429 / LoginRequired переключить аккаунт и повторить.
 
-        Важно: на разовую ClientError больше НЕ прыгаем сразу на следующий
-        аккаунт — сначала пробуем ещё раз тем же (с backoff). Без прокси все
-        аккаунты и так с одного IP, и мгновенная ротация по кругу при первой
-        же временной ошибке означает, что за пару секунд мы гоняем запросы
-        через ВЕСЬ пул — а это выглядит для IG куда подозрительнее, чем
-        повторная попытка на одном клиенте.
+        Пункт 4: все запросы идут через общий гейт — по одному, с минимальной
+        паузой между стартами. Раньше хендлеры и фоновые задачи могли долбить IG
+        параллельно с одного IP.
+        Пункт 5: сетевые ошибки (таймаут, обрыв) ретраятся на том же аккаунте
+        с экспоненциальным backoff, а не роняют запрос сразу.
+        При 429 / LoginRequired переключаем аккаунт и повторяем.
+
+        На разовую ClientError не прыгаем сразу на следующий аккаунт — сначала
+        пробуем ещё раз тем же (с backoff): мгновенная ротация по кругу выглядит
+        для IG подозрительнее, чем повтор на одном клиенте.
         """
         await self._ensure_init()
         if not self._clients:
             return None
 
+        if retries is None:
+            retries = IG_SAME_ACC_RETRIES + IG_NET_RETRIES + 3
+
+        loop = asyncio.get_event_loop()
         last_err = None
         same_acc_failures = 0
+        net_failures = 0
+        healed = False
 
         for attempt in range(retries):
-            cl = self._current_client()
-            if cl is None:
-                return None
-            _unwrap_percent_re()
             try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: fn(cl, *args, **kwargs)
-                )
-                # Считаем успешный запрос
-                idx = self._current % len(self._clients)
-                self._request_counts[idx] = self._request_counts.get(idx, 0) + 1
+                async with self._gate:
+                    # клиента берём ПОСЛЕ получения гейта: пока ждали очередь,
+                    # другой запрос мог провести ротацию
+                    cl = self._current_client()
+                    if cl is None:
+                        return None
+                    idx = self._current % len(self._clients)
+
+                    gap = self._last_start + IG_MIN_INTERVAL - time.monotonic()
+                    if gap > 0:
+                        await asyncio.sleep(gap)
+                    self._last_start = time.monotonic()
+
+                    _unwrap_percent_re()
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(None, lambda: fn(cl, *args, **kwargs)),
+                        timeout=IG_REQ_TIMEOUT,
+                    )
+
+                    # успех
+                    self._request_counts[idx] = self._request_counts.get(idx, 0) + 1
+                    self._note_ok()
+                    self._since_dump[idx] = self._since_dump.get(idx, 0) + 1
+                    if self._since_dump[idx] >= IG_DUMP_EVERY:
+                        self._since_dump[idx] = 0
+                        await loop.run_in_executor(None, self._dump_session, idx)
                 return result
 
             except (PleaseWaitFewMinutes, RateLimitError) as e:
-                # Увеличенный backoff — не спешить ротировать
                 wait = random.uniform(IG_RATE_WAIT_MIN, IG_RATE_WAIT_MAX)
+                cur = self._current % len(self._clients)
+                self._rate_limited_until[cur] = time.time() + 1800
+                self._note_err("rate", str(e))
                 logger.warning(
-                    f"[pool] 429 на акк #{self._current}, "
+                    f"[pool] 429 на акк #{cur}, "
                     f"ждём {wait:.0f}с перед ротацией... ({e})"
                 )
                 self._next_client()
                 same_acc_failures = 0
+                net_failures = 0
                 await asyncio.sleep(wait)
                 last_err = e
 
             except LoginRequired as e:
                 login = self._accounts[self._current % len(self._accounts)][0]
+                self._note_err("login", f"{login}: {e}")
                 logger.warning(
                     f"[pool] LoginRequired @{login} — сессия протухла, ротация.\n"
                     f"👉 Обнови куки: /ig_refresh"
                 )
                 self._next_client()
                 same_acc_failures = 0
+                net_failures = 0
                 last_err = e
                 # Алерт только если эта сессия ещё не была помечена мёртвой
                 if login not in self._known_dead:
@@ -377,6 +503,7 @@ class _AccountPool:
                 raise  # не ошибка пула, пробрасываем выше
 
             except ClientError as e:
+                self._note_err("client", str(e))
                 same_acc_failures += 1
                 if same_acc_failures <= IG_SAME_ACC_RETRIES:
                     wait = 2 * same_acc_failures + random.uniform(0, 2)
@@ -395,8 +522,33 @@ class _AccountPool:
                     await asyncio.sleep(2)
                 last_err = e
 
+            except _NET_ERRORS as e:
+                self._note_err("net", f"{type(e).__name__}: {e}")
+                net_failures += 1
+                if net_failures <= IG_NET_RETRIES:
+                    wait = min(2 ** net_failures, 20) + random.uniform(0, 1.5)
+                    logger.warning(
+                        f"[pool] сеть: {type(e).__name__} "
+                        f"(попытка {net_failures}/{IG_NET_RETRIES}), повтор через {wait:.0f}с: {e}"
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.warning(f"[pool] сеть: лимит повторов исчерпан, ротирую: {e}")
+                    self._next_client()
+                    net_failures = 0
+                    await asyncio.sleep(2)
+                last_err = e
+
             except Exception as e:
-                logger.error(f"[pool] неожиданная ошибка: {e}")
+                # Самолечение: yt-dlp может навесить обёртку на urllib3 повторно
+                if "Urllib3PercentREOverride" in str(e) and not healed:
+                    healed = True
+                    _unwrap_percent_re()
+                    logger.warning("[pool] сломан urllib3._PERCENT_RE (yt-dlp) — починили, повторяем")
+                    last_err = e
+                    continue
+                self._note_err("unexpected", f"{type(e).__name__}: {e}")
+                logger.error(f"[pool] неожиданная ошибка: {e}", exc_info=True)
                 last_err = e
                 break
 
@@ -405,6 +557,7 @@ class _AccountPool:
 
 
 _POOL = _AccountPool()
+atexit.register(_POOL.flush_sessions)
 
 
 # ── СТАТУС И ВАЛИДАЦИЯ СЕССИЙ ─────────────────────────────────────────────────
@@ -427,6 +580,32 @@ def get_sessions_status() -> list[dict]:
     return result
 
 
+def get_pool_health(window: int = 3600) -> dict:
+    """
+    Пункт 10: сводка по здоровью пула за последние `window` секунд.
+    Используется для алертов админам и в /ig_status.
+    """
+    now = time.time()
+    errs = [e for e in _POOL._err_events if now - e[0] <= window]
+    counts = Counter(k for _, k, _ in errs)
+    ok_n = sum(1 for t in _POOL._ok_ts if now - t <= window)
+    last_ok = _POOL._ok_ts[-1] if _POOL._ok_ts else None
+    last_err = _POOL._err_events[-1] if _POOL._err_events else None
+    return {
+        "initialized":  _POOL._initialized,
+        "total":        len(_POOL._accounts),
+        "live":         sum(1 for c in _POOL._clients if c is not None),
+        "rate_limited": sum(1 for t in _POOL._rate_limited_until.values() if t > now),
+        "ok":           ok_n,
+        "errors":       dict(counts),
+        "last_ok_ago":  (now - last_ok) if last_ok else None,
+        "last_error": (
+            {"ts": last_err[0], "kind": last_err[1], "msg": last_err[2]}
+            if last_err else None
+        ),
+    }
+
+
 async def validate_session(login: str) -> bool:
     """
     Проверить что сессия для login работает.
@@ -445,12 +624,14 @@ async def validate_session(login: str) -> bool:
     cl = _POOL._clients[idx]
 
     def _ping(c: Client):
+        _unwrap_percent_re()
         return c.user_info_by_username(login)
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _ping(cl)
-        )
+        async with _POOL._gate:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _ping(cl)
+            )
         return bool(result)
     except Exception as e:
         logger.warning(f"validate_session {login}: {e}")
@@ -597,11 +778,47 @@ def _story_to_dict(item) -> dict:
 
 # ── ПУБЛИЧНЫЙ API ─────────────────────────────────────────────────────────────
 
-async def get_user_info(username: str) -> dict | None:
-    """Получить инфо о пользователе Instagram."""
+# Пункт 2: кэш профилей. Раньше get_posts / get_stories / get_avatar_bytes и
+# проверка подписок каждый раз заново дёргали user_info_by_username —
+# на один профиль уходило 2–3 лишних запроса к IG.
+_USER_CACHE: dict[str, dict] = {}
+_NOTFOUND_CACHE: dict[str, float] = {}
+_NOTFOUND_TTL = 300  # 5 минут не долбим несуществующие ники
+
+
+def _ucache_get(username: str) -> dict | None:
+    e = _USER_CACHE.get(username)
+    if not e:
+        return None
+    if time.time() - e["ts"] > IG_USER_CACHE_TTL:
+        _USER_CACHE.pop(username, None)
+        return None
+    return dict(e["info"])
+
+
+def _ucache_set(username: str, info: dict) -> None:
+    if len(_USER_CACHE) > 500:
+        oldest = min(_USER_CACHE, key=lambda k: _USER_CACHE[k]["ts"])
+        _USER_CACHE.pop(oldest, None)
+    _USER_CACHE[username] = {"info": dict(info), "ts": time.time()}
+
+
+async def get_user_info(username: str, force: bool = False) -> dict | None:
+    """
+    Получить инфо о пользователе Instagram.
+    force=True — игнорировать кэш (нужно фоновой проверке подписок).
+    """
     username = username.lower().strip("@").strip()
     if not username:
         return None
+
+    if not force:
+        cached = _ucache_get(username)
+        if cached:
+            return cached
+        nf = _NOTFOUND_CACHE.get(username)
+        if nf and time.time() - nf < _NOTFOUND_TTL:
+            return None
 
     def _fetch(cl: Client):
         user = cl.user_info_by_username(username)
@@ -610,18 +827,23 @@ async def get_user_info(username: str) -> dict | None:
     try:
         result = await _POOL.run(_fetch)
         if result:
+            _ucache_set(username, result)
+            _NOTFOUND_CACHE.pop(username, None)
             logger.info(f"✅ get_user_info @{username}: {result.get('followers')} фолловеров")
         return result
     except UserNotFound:
         logger.warning(f"UserNotFound: @{username}")
+        _NOTFOUND_CACHE[username] = time.time()
         return None
     except PrivateAccount:
         logger.info(f"PrivateAccount: @{username}")
-        return {
+        info = {
             "id": "", "username": username, "full_name": username,
             "biography": "", "followers": 0, "following": 0, "posts_count": 0,
             "avatar_url": "", "is_private": True, "is_verified": False, "posts": [],
         }
+        _ucache_set(username, info)
+        return info
     except Exception as e:
         logger.error(f"get_user_info @{username}: {e}")
         return None
@@ -707,10 +929,14 @@ async def get_avatar_bytes(username: str) -> bytes | None:
     """Скачать аватарку через instagrapi (надёжнее, чем прямой URL)."""
     import tempfile
 
+    username = username.lower().strip("@").strip()
+    info = await get_user_info(username)          # из кэша — без лишнего запроса
+    pk = (info or {}).get("id", "")
+
     def _fetch(cl: Client):
-        user = cl.user_info_by_username(username)
+        user_pk = int(pk) if pk else cl.user_info_by_username(username).pk
         with tempfile.TemporaryDirectory() as tmpdir:
-            path = cl.user_download_profile_pic(user.pk, folder=tmpdir)
+            path = cl.user_download_profile_pic(user_pk, folder=tmpdir)
             with open(path, "rb") as f:
                 return f.read()
 
@@ -718,6 +944,32 @@ async def get_avatar_bytes(username: str) -> bytes | None:
         return await _POOL.run(_fetch)
     except Exception as e:
         logger.error(f"get_avatar_bytes @{username}: {e}")
+        return None
+
+
+# ── ПОСТ / РИЛС ПО ССЫЛКЕ (пункт 9) ───────────────────────────────────────────
+
+async def get_media_by_url(url: str) -> dict | None:
+    """
+    Достать пост/рилс/IGTV по ссылке.
+    Возвращает наш dict поста (как в get_posts) + username и is_reel,
+    либо None если не получилось.
+    """
+    def _fetch(cl: Client):
+        pk = cl.media_pk_from_url(url)
+        m = cl.media_info(pk)
+        post = _media_to_post(m)
+        if not post:
+            return None
+        usr = getattr(m, "user", None)
+        post["username"] = getattr(usr, "username", "") or ""
+        post["is_reel"] = getattr(m, "product_type", "") == "clips"
+        return post
+
+    try:
+        return await _POOL.run(_fetch)
+    except Exception as e:
+        logger.warning(f"get_media_by_url {url[:80]}: {e}")
         return None
 
 
@@ -761,6 +1013,12 @@ def init_ig_db():
         media_id    TEXT NOT NULL,
         sent_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (user_id, media_id)
+    )""")
+    # Пункт 8: когда в последний раз проверяли ник и когда в нём была активность
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_check_state (
+        ig_username   TEXT PRIMARY KEY,
+        last_checked  REAL DEFAULT 0,
+        last_activity REAL DEFAULT 0
     )""")
     conn.commit()
     conn.close()
@@ -862,3 +1120,64 @@ def ig_already_sent(user_id: str, media_id: str) -> bool:
     ).fetchone()
     conn.close()
     return row is not None
+
+
+def ig_mark_sent_many(user_id: str, media_ids: list) -> None:
+    """Пометить сразу пачку как отправленные (сидинг подписок)."""
+    if not media_ids:
+        return
+    conn = sqlite3.connect(IG_DB)
+    conn.executemany(
+        "INSERT OR IGNORE INTO ig_sent (user_id, media_id) VALUES (?,?)",
+        [(str(user_id), m) for m in media_ids],
+    )
+    conn.commit()
+    conn.close()
+
+
+def ig_cleanup_sent(days: int = IG_SENT_KEEP_DAYS) -> int:
+    """
+    Пункт 7: чистим ig_sent от старых записей (иначе таблица растёт вечно)
+    и ig_check_state от ников, на которых уже никто не подписан.
+    Безопасно: посты старше IG_POST_MAX_AGE фильтруются по дате и не придут повторно.
+    """
+    conn = sqlite3.connect(IG_DB)
+    cur = conn.execute(
+        "DELETE FROM ig_sent WHERE sent_at < datetime('now', ?)",
+        (f"-{int(days)} days",),
+    )
+    n = cur.rowcount
+    conn.execute(
+        "DELETE FROM ig_check_state WHERE ig_username NOT IN "
+        "(SELECT DISTINCT ig_username FROM ig_subscriptions)"
+    )
+    conn.commit()
+    conn.close()
+    if n:
+        logger.info(f"🧹 ig_sent: удалено {n} старых записей")
+    return n
+
+
+def ig_get_check_states() -> dict:
+    """{ig_username: (last_checked, last_activity)}"""
+    conn = sqlite3.connect(IG_DB)
+    rows = conn.execute(
+        "SELECT ig_username, last_checked, last_activity FROM ig_check_state"
+    ).fetchall()
+    conn.close()
+    return {r[0]: (r[1] or 0.0, r[2] or 0.0) for r in rows}
+
+
+def ig_set_check_state(ig_username: str, last_checked: float, last_activity: float | None = None):
+    """Записать время проверки; last_activity обновляем только если передан."""
+    conn = sqlite3.connect(IG_DB)
+    conn.execute(
+        "INSERT INTO ig_check_state (ig_username, last_checked, last_activity) VALUES (?,?,?) "
+        "ON CONFLICT(ig_username) DO UPDATE SET last_checked=excluded.last_checked, "
+        "last_activity=CASE WHEN ? IS NULL THEN ig_check_state.last_activity ELSE ? END",
+        (ig_username, last_checked,
+         last_activity if last_activity is not None else last_checked,
+         last_activity, last_activity),
+    )
+    conn.commit()
+    conn.close()
