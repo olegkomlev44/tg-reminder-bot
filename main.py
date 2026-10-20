@@ -24,7 +24,10 @@ from apscheduler.triggers.cron import CronTrigger
 from config import TOKEN, TIMEZONE
 from db import init_db
 from web_server import start_web_server
-from instagram_handlers import register_ig_handlers, ig_checker_task, ig_session_health_task, _set_bot_ref
+from instagram_handlers import (
+    register_ig_handlers, ig_checker_task, ig_session_health_task, _set_bot_ref,
+    inline_instagram, parse_ig_inline,
+)
 from media_downloader import register_media_handlers
 from feed_handlers import register_feed_handlers
 
@@ -147,7 +150,10 @@ async def main():
     # ── Inline ────────────────────────────────────────────────────────────────
     async def inline_query_router(iq: types.InlineQuery):
         raw = iq.query or ""
-        if raw.strip().startswith("a:"):
+        if parse_ig_inline(raw) is not None:      # «ig natgeo» / «ig:natgeo» / ссылка на профиль
+            logger.info(f"📸 inline → instagram: {raw!r}")
+            await inline_instagram(iq)
+        elif raw.strip().startswith("a:"):
             logger.info(f"🎬 inline → anime: {raw!r}")
             await inline_anime(iq)
         else:

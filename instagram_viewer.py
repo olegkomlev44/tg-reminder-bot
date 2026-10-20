@@ -14,6 +14,15 @@ instagram_viewer.py — доступ к Instagram через instagrapi.
     get_media_by_url(url)   → dict | None   ← пост/рилс по ссылке
   + всё из подписок (SQLite)
 
+Что изменилось в этой версии:
+  • приоритетная очередь к IG: запросы пользователей обгоняют фоновые проверки
+  • ротация аккаунтов обходит те, что сидят в 429 / мертвы
+  • session.json дублируются в SQLite (instagram.db) и восстанавливаются при старте
+  • лёгкая проверка постов (get_latest_posts) + учёт media_count
+  • отслеживание по pk (смена ника / удаление / приватность)
+  • кэш Telegram file_id по shortcode
+  • истории по ссылке, хайлайты
+
 Установка:
     pip install instagrapi
 
@@ -28,7 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
 import hashlib
+import heapq
+import itertools
 import json
 import logging
 import os
@@ -36,6 +48,7 @@ import random
 import sqlite3
 import time
 from collections import Counter, deque
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -61,6 +74,33 @@ IG_DUMP_EVERY         = int(os.getenv("IG_DUMP_EVERY", "15"))
 IG_USER_CACHE_TTL     = int(os.getenv("IG_USER_CACHE_TTL", "900"))
 # Пункт 7: сколько дней хранить записи «уже отправлено»
 IG_SENT_KEEP_DAYS     = int(os.getenv("IG_SENT_KEEP_DAYS", "14"))
+# Сколько сидит в «карантине» аккаунт, получивший 429 (сек)
+IG_RATE_COOLDOWN      = int(os.getenv("IG_RATE_COOLDOWN", "1800"))
+# Через сколько пробуем снова аккаунт, которому прилетел LoginRequired (вдруг ложная тревога)
+IG_DEAD_RETRY         = int(os.getenv("IG_DEAD_RETRY", "3600"))
+# Лёгкая проверка постов: сколько последних постов тянуть в фоне (хватает 3–5)
+IG_POSTS_CHECK_AMOUNT = int(os.getenv("IG_POSTS_CHECK_AMOUNT", "5"))
+# Если media_count не менялся — посты не тянем, но не реже, чем раз в N сек
+# (страховка от «удалили один и выложили другой» — счётчик тот же)
+IG_POSTS_FORCE_EVERY  = int(os.getenv("IG_POSTS_FORCE_EVERY", str(6 * 3600)))
+# Сколько хранить кэш Telegram file_id
+IG_FILE_CACHE_DAYS    = int(os.getenv("IG_FILE_CACHE_DAYS", "60"))
+
+# ── ПРИОРИТЕТЫ ЗАПРОСОВ ───────────────────────────────────────────────────────
+# Чем меньше число — тем раньше обслуживается. Пользователь, открывший профиль,
+# не должен ждать, пока фоновая проверка переберёт 12 ников.
+PRIO_USER = 0
+PRIO_BG   = 10
+_ig_prio: ContextVar[int] = ContextVar("ig_prio", default=PRIO_USER)
+
+
+def set_background_priority() -> None:
+    """
+    Вызвать в начале фоновой задачи (ig_checker_task, health-check):
+    все запросы к IG из этой задачи (и её подзадач) станут фоновыми.
+    ContextVar живёт в контексте задачи, на хендлеры пользователей не влияет.
+    """
+    _ig_prio.set(PRIO_BG)
 
 # ── ЗАВИСИМОСТЬ ───────────────────────────────────────────────────────────────
 try:
@@ -132,11 +172,14 @@ def _session_dir() -> Path:
         logger.info(f"[pool] session_dir = {p}  (IG_SESSION_DIR)")
         return p
 
+    # ВАЖНО: /data (постоянный том BotHost) стоит РАНЬШЕ /app/data — иначе
+    # /app/data создаётся в слое контейнера и сессии умирают при каждом деплое.
+    # Порядок совпадает с db.py / _db_path().
     base_candidates = [
         os.getenv("DATA_DIR"),
         os.getenv("DB_DIR"),
-        "/app/data",
         "/data",
+        "/app/data",
         os.path.dirname(os.path.abspath(__file__)),
     ]
     for base in base_candidates:
@@ -157,6 +200,186 @@ def _session_dir() -> Path:
     p.mkdir(parents=True, exist_ok=True)
     logger.info(f"[pool] session_dir = {p}  (fallback)")
     return p
+
+
+def _legacy_session_dirs() -> list[Path]:
+    """Где сессии могли лежать при старом порядке выбора каталога."""
+    here = Path(os.path.dirname(os.path.abspath(__file__)))
+    return [Path("/app/data/ig_sessions"), Path("/data/ig_sessions"), here / "ig_sessions"]
+
+
+# ── ДУБЛИРОВАНИЕ СЕССИЙ В БД ──────────────────────────────────────────────────
+# Если диск с session.json стирается при деплое, а instagram.db (лежит в /data)
+# остаётся — восстанавливаем файлы из БД. Побеждает более свежая копия.
+
+def _sess_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(IG_DB, timeout=10)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ig_sessions ("
+        "login TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL)"
+    )
+    return conn
+
+
+def _sess_db_save(login: str, text: str) -> None:
+    conn = _sess_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO ig_sessions (login, data, updated) VALUES (?,?,?)",
+            (login, text, time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _sess_db_load(login: str) -> tuple[str, float] | None:
+    conn = _sess_conn()
+    try:
+        row = conn.execute(
+            "SELECT data, updated FROM ig_sessions WHERE login=?", (login,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return (row[0], float(row[1])) if row else None
+
+
+def _valid_session_text(text: str | None) -> bool:
+    if not text:
+        return False
+    try:
+        d = json.loads(text)
+        return isinstance(d, dict) and bool(d.get("cookies") or d.get("authorization_data"))
+    except Exception:
+        return False
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _sync_session_file(login: str) -> None:
+    """
+    Свести файл сессии и копию в БД перед загрузкой клиента:
+      • файла нет, в БД есть            → восстанавливаем файл из БД;
+      • файла нет, в БД нет             → ищем в старых каталогах и копируем;
+      • оба есть и различаются          → берём более свежий (по mtime / updated);
+      • файл есть, в БД нет             → кладём копию в БД.
+    """
+    path = _session_dir() / f"{login}.json"
+    try:
+        row = _sess_db_load(login)
+    except Exception as e:
+        logger.warning(f"[pool] БД сессий недоступна ({login}): {e}")
+        row = None
+
+    file_text, file_mtime = None, 0.0
+    if path.exists():
+        try:
+            file_text = path.read_text(encoding="utf-8")
+            file_mtime = path.stat().st_mtime
+        except OSError:
+            file_text = None
+
+    if file_text is None and row is None:
+        for d in _legacy_session_dirs():
+            old = d / f"{login}.json"
+            if old != path and old.exists():
+                try:
+                    txt = old.read_text(encoding="utf-8")
+                    if _valid_session_text(txt):
+                        _write_atomic(path, txt)
+                        file_text, file_mtime = txt, path.stat().st_mtime
+                        logger.info(f"[pool] 📦 сессия {login} перенесена из {old}")
+                        break
+                except OSError:
+                    continue
+
+    try:
+        if row:
+            db_text, db_ts = row
+            if file_text is None or not _valid_session_text(file_text):
+                if _valid_session_text(db_text):
+                    _write_atomic(path, db_text)
+                    logger.info(f"[pool] ♻️ сессия {login} восстановлена из БД")
+                return
+            if file_text != db_text:
+                if file_mtime + 1 < db_ts and _valid_session_text(db_text):
+                    _write_atomic(path, db_text)
+                    logger.info(f"[pool] ♻️ сессия {login}: в БД копия свежее файла — взял из БД")
+                else:
+                    _sess_db_save(login, file_text)
+            return
+        if file_text is not None and _valid_session_text(file_text):
+            _sess_db_save(login, file_text)
+            logger.info(f"[pool] 💾 сессия {login} продублирована в БД")
+    except Exception as e:
+        logger.warning(f"[pool] sync сессии {login}: {e}")
+
+
+def persist_session(login: str) -> bool:
+    """Принудительно записать текущий session.json в БД (например после /ig_refresh)."""
+    try:
+        path = _session_dir() / f"{login}.json"
+        txt = path.read_text(encoding="utf-8")
+        if not _valid_session_text(txt):
+            return False
+        _sess_db_save(login, txt)
+        return True
+    except Exception as e:
+        logger.warning(f"[pool] persist_session {login}: {e}")
+        return False
+
+
+# ── ПРИОРИТЕТНЫЙ ГЕЙТ ─────────────────────────────────────────────────────────
+
+class _PriorityGate:
+    """
+    Мьютекс с приоритетами: пока гейт занят, ожидающие сортируются по
+    (приоритет, порядок прихода). Пользовательский запрос обгоняет любой
+    фоновый, текущий выполняющийся запрос никто не прерывает.
+    """
+
+    def __init__(self) -> None:
+        self._locked = False
+        self._heap: list = []
+        self._seq = itertools.count()
+
+    async def _acquire(self, prio: int) -> None:
+        if not self._locked and not self._heap:
+            self._locked = True
+            return
+        fut = asyncio.get_event_loop().create_future()
+        heapq.heappush(self._heap, (prio, next(self._seq), fut))
+        try:
+            await fut
+        except asyncio.CancelledError:
+            # гейт мог быть уже передан нам, а отмена пришла следом — вернуть
+            if fut.done() and not fut.cancelled():
+                self._release()
+            raise
+
+    def _release(self) -> None:
+        while self._heap:
+            _, _, fut = heapq.heappop(self._heap)
+            if not fut.done():
+                fut.set_result(None)      # передаём гейт следующему, _locked остаётся True
+                return
+        self._locked = False
+
+    @contextlib.asynccontextmanager
+    async def hold(self, prio: int | None = None):
+        await self._acquire(_ig_prio.get() if prio is None else prio)
+        try:
+            yield
+        finally:
+            self._release()
+
+    @property
+    def waiting(self) -> int:
+        return sum(1 for _, _, f in self._heap if not f.done())
 
 
 # ── CALLBACK ПРИ СМЕРТИ СЕССИИ ────────────────────────────────────────────────
@@ -194,8 +417,10 @@ class _AccountPool:
         self._request_counts: dict[int, int] = {}
         # Уже известные мёртвые сессии — не спамим алертами повторно
         self._known_dead: set[str] = set()
-        # Пункт 4: гейт — один запрос к IG за раз, FIFO
-        self._gate = asyncio.Lock()
+        # Пункт 4: гейт — один запрос к IG за раз, по приоритетам (пользователь > фон)
+        self._gate = _PriorityGate()
+        # когда аккаунт получил LoginRequired (для повторной пробы через IG_DEAD_RETRY)
+        self._dead_ts: dict[str, float] = {}
         self._last_start = 0.0
         # Пункт 6: учёт сохранения сессий
         self._loaded_mtime: dict[str, float] = {}
@@ -227,6 +452,9 @@ class _AccountPool:
         cl = Client()
         cl.delay_range = [IG_DELAY_MIN, IG_DELAY_MAX]
         session_file = _session_dir() / f"{login}.json"
+
+        # Файл мог исчезнуть при деплое — восстановим из БД (и наоборот)
+        _sync_session_file(login)
 
         if not session_file.exists():
             raise FileNotFoundError(
@@ -272,24 +500,75 @@ class _AccountPool:
             if not self._initialized:
                 await asyncio.get_event_loop().run_in_executor(None, self._init_all)
 
+    def _usable(self, i: int, now: float | None = None) -> bool:
+        """Аккаунт можно использовать: жив, не в 429-карантине, не «мёртвый»."""
+        now = now or time.time()
+        if i >= len(self._clients) or self._clients[i] is None:
+            return False
+        if self._rate_limited_until.get(i, 0) > now:
+            return False
+        if i < len(self._accounts):
+            login = self._accounts[i][0]
+            if login in self._known_dead and now - self._dead_ts.get(login, 0) < IG_DEAD_RETRY:
+                return False
+        return True
+
+    def _select_idx(self, prio: int) -> Optional[int]:
+        """
+        Индекс аккаунта для запроса. Текущий, если он годится; иначе первый
+        годный по кругу. Если годных нет: фоновый запрос отменяется (None),
+        пользовательский идёт на аккаунт, у которого 429 истекает раньше всех.
+        """
+        n = len(self._clients)
+        if n == 0:
+            return None
+        now = time.time()
+        cur = self._current % n
+        if self._usable(cur, now):
+            return cur
+        for step in range(1, n):
+            i = (cur + step) % n
+            if self._usable(i, now):
+                self._current = i
+                return i
+        if prio >= PRIO_BG:
+            return None
+        cands = [i for i in range(n) if self._clients[i] is not None
+                 and (i >= len(self._accounts) or self._accounts[i][0] not in self._known_dead)]
+        if not cands:
+            cands = [i for i in range(n) if self._clients[i] is not None]
+        if not cands:
+            return None
+        best = min(cands, key=lambda k: self._rate_limited_until.get(k, 0))
+        self._current = best
+        return best
+
+    def _rotate_from(self, cur: int) -> bool:
+        """Перейти на следующий годный аккаунт (≠ cur). True — нашли другой."""
+        n = len(self._clients)
+        if n <= 1:
+            return False
+        now = time.time()
+        for step in range(1, n):
+            i = (cur + step) % n
+            if self._usable(i, now):
+                self._current = i
+                return True
+        return False
+
     def _next_client(self) -> Optional[Client]:
+        """Совместимость: переключиться на следующий годный и вернуть клиента."""
         if not self._clients:
             return None
-        self._current = (self._current + 1) % len(self._clients)
-        return self._clients[self._current]
+        cur = self._current % len(self._clients)
+        self._rotate_from(cur)
+        return self._clients[self._current % len(self._clients)]
 
     def _current_client(self) -> Optional[Client]:
         if not self._clients:
             return None
-        cl = self._clients[self._current % len(self._clients)]
-        if cl is None:
-            # Слот пустой (failed init или убитый) — ищем живой
-            for i, c in enumerate(self._clients):
-                if c is not None:
-                    self._current = i
-                    return c
-            return None
-        return cl
+        i = self._select_idx(PRIO_USER)
+        return self._clients[i] if i is not None else None
 
     # ── учёт событий (для health) ────────────────────────────────────────────
 
@@ -332,6 +611,10 @@ class _AccountPool:
             os.replace(tmp, path)
             self._loaded_mtime[login] = path.stat().st_mtime
             self._dump_hash[login] = digest
+            try:
+                _sess_db_save(login, data)          # дубль в БД на случай стирания диска
+            except Exception as e:
+                logger.warning(f"[pool] не удалось продублировать сессию {login} в БД: {e}")
             logger.info(f"[pool] 💾 сессия {login} сохранена")
             return True
         except Exception as e:
@@ -406,25 +689,24 @@ class _AccountPool:
 
     # ── выполнение запроса с ротацией ────────────────────────────────────────
 
-    async def run(self, fn, *args, retries: int | None = None, **kwargs):
+    async def run(self, fn, *args, retries: int | None = None, prio: int | None = None, **kwargs):
         """
         Запустить fn(client, *args, **kwargs) в executor.
 
-        Пункт 4: все запросы идут через общий гейт — по одному, с минимальной
-        паузой между стартами. Раньше хендлеры и фоновые задачи могли долбить IG
-        параллельно с одного IP.
-        Пункт 5: сетевые ошибки (таймаут, обрыв) ретраятся на том же аккаунте
-        с экспоненциальным backoff, а не роняют запрос сразу.
-        При 429 / LoginRequired переключаем аккаунт и повторяем.
-
-        На разовую ClientError не прыгаем сразу на следующий аккаунт — сначала
-        пробуем ещё раз тем же (с backoff): мгновенная ротация по кругу выглядит
-        для IG подозрительнее, чем повтор на одном клиенте.
+        Все запросы идут через общий приоритетный гейт — по одному, с минимальной
+        паузой между стартами; запросы пользователей обгоняют фоновые.
+        Аккаунты в 429 / мёртвые пропускаются при выборе клиента.
+        Сетевые ошибки ретраятся на том же аккаунте с backoff, разовая ClientError
+        тоже сначала повторяется на месте, а не сразу ротирует.
+        Фоновый запрос, когда все аккаунты недоступны, возвращает None сразу —
+        не жжёт ретраи и не держит гейт.
         """
         await self._ensure_init()
         if not self._clients:
             return None
 
+        if prio is None:
+            prio = _ig_prio.get()
         if retries is None:
             retries = IG_SAME_ACC_RETRIES + IG_NET_RETRIES + 3
 
@@ -435,14 +717,16 @@ class _AccountPool:
         healed = False
 
         for attempt in range(retries):
+            idx: Optional[int] = None
             try:
-                async with self._gate:
-                    # клиента берём ПОСЛЕ получения гейта: пока ждали очередь,
-                    # другой запрос мог провести ротацию
-                    cl = self._current_client()
-                    if cl is None:
+                async with self._gate.hold(prio):
+                    # аккаунт выбираем ПОСЛЕ получения гейта: пока ждали очередь,
+                    # другой запрос мог получить 429 и провести ротацию
+                    idx = self._select_idx(prio)
+                    if idx is None:
+                        logger.warning("[pool] нет доступных аккаунтов (все в 429/мертвы) — запрос пропущен")
                         return None
-                    idx = self._current % len(self._clients)
+                    cl = self._clients[idx]
 
                     gap = self._last_start + IG_MIN_INTERVAL - time.monotonic()
                     if gap > 0:
@@ -458,6 +742,8 @@ class _AccountPool:
                     # успех
                     self._request_counts[idx] = self._request_counts.get(idx, 0) + 1
                     self._note_ok()
+                    if idx < len(self._accounts):
+                        self._known_dead.discard(self._accounts[idx][0])   # сессия доказала, что жива
                     self._since_dump[idx] = self._since_dump.get(idx, 0) + 1
                     if self._since_dump[idx] >= IG_DUMP_EVERY:
                         self._since_dump[idx] = 0
@@ -465,64 +751,70 @@ class _AccountPool:
                 return result
 
             except (PleaseWaitFewMinutes, RateLimitError) as e:
-                wait = random.uniform(IG_RATE_WAIT_MIN, IG_RATE_WAIT_MAX)
-                cur = self._current % len(self._clients)
-                self._rate_limited_until[cur] = time.time() + 1800
+                cur = idx if idx is not None else self._current % len(self._clients)
+                self._rate_limited_until[cur] = time.time() + IG_RATE_COOLDOWN
                 self._note_err("rate", str(e))
+                switched = self._rotate_from(cur)
+                # есть куда уйти — хватит короткой паузы; некуда — ждём как раньше
+                wait = random.uniform(2, 4) if switched else random.uniform(IG_RATE_WAIT_MIN, IG_RATE_WAIT_MAX)
                 logger.warning(
                     f"[pool] 429 на акк #{cur}, "
-                    f"ждём {wait:.0f}с перед ротацией... ({e})"
+                    + (f"ушёл на #{self._current % len(self._clients)}, " if switched else "свободных нет, ")
+                    + f"пауза {wait:.0f}с ({e})"
                 )
-                self._next_client()
                 same_acc_failures = 0
                 net_failures = 0
-                await asyncio.sleep(wait)
                 last_err = e
+                await asyncio.sleep(wait)
 
             except LoginRequired as e:
-                login = self._accounts[self._current % len(self._accounts)][0]
+                cur = idx if idx is not None else self._current % len(self._accounts)
+                login = self._accounts[cur][0]
                 self._note_err("login", f"{login}: {e}")
                 logger.warning(
                     f"[pool] LoginRequired @{login} — сессия протухла, ротация.\n"
                     f"👉 Обнови куки: /ig_refresh"
                 )
-                self._next_client()
+                first_time = login not in self._known_dead
+                self._known_dead.add(login)
+                self._dead_ts[login] = time.time()
+                self._rotate_from(cur)
                 same_acc_failures = 0
                 net_failures = 0
                 last_err = e
                 # Алерт только если эта сессия ещё не была помечена мёртвой
-                if login not in self._known_dead:
-                    self._known_dead.add(login)
-                    if _on_session_dead:
-                        try:
-                            asyncio.ensure_future(_on_session_dead(login))
-                        except Exception:
-                            pass
+                if first_time and _on_session_dead:
+                    try:
+                        asyncio.ensure_future(_on_session_dead(login))
+                    except Exception:
+                        pass
 
             except (UserNotFound, PrivateAccount):
                 raise  # не ошибка пула, пробрасываем выше
 
             except ClientError as e:
+                cur = idx if idx is not None else self._current % len(self._clients)
                 self._note_err("client", str(e))
                 same_acc_failures += 1
                 if same_acc_failures <= IG_SAME_ACC_RETRIES:
                     wait = 2 * same_acc_failures + random.uniform(0, 2)
                     logger.warning(
-                        f"[pool] ClientError на акк #{self._current} "
+                        f"[pool] ClientError на акк #{cur} "
                         f"(попытка {same_acc_failures}/{IG_SAME_ACC_RETRIES} на этом акке): {e}"
                     )
                     await asyncio.sleep(wait)
                 else:
                     logger.warning(
-                        f"[pool] ClientError: акк #{self._current} исчерпал лимит "
+                        f"[pool] ClientError: акк #{cur} исчерпал лимит "
                         f"повторов на месте, ротирую: {e}"
                     )
-                    self._next_client()
+                    self._rotate_from(cur)
                     same_acc_failures = 0
                     await asyncio.sleep(2)
                 last_err = e
 
             except _NET_ERRORS as e:
+                cur = idx if idx is not None else self._current % len(self._clients)
                 self._note_err("net", f"{type(e).__name__}: {e}")
                 net_failures += 1
                 if net_failures <= IG_NET_RETRIES:
@@ -534,7 +826,7 @@ class _AccountPool:
                     await asyncio.sleep(wait)
                 else:
                     logger.warning(f"[pool] сеть: лимит повторов исчерпан, ротирую: {e}")
-                    self._next_client()
+                    self._rotate_from(cur)
                     net_failures = 0
                     await asyncio.sleep(2)
                 last_err = e
@@ -568,6 +860,7 @@ def get_sessions_status() -> list[dict]:
     Используется в health check таске и /ig_status.
     """
     total = len(_POOL._accounts)
+    now = time.time()
     result = []
     for i, (login, _) in enumerate(_POOL._accounts):
         cl = _POOL._clients[i] if i < len(_POOL._clients) else None
@@ -576,6 +869,7 @@ def get_sessions_status() -> list[dict]:
             "alive": cl is not None,
             "is_current": total > 0 and (i == _POOL._current % total),
             "requests": _POOL._request_counts.get(i, 0),
+            "limited_for": max(0, int(_POOL._rate_limited_until.get(i, 0) - now)),
         })
     return result
 
@@ -596,6 +890,7 @@ def get_pool_health(window: int = 3600) -> dict:
         "total":        len(_POOL._accounts),
         "live":         sum(1 for c in _POOL._clients if c is not None),
         "rate_limited": sum(1 for t in _POOL._rate_limited_until.values() if t > now),
+        "queue":        _POOL._gate.waiting,
         "ok":           ok_n,
         "errors":       dict(counts),
         "last_ok_ago":  (now - last_ok) if last_ok else None,
@@ -628,7 +923,7 @@ async def validate_session(login: str) -> bool:
         return c.user_info_by_username(login)
 
     try:
-        async with _POOL._gate:
+        async with _POOL._gate.hold():
             result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: _ping(cl)
             )
@@ -803,22 +1098,25 @@ def _ucache_set(username: str, info: dict) -> None:
     _USER_CACHE[username] = {"info": dict(info), "ts": time.time()}
 
 
-async def get_user_info(username: str, force: bool = False) -> dict | None:
+async def get_user_status(username: str, force: bool = False) -> tuple[str, dict | None]:
     """
-    Получить инфо о пользователе Instagram.
-    force=True — игнорировать кэш (нужно фоновой проверке подписок).
+    Как get_user_info, но различает причины пустого ответа:
+      ("ok", info)       — профиль получен (в т.ч. приватный);
+      ("notfound", None) — IG ответил, что такого ника нет;
+      ("error", None)    — не вышло (429, сеть, пул пуст) — это НЕ «аккаунта нет».
+    Нужно фоновой проверке: без этого смена ника и сбой сети выглядят одинаково.
     """
     username = username.lower().strip("@").strip()
     if not username:
-        return None
+        return "notfound", None
 
     if not force:
         cached = _ucache_get(username)
         if cached:
-            return cached
+            return "ok", cached
         nf = _NOTFOUND_CACHE.get(username)
         if nf and time.time() - nf < _NOTFOUND_TTL:
-            return None
+            return "notfound", None
 
     def _fetch(cl: Client):
         user = cl.user_info_by_username(username)
@@ -826,15 +1124,10 @@ async def get_user_info(username: str, force: bool = False) -> dict | None:
 
     try:
         result = await _POOL.run(_fetch)
-        if result:
-            _ucache_set(username, result)
-            _NOTFOUND_CACHE.pop(username, None)
-            logger.info(f"✅ get_user_info @{username}: {result.get('followers')} фолловеров")
-        return result
     except UserNotFound:
         logger.warning(f"UserNotFound: @{username}")
         _NOTFOUND_CACHE[username] = time.time()
-        return None
+        return "notfound", None
     except PrivateAccount:
         logger.info(f"PrivateAccount: @{username}")
         info = {
@@ -843,10 +1136,63 @@ async def get_user_info(username: str, force: bool = False) -> dict | None:
             "avatar_url": "", "is_private": True, "is_verified": False, "posts": [],
         }
         _ucache_set(username, info)
-        return info
+        return "ok", info
     except Exception as e:
         logger.error(f"get_user_info @{username}: {e}")
-        return None
+        return "error", None
+
+    if result:
+        _ucache_set(username, result)
+        _NOTFOUND_CACHE.pop(username, None)
+        logger.info(f"✅ get_user_info @{username}: {result.get('followers')} фолловеров")
+        return "ok", result
+    return "error", None
+
+
+async def get_user_info(username: str, force: bool = False) -> dict | None:
+    """
+    Получить инфо о пользователе Instagram.
+    force=True — игнорировать кэш (нужно фоновой проверке подписок).
+    """
+    _, info = await get_user_status(username, force=force)
+    return info
+
+
+async def get_user_status_by_pk(pk: str) -> tuple[str, dict | None]:
+    """
+    Профиль по числовому pk (он не меняется при смене ника).
+    Статусы те же, что у get_user_status.
+    """
+    pk = str(pk or "").strip()
+    if not pk.isdigit():
+        return "error", None
+
+    def _fetch(cl: Client):
+        return _user_to_dict(cl.user_info(int(pk)))
+
+    try:
+        result = await _POOL.run(_fetch)
+    except UserNotFound:
+        return "notfound", None
+    except PrivateAccount:
+        return "error", None
+    except Exception as e:
+        logger.error(f"get_user_info_by_pk {pk}: {e}")
+        return "error", None
+    if result and result.get("username"):
+        _ucache_set(result["username"].lower(), result)
+        return "ok", result
+    return "error", None
+
+
+def forget_user_cache(username: str) -> None:
+    """Сбросить кэши по нику (после переименования)."""
+    username = username.lower().strip("@")
+    _USER_CACHE.pop(username, None)
+    _NOTFOUND_CACHE.pop(username, None)
+    _POSTS_CACHE.pop(username, None)
+    for k in [k for k in _LATEST_CACHE if k[0] == username]:
+        _LATEST_CACHE.pop(k, None)
 
 
 async def get_stories(username: str) -> list:
@@ -923,6 +1269,54 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     }
 
 
+# ── ЛЁГКАЯ ПРОВЕРКА ПОСТОВ ────────────────────────────────────────────────────
+# Для подписок не нужно 33 поста: хватает нескольких последних. Отдельный
+# крошечный кэш, чтобы несколько подписчиков одного ника не дёргали IG повторно.
+_LATEST_CACHE: dict[tuple[str, int], tuple[float, list]] = {}
+_LATEST_TTL = 120
+
+
+async def get_latest_posts(username: str, amount: int | None = None) -> list | None:
+    """
+    Последние `amount` постов (по умолчанию IG_POSTS_CHECK_AMOUNT) для фоновой проверки.
+    None — не удалось получить (отличается от [] — «постов нет»).
+    Закреплённые посты IG отдаёт первыми, поэтому amount меньше 4–5 брать не стоит.
+    """
+    username = username.lower().strip("@").strip()
+    amount = max(1, amount or IG_POSTS_CHECK_AMOUNT)
+
+    full = _cache_get(username)            # если полный список уже в кэше — он ничего не стоит
+    if full is not None:
+        return full
+
+    ent = _LATEST_CACHE.get((username, amount))
+    if ent and time.time() - ent[0] < _LATEST_TTL:
+        return ent[1]
+
+    info = await get_user_info(username)
+    if not info or info.get("is_private") or not info.get("id"):
+        return None
+    user_id = info["id"]
+
+    def _fetch(cl: Client):
+        medias = cl.user_medias(int(user_id), amount=amount)
+        return [_media_to_post(m) for m in medias if m]
+
+    try:
+        posts = await _POOL.run(_fetch)
+    except PrivateAccount:
+        return None
+    except Exception as e:
+        logger.error(f"get_latest_posts @{username}: {e}")
+        return None
+    if posts is None:
+        return None
+    posts = [p for p in posts if p.get("id")]
+    _LATEST_CACHE[(username, amount)] = (time.time(), posts)
+    logger.info(f"🪶 get_latest_posts @{username}: {len(posts)} (amount={amount})")
+    return posts
+
+
 # ── АВАТАРКА (байты) ──────────────────────────────────────────────────────────
 
 async def get_avatar_bytes(username: str) -> bytes | None:
@@ -973,6 +1367,77 @@ async def get_media_by_url(url: str) -> dict | None:
         return None
 
 
+# ── ИСТОРИЯ ПО ССЫЛКЕ / ХАЙЛАЙТЫ ──────────────────────────────────────────────
+
+async def get_story_by_url(url: str) -> dict | None:
+    """Одна история по ссылке instagram.com/stories/<user>/<id>/ (+username в ответе)."""
+    def _fetch(cl: Client):
+        pk = cl.story_pk_from_url(url)
+        st = cl.story_info(pk)
+        d = _story_to_dict(st)
+        if not d or not d.get("url"):
+            return None
+        usr = getattr(st, "user", None)
+        d["username"] = getattr(usr, "username", "") or ""
+        return d
+
+    try:
+        return await _POOL.run(_fetch)
+    except Exception as e:
+        logger.warning(f"get_story_by_url {url[:80]}: {e}")
+        return None
+
+
+async def get_highlights(username: str) -> list[dict]:
+    """Список хайлайтов: [{pk, title, count}]."""
+    info = await get_user_info(username)
+    if not info or info.get("is_private") or not info.get("id"):
+        return []
+    uid = info["id"]
+
+    def _fetch(cl: Client):
+        out = []
+        for h in cl.user_highlights(int(uid)) or []:
+            items = getattr(h, "items", None) or []
+            cnt = int(getattr(h, "media_count", 0) or len(items) or 0)
+            out.append({
+                "pk":    str(getattr(h, "pk", "")).replace("highlight:", ""),
+                "title": (getattr(h, "title", "") or "—").strip() or "—",
+                "count": cnt,
+            })
+        return out
+
+    try:
+        res = await _POOL.run(_fetch)
+    except Exception as e:
+        logger.warning(f"get_highlights @{username}: {e}")
+        return []
+    return [h for h in (res or []) if h["pk"]]
+
+
+async def get_highlight_items(highlight_pk: str) -> dict | None:
+    """Содержимое хайлайта: {title, username, stories:[story dict]}."""
+    pk = str(highlight_pk).replace("highlight:", "")
+
+    def _fetch(cl: Client):
+        h = cl.highlight_info(pk)
+        stories = [_story_to_dict(s) for s in (getattr(h, "items", None) or [])]
+        stories = [s for s in stories if s.get("url")]
+        usr = getattr(h, "user", None)
+        return {
+            "title":    (getattr(h, "title", "") or "").strip(),
+            "username": getattr(usr, "username", "") or "",
+            "stories":  stories,
+        }
+
+    try:
+        res = await _POOL.run(_fetch)
+    except Exception as e:
+        logger.warning(f"get_highlight_items {pk}: {e}")
+        return None
+    return res if res and res.get("stories") else None
+
+
 # ── БД (подписки) ─────────────────────────────────────────────────────────────
 
 def _db_path() -> str:
@@ -1019,6 +1484,31 @@ def init_ig_db():
         ig_username   TEXT PRIMARY KEY,
         last_checked  REAL DEFAULT 0,
         last_activity REAL DEFAULT 0
+    )""")
+    # Состояние ника по pk: нужно, чтобы пережить смену ника / удаление / приватность
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_user_state (
+        ig_username      TEXT PRIMARY KEY,
+        pk               TEXT DEFAULT '',
+        media_count      INTEGER,
+        last_posts_fetch REAL DEFAULT 0,
+        is_private       INTEGER,
+        notfound_count   INTEGER DEFAULT 0,
+        is_gone          INTEGER DEFAULT 0
+    )""")
+    # Кэш Telegram file_id: один и тот же пост/рилс не скачиваем и не заливаем дважды
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_file_cache (
+        shortcode TEXT PRIMARY KEY,
+        username  TEXT DEFAULT '',
+        caption   TEXT DEFAULT '',
+        items     TEXT NOT NULL,
+        total     INTEGER NOT NULL,
+        created   REAL NOT NULL
+    )""")
+    # Копии session.json (на случай стирания диска при деплое)
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_sessions (
+        login   TEXT PRIMARY KEY,
+        data    TEXT NOT NULL,
+        updated REAL NOT NULL
     )""")
     conn.commit()
     conn.close()
@@ -1151,6 +1641,14 @@ def ig_cleanup_sent(days: int = IG_SENT_KEEP_DAYS) -> int:
         "DELETE FROM ig_check_state WHERE ig_username NOT IN "
         "(SELECT DISTINCT ig_username FROM ig_subscriptions)"
     )
+    conn.execute(
+        "DELETE FROM ig_user_state WHERE ig_username NOT IN "
+        "(SELECT DISTINCT ig_username FROM ig_subscriptions)"
+    )
+    conn.execute(
+        "DELETE FROM ig_file_cache WHERE created < ?",
+        (time.time() - IG_FILE_CACHE_DAYS * 86400,),
+    )
     conn.commit()
     conn.close()
     if n:
@@ -1181,3 +1679,153 @@ def ig_set_check_state(ig_username: str, last_checked: float, last_activity: flo
     )
     conn.commit()
     conn.close()
+
+
+# ── СОСТОЯНИЕ НИКА ПО pk (смена ника, удаление, приватность, media_count) ─────
+
+_USER_STATE_FIELDS = {
+    "pk", "media_count", "last_posts_fetch", "is_private", "notfound_count", "is_gone",
+}
+
+
+def _state_row(r) -> dict:
+    return {
+        "ig_username":      r[0],
+        "pk":               r[1] or "",
+        "media_count":      r[2],
+        "last_posts_fetch": r[3] or 0.0,
+        "is_private":       None if r[4] is None else bool(r[4]),
+        "notfound_count":   r[5] or 0,
+        "is_gone":          bool(r[6]),
+    }
+
+
+_STATE_COLS = "ig_username, pk, media_count, last_posts_fetch, is_private, notfound_count, is_gone"
+
+
+def ig_get_user_state(ig_username: str) -> dict | None:
+    conn = sqlite3.connect(IG_DB)
+    r = conn.execute(
+        f"SELECT {_STATE_COLS} FROM ig_user_state WHERE ig_username=?", (ig_username,)
+    ).fetchone()
+    conn.close()
+    return _state_row(r) if r else None
+
+
+def ig_get_all_user_states() -> dict[str, dict]:
+    conn = sqlite3.connect(IG_DB)
+    rows = conn.execute(f"SELECT {_STATE_COLS} FROM ig_user_state").fetchall()
+    conn.close()
+    return {r[0]: _state_row(r) for r in rows}
+
+
+def ig_set_user_state(ig_username: str, **fields) -> None:
+    """Частичное обновление состояния ника (upsert)."""
+    fields = {k: v for k, v in fields.items() if k in _USER_STATE_FIELDS}
+    if "is_private" in fields and fields["is_private"] is not None:
+        fields["is_private"] = int(bool(fields["is_private"]))
+    if "is_gone" in fields:
+        fields["is_gone"] = int(bool(fields["is_gone"]))
+    conn = sqlite3.connect(IG_DB)
+    try:
+        conn.execute("INSERT OR IGNORE INTO ig_user_state (ig_username) VALUES (?)", (ig_username,))
+        if fields:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            conn.execute(
+                f"UPDATE ig_user_state SET {sets} WHERE ig_username=?",
+                (*fields.values(), ig_username),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ig_rename_username(old: str, new: str) -> list[str]:
+    """
+    Перенести все подписки со старого ника на новый (человек сменил ник).
+    Возвращает user_id подписчиков, которых это касается.
+    Если у кого-то уже есть подписка того же типа на новый ник — дубликат просто удаляется.
+    """
+    old, new = old.lower().strip("@"), new.lower().strip("@")
+    if not old or not new or old == new:
+        return []
+    conn = sqlite3.connect(IG_DB)
+    try:
+        rows = conn.execute(
+            "SELECT user_id, sub_type, last_seen FROM ig_subscriptions WHERE ig_username=?",
+            (old,),
+        ).fetchall()
+        for uid, st, ls in rows:
+            conn.execute(
+                "INSERT OR IGNORE INTO ig_subscriptions (user_id, ig_username, sub_type, last_seen) "
+                "VALUES (?,?,?,?)", (uid, new, st, ls),
+            )
+        conn.execute("DELETE FROM ig_subscriptions WHERE ig_username=?", (old,))
+
+        st = conn.execute(
+            f"SELECT {_STATE_COLS} FROM ig_user_state WHERE ig_username=?", (old,)
+        ).fetchone()
+        conn.execute("DELETE FROM ig_user_state WHERE ig_username=?", (old,))
+        if st:
+            conn.execute(
+                f"INSERT OR REPLACE INTO ig_user_state ({_STATE_COLS}) VALUES (?,?,?,?,?,?,?)",
+                (new, st[1], st[2], st[3], st[4], 0, 0),
+            )
+        conn.execute("DELETE FROM ig_check_state WHERE ig_username=?", (new,))
+        conn.execute("UPDATE ig_check_state SET ig_username=? WHERE ig_username=?", (new, old))
+        conn.commit()
+        affected = sorted({r[0] for r in rows})
+    finally:
+        conn.close()
+    forget_user_cache(old)
+    return affected
+
+
+# ── КЭШ TELEGRAM file_id ПО shortcode ─────────────────────────────────────────
+
+def ig_cache_get(shortcode: str) -> dict | None:
+    """{username, caption, items:[{kind,file_id}], total, created} или None."""
+    if not shortcode:
+        return None
+    conn = sqlite3.connect(IG_DB)
+    try:
+        r = conn.execute(
+            "SELECT username, caption, items, total, created FROM ig_file_cache WHERE shortcode=?",
+            (shortcode,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return None
+    if time.time() - (r[4] or 0) > IG_FILE_CACHE_DAYS * 86400:
+        return None
+    try:
+        items = json.loads(r[2])
+    except Exception:
+        return None
+    return {"username": r[0], "caption": r[1], "items": items, "total": r[3], "created": r[4]}
+
+
+def ig_cache_put(shortcode: str, username: str, caption: str, items: list[dict], total: int) -> None:
+    """Сохранить file_id'ы отправленного поста. Пишем только полные наборы (len(items)==total)."""
+    if not shortcode or not items or len(items) != total:
+        return
+    conn = sqlite3.connect(IG_DB)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO ig_file_cache (shortcode, username, caption, items, total, created) "
+            "VALUES (?,?,?,?,?,?)",
+            (shortcode, username or "", caption or "", json.dumps(items), total, time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ig_cache_drop(shortcode: str) -> None:
+    conn = sqlite3.connect(IG_DB)
+    try:
+        conn.execute("DELETE FROM ig_file_cache WHERE shortcode=?", (shortcode,))
+        conn.commit()
+    finally:
+        conn.close()
