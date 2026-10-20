@@ -835,6 +835,17 @@ class MusicEngine:
         for n in old_mods:
             sys.modules.pop(n, None)
         importlib.invalidate_caches()
+        # Снимаем старую обёртку urllib3._PERCENT_RE: иначе повторный импорт
+        # yt-dlp навесит вторую поверх первой, и requests начнёт падать
+        # с "'Urllib3PercentREOverride' object has no attribute 'sub'".
+        try:
+            import urllib3.util.url as _u
+            _r = _u._PERCENT_RE
+            while type(_r).__name__ == "Urllib3PercentREOverride":
+                _r = _r.re
+            _u._PERCENT_RE = _r
+        except Exception:
+            pass
         try:
             yt_dlp = importlib.import_module("yt_dlp")
             return True

@@ -63,6 +63,23 @@ except ImportError:
     logger.error("instagrapi не установлена! pip install instagrapi")
 
 
+def _unwrap_percent_re() -> None:
+    """
+    yt-dlp оборачивает urllib3.util.url._PERCENT_RE своим Urllib3PercentREOverride.
+    После горячей перезагрузки yt-dlp обёртка могла навеситься дважды, и тогда
+    любой requests-запрос падает с "'Urllib3PercentREOverride' object has no
+    attribute 'sub'". Снимаем все обёртки — возвращаем оригинальный regex.
+    """
+    try:
+        import urllib3.util.url as _u
+        r = _u._PERCENT_RE
+        while type(r).__name__ == "Urllib3PercentREOverride":
+            r = r.re
+        _u._PERCENT_RE = r
+    except Exception:
+        pass
+
+
 # ── КОНФИГ ────────────────────────────────────────────────────────────────────
 
 def _parse_accounts() -> list[tuple[str, str]]:
@@ -316,6 +333,7 @@ class _AccountPool:
             cl = self._current_client()
             if cl is None:
                 return None
+            _unwrap_percent_re()
             try:
                 result = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: fn(cl, *args, **kwargs)
