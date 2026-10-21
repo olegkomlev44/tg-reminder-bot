@@ -542,6 +542,9 @@ async def _show_ai_help(message: types.Message):
         f"<code>/ai memory</code> — что бот запомнил о тебе\n"
         f"<code>/ai forget</code> — стереть память о себе\n"
         f"<code>/tldr</code> — выжимка чата (или реплаем на ГС/кружочек/текст)\n"
+        f"🛠 <b>Просто попроси ИИ</b> (ответом боту или с упоминанием): «найди профиль natgeo в инсте», "
+        f"«скинь Du Hast», «посоветуй аниме», «найди наушники до 3000», «скачай видео по ссылке», "
+        f"«кто сегодня на сводках», «какая погода в Москве»\n"
         f"<code>/meme</code> (или <code>/meme top</code>) — сделать мем из фото"
     )
     await message.answer(text, parse_mode="HTML")
@@ -1417,10 +1420,26 @@ async def handle_ai_chat(message: types.Message):
     context_blocks.append(f"Сообщение: {message.text or ''}")
     user_contents = "\n\n".join(context_blocks)
 
-    result = await _stream_reply(
-        message,
-        prompt=user_contents,
-        system_instruction=sys_inst,
-    )
+    # Функции бота (Instagram, музыка, аниме, товары и т.д.) — только когда обращаются
+    # напрямую: личка / реплай боту / упоминание. Случайные 2%-реплики функции не трогают.
+    explicit_call = is_reply or is_mention or message.chat.type == "private"
+    result = None
+    handled = False
+    if explicit_call:
+        try:
+            from ai_tools import run_ai_with_tools
+            handled, result = await run_ai_with_tools(
+                message, prompt=user_contents, system_instruction=sys_inst, user_id=user_id,
+            )
+        except Exception as e:
+            logger.error(f"ai_tools error: {e}", exc_info=True)
+            handled = False
+
+    if not handled:
+        result = await _stream_reply(
+            message,
+            prompt=user_contents,
+            system_instruction=sys_inst,
+        )
     if result:
         CHAT_HISTORY[chat_id].append(f"Бот: {result[:140]}")

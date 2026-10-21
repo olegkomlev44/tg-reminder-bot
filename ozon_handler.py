@@ -281,6 +281,11 @@ async def cmd_ozon(msg: Message):
         await msg.answer(HELP_TEXT, parse_mode="HTML", disable_web_page_preview=True)
         return
 
+    await ozon_search(msg, query)
+
+
+async def ozon_search(msg: Message, query: str):
+    """Сам поиск — вынесен из cmd_ozon, чтобы его мог вызывать ИИ (ai_tools.py)."""
     p = parse_query(query)
     if not p.text:
         await msg.answer("❌ Укажите название товара.", parse_mode="HTML")
