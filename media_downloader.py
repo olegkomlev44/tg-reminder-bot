@@ -29,9 +29,9 @@ MAX_VIDEO_BYTES = MAX_VIDEO_MB * 1024 * 1024
 DOWNLOAD_TIMEOUT = int(os.getenv("MEDIA_DOWNLOAD_TIMEOUT", "900"))   # секунд на скачивание
 
 # Большие видео: качаем целиком в хорошем качестве и режем на части ≤ лимита Telegram (без пережатия).
-MAX_TOTAL_MB = int(os.getenv("MEDIA_MAX_TOTAL_MB", "600"))          # максимум исходного файла
+MAX_TOTAL_MB = int(os.getenv("MEDIA_MAX_TOTAL_MB", "1000"))          # максимум исходного файла
 MAX_TOTAL_BYTES = MAX_TOTAL_MB * 1024 * 1024
-MAX_PARTS = int(os.getenv("MEDIA_MAX_PARTS", "14"))                 # максимум частей
+MAX_PARTS = int(os.getenv("MEDIA_MAX_PARTS", "15"))                 # максимум частей
 PART_TARGET_BYTES = 42 * 1024 * 1024                                # целевой размер части
 PART_HARD_BYTES = 49 * 1024 * 1024                                  # больше этого Telegram не примет
 MAX_HEIGHT = int(os.getenv("MEDIA_MAX_HEIGHT", "1080"))             # потолок качества YouTube
