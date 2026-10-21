@@ -1084,21 +1084,32 @@ async def cmd_start(message: types.Message):
     auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
     start_text = (
         "👋 *Йоу. Я здесь. Слушаю.*\n\n"
-        "📋 *Наряды* — слежу за сводками и процедуркой. 18:00 и 22:00, каждый день.\n\n"
-        "🎖 *Дембель* — `/dembel` (индивидуальные карточки HUD v3.0 + общая таблица).\n\n"
-        "🤖 *ИИ-чат* — реплай на моё сообщение, отвечу на всё.\n\n"
+        "🧠 *ИИ (Gemini 2.5)* — пиши мне в личку, упомяни или ответь на моё сообщение. "
+        "Я сам пойму просьбу и запущу нужную функцию:\n"
+        "«найди профиль natgeo в инсте», «скинь Du Hast», «посоветуй аниме», "
+        "«найди наушники до 3000», «скачай видео по ссылке», «какая погода в Москве»\n"
+        "`/ai` — ask, roast, debate, story, memory, forget\n"
+        "`/persona` — сменить характер бота\n"
+        "`/tldr` `/meme` `/poll` `/imagen` — выжимка, мемы, картинки\n\n"
+        "📋 *Наряды:* кнопки внизу, `/svodki` — напомнить сейчас\n"
+        "🎖 *Дембель:* `/dembel` — карточки и общая таблица\n\n"
         "🎵 *Музыка:*\n"
-        "`/find <название>` — поиск треков\n"
-        "`/charts` — топ\n`/music` — дашборд\n`/dj` — DJ-голосование\n\n"
-        "📸 *Instagram:* `/ig <username>`\n\n"
-        "📥 *Медиа:* ссылка YouTube/TikTok/X — скачаю\n\n"
-        "🎬 *Аниме:* `/anime <запрос>` или `@bot a:<запрос>`\n\n"
-        "🛠 *Прочее:*\n"
-        "`/tldr` `/pogoda` `/meme` `/poll` `/imagen` `/ozon` `/chatid`\n\n"
+        "`/find <название>` — поиск, `/charts` — чарт, `/music` — дашборд\n"
+        "`/my_music` `/playlists` `/queue` `/dj` `/wrapped`\n\n"
+        "📸 *Instagram:*\n"
+        "`/ig <username>` — профиль, `/igdl <ссылка>` — пост, рилс, сторис\n"
+        "`/ig_subs` — мои подписки, `/ig_popular` — популярные\n\n"
+        "📥 *Медиа:* кинь ссылку YouTube, TikTok, X, Reddit или Instagram — скачаю. "
+        "Или `/dl <ссылка>`\n\n"
+        "🎬 *Аниме:* `/anime <название>`; `random`, `ai <вайб>`, `top`, `schedule`, `profile`. "
+        "Скрин или гифка с `/anime` — найду, что за аниме. Inline: `@bot a:<запрос>`\n\n"
+        "🔥 *Лента:* `/feed` — мемы и посты, `/saved` — сохранённое, `/feed_settings`\n\n"
+        "🛒 *Товары:* `/ozon <что искать>` — цены и рейтинг (Wildberries)\n"
+        "🌦 *Прочее:* `/pogoda` `/chatid` `/help`\n\n"
         "Всё вижу. Всего не прощаю. Погнали 👇"
     )
     sent = await message.answer(start_text, parse_mode="Markdown", reply_markup=main_keyboard())
-    auto_delete_later(message.bot, message.chat.id, sent.message_id, 60)
+    auto_delete_later(message.bot, message.chat.id, sent.message_id, 180)
 
 async def cmd_getchatid(message: types.Message):
     auto_delete_later(message.bot, message.chat.id, message.message_id, 1)
