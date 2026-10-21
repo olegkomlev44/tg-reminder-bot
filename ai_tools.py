@@ -263,7 +263,9 @@ async def _tool_product_search(ctx: ToolContext, query: str = "") -> str:
     q = _clean(query, 150)
     if not q:
         return "ОШИБКА: не указано, какой товар искать."
-    await ozon_search(ctx.message, q)
+    found = await ozon_search(ctx.message, q)
+    if not found:
+        return f"По запросу «{q}» товары не найдены, но в чат отправлены прямые ссылки на поиск WB и Ozon."
     return f"Результаты поиска товара «{q}» отправлены в чат."
 
 
