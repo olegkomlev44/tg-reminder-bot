@@ -263,7 +263,7 @@ def _upsert_user_rate_sync(user_id, rel: dict, status: str = None,
         ).fetchone()
         st = status or (cur[0] if cur else "watching")
         ep = episodes if episodes is not None else (cur[1] if cur else min(1, ep_tot or 1))
-        sc = score if score is not None else (cur[2] if cur else int(round(float(rel.get("rating") or 0))))
+        sc = score if score is not None else (cur[2] if cur else 0)   # личная оценка: 0 = не оценено
         sh_id = shiki_id or (cur[3] if cur else 0)
         g_val = genres_str or (cur[4] if cur else "")
         p_val = poster or (cur[5] if cur else "")
@@ -454,6 +454,102 @@ async def _cache_set(key: str, value, ttl: int):
     async with _cache_lock:
         _cache[key] = (value, time.time() + min(ttl, _MEM_TTL_CAP))
     await asyncio.to_thread(_cache_db_set_sync, key, value, ttl)
+
+
+# ── Короткие callback_data ────────────────────────────────────────────────────
+# Лимит Telegram на callback_data — 64 БАЙТА, а кириллица в UTF-8 весит 2 байта/символ.
+# Поэтому длинные/кириллические запросы кладём в кэш под 8-символьным md5-ключом.
+# Память — мгновенно (клавиатуры строятся синхронно), SQLite — чтобы кнопки
+# переживали передеплой на BotHost.
+from collections import OrderedDict as _OrderedDict
+
+_SQ_MEM: "_OrderedDict[str, object]" = _OrderedDict()
+_SQ_MEM_MAX = 4000
+_SQ_TTL = 30 * 86400
+_SQ_BG: set = set()
+
+
+def _sq_put(value) -> str:
+    raw = _json.dumps(value, ensure_ascii=False, sort_keys=True)
+    key = hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+    fresh = key not in _SQ_MEM
+    _SQ_MEM[key] = value
+    _SQ_MEM.move_to_end(key)
+    while len(_SQ_MEM) > _SQ_MEM_MAX:
+        _SQ_MEM.popitem(last=False)
+    if fresh:
+        try:
+            task = asyncio.get_running_loop().create_task(_cache_set(f"sq:{key}", value, _SQ_TTL))
+            _SQ_BG.add(task)
+            task.add_done_callback(_SQ_BG.discard)
+        except RuntimeError:
+            pass  # нет запущенного цикла (тесты) — останется только в памяти
+    return key
+
+
+async def _sq_get(key: str):
+    if key in _SQ_MEM:
+        return _SQ_MEM[key]
+    value = await _cache_get(f"sq:{key}")
+    if value is not None:
+        _SQ_MEM[key] = value
+    return value
+
+
+def _search_cb(query: str, offset: int = 0) -> str:
+    """callback_data кнопки «искать/страница». Короткие ASCII-запросы остаются как есть."""
+    q = (query or "").strip()
+    plain = f"anix:search:{q}:{offset}"
+    if q and ":" not in q and len(plain.encode("utf-8")) <= 64:
+        return plain
+    return f"anix:sq:{_sq_put(q[:120])}:{offset}"
+
+
+def _go_cb(title: str, alt: str = "") -> str:
+    """callback_data кнопки «открыть карточку по названию» (для тайтлов без id Anixart)."""
+    return f"anix:go:{_sq_put([(title or '').strip()[:120], (alt or '').strip()[:120]])}"
+
+
+def _norm_title(t: str) -> str:
+    return re.sub(r"[\W_]+", " ", (t or "").lower()).strip()
+
+
+async def _best_release_match(title: str, alt: str = "") -> tuple[int, float, str]:
+    """Ищет в Anixart лучшее совпадение по названию. Возвращает (rid, схожесть 0..1, найденное название)."""
+    import difflib
+    targets = [_norm_title(x) for x in (title, alt) if x and x.strip()]
+    best = (0, 0.0, "")
+    first = (0, 0.0, "")
+    for q in (title, alt):
+        q = (q or "").strip()
+        if not q:
+            continue
+        try:
+            items, _ = await _search_releases_cached(q, offset=0, prefetch_next=False)
+        except Exception:
+            continue
+        for it in (items or [])[:6]:
+            rid = int(it.get("id") or 0)
+            if not rid:
+                continue
+            names = [it.get("title_ru") or "", it.get("title_original") or ""]
+            sc = max((difflib.SequenceMatcher(None, t, _norm_title(n)).ratio()
+                      for t in targets for n in names if t and n), default=0.0)
+            shown = names[0] or names[1]
+            if not first[0]:
+                first = (rid, sc, shown)
+            if sc > best[1]:
+                best = (rid, sc, shown)
+        if best[1] >= 0.8:
+            break
+    if best[1] < 0.35 and first[0]:
+        return first
+    return best
+
+
+async def find_release_id_by_title(title: str, alt: str = "") -> int:
+    rid, _, _ = await _best_release_match(title, alt)
+    return rid
 
 
 async def _stats_bump_view(rid: int, title: str):
@@ -779,6 +875,21 @@ async def _get_valid_shiki_token(user_id: int) -> Optional[dict]:
     return tok
 
 
+async def _shiki_update_existing_rate(tok: dict, shiki_id: int, user_rate: dict) -> Optional[dict]:
+    found = await _shiki_request(
+        "GET", "/v2/user_rates",
+        query={"user_id": tok["shiki_user_id"], "target_id": shiki_id, "target_type": "Anime"},
+        access_token=tok["access_token"], retries=1,
+    )
+    if isinstance(found, list) and found and isinstance(found[0], dict) and found[0].get("id"):
+        patch = {k: v for k, v in user_rate.items() if k not in ("user_id", "target_id", "target_type")}
+        return await _shiki_request(
+            "PATCH", f"/v2/user_rates/{found[0]['id']}",
+            body={"user_rate": patch}, access_token=tok["access_token"], retries=1,
+        )
+    return None
+
+
 async def sync_rate_to_shikimori_and_anixart(
     user_id: int, rel: dict, status_key: str, episodes: int = None, score: int = None
 ) -> dict:
@@ -813,9 +924,12 @@ async def sync_rate_to_shikimori_and_anixart(
                 "episodes": ep_val,
             }
         }
-        if sc_val > 0:
+        if sc_val > 0 or score is not None:
             body["user_rate"]["score"] = sc_val
         res = await _shiki_request("POST", "/v2/user_rates", body=body, access_token=tok["access_token"], retries=1)
+        if not (isinstance(res, dict) and res.get("id")):
+            # Запись в списке уже есть (POST вернул 422) — находим её и обновляем через PATCH
+            res = await _shiki_update_existing_rate(tok, shiki_id, body["user_rate"])
         if res and isinstance(res, dict) and res.get("id"):
             synced_shiki = True
 
@@ -1337,7 +1451,7 @@ def _render_anime_wrapped_sync(stats: dict, avatar_bytes: Optional[bytes] = None
         (f"{stats.get('hours', 0):.1f} ч", "ПОТРАЧЕНО ЧАСОВ", (0, 235, 255)),
         (f"{stats.get('days', 0):.1f} дн", "ЧИСТЫХ СУТОК В АНИМЕ", (255, 85, 200)),
         (str(stats.get("total_titles", 0)), f"ТАЙТЛОВ ({stats.get('total_episodes', 0)} СЕРИЙ)", (0, 245, 165)),
-        (f"★ {stats.get('avg_score', 0):.1f}", "СРЕДНЯЯ ОЦЕНКА", (255, 210, 65)),
+        (f"★ {stats.get('avg_score', 0):.1f}" if stats.get("avg_score") else "★ —", "СРЕДНЯЯ ОЦЕНКА", (255, 210, 65)),
     ]
     for idx, (val, lbl, col) in enumerate(metrics):
         col_i = idx % 2
@@ -1858,10 +1972,12 @@ EPISODE_URL_TEMPLATE: Optional[str] = None
 _EP_PAGE_SIZE = 25
 
 
-def _build_player_url(rid: int, title: str = "", ep: int = 1, user_id: int = 0) -> Optional[str]:
+def _build_player_url(rid: int, title: str = "", ep: int = 1, user_id: int = 0, shiki_id: int = 0) -> Optional[str]:
     if not WEBAPP_BASE_URL or not WEBAPP_BASE_URL.startswith("https://"):
         return None
     params = {"rid": rid, "ep": ep, "uid": user_id, "title": (title or "")[:80]}
+    if shiki_id:
+        params["shiki_id"] = shiki_id
     return f"{WEBAPP_BASE_URL}/anime/player?{urllib.parse.urlencode(params)}"
 
 
@@ -2230,6 +2346,7 @@ async def _fetch_weekly_schedule() -> dict[int, list[dict]]:
                 schedule[wd].append({
                     "id": 0,
                     "shiki_id": anime.get("id", 0),
+                    "alt": anime.get("name") or "",
                     "title": anime.get("russian") or anime.get("name") or "?",
                     "ep": entry.get("next_episode") or "?",
                     "time": t_str,
@@ -2278,8 +2395,7 @@ async def _render_schedule_view(target_msg: Message, user_id: int, day_idx: int,
         if it.get("id"):
             rows.append([InlineKeyboardButton(text=f"🎬 {t_short}{ep_s}", callback_data=f"anix:info:{it['id']}")])
         else:
-            q_short = (it.get("title") or "")[:24]
-            rows.append([InlineKeyboardButton(text=f"🔎 {t_short}{ep_s}", callback_data=f"anix:search:{q_short}:0")])
+            rows.append([InlineKeyboardButton(text=f"🎬 {t_short}{ep_s}", callback_data=_go_cb(it.get("title"), it.get("alt", "")))])
 
     # Дни недели ПН..ВС
     sub_flag = 1 if only_my_subs else 0
@@ -2475,6 +2591,7 @@ async def _execute_smart_filter(flt: dict) -> list[dict]:
             results.append({
                 "id": 0,
                 "shiki_id": it.get("id", 0),
+                "alt": it.get("name") or "",
                 "title": it.get("russian") or it.get("name") or "?",
                 "year": (it.get("aired_on") or "")[:4] or "?",
                 "score": it.get("score") or "?",
@@ -2750,7 +2867,7 @@ async def _collect_user_wrapped_stats(user_id: int, user_name: str) -> dict:
     days = round(hours / 24.0, 1)
 
     scores = [int(r["score"]) for r in rates if int(r.get("score") or 0) > 0]
-    avg_score = round(sum(scores) / len(scores), 1) if scores else 8.4
+    avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0   # 0 = пользователь ещё ничего не оценил
 
     genre_counts: dict[str, int] = {}
     for r in rates:
@@ -2833,7 +2950,7 @@ async def _do_profile(ctx):
         f"🏅 Ранг: <b>{html.escape(stats['rank_title'])}</b>\n\n"
         f"⏱ <b>Время за просмотром:</b> {stats['hours']} ч ({stats['days']} сут.)\n"
         f"🎬 <b>Тайтлов в активе:</b> {stats['total_titles']} ({stats['total_episodes']} серий)\n"
-        f"⭐ <b>Средняя оценка:</b> {stats['avg_score']} / 10\n"
+        f"⭐ <b>Средняя оценка:</b> {stats['avg_score'] or '—'} / 10\n"
         f"❤️ <b>В закладках:</b> {stats['fav_count']}\n"
         f"🎭 <b>Топ жанров:</b> {', '.join(g for g, _ in stats['top_genres'])}\n\n"
         "<i>Карточка в формате 1080×1920 — идеально подходит для публикации в Telegram Stories!</i>"
@@ -2936,10 +3053,10 @@ async def _do_ai_recommend(ctx, vibe_query: str):
                 callback_data=f"anix:info:{rid}"
             )])
         else:
-            q_s = (item.get("title_ru") or item.get("title_orig") or "")[:24]
+            q_s = (item.get("title_ru") or item.get("title_orig") or "")
             buttons.append([InlineKeyboardButton(
-                text=f"🔎 Найти «{q_s}»",
-                callback_data=f"anix:search:{q_s}:0"
+                text=f"🔎 Найти «{q_s[:24]}»",
+                callback_data=_search_cb(q_s, 0)
             )])
 
     buttons.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="anix:close")])
@@ -3097,12 +3214,12 @@ async def _do_search(ctx, query: str, offset: int = 0):
         if offset >= 10:
             nav_row.append(InlineKeyboardButton(
                 text="⬅️ Назад",
-                callback_data=f"anix:search:{query[:28]}:{max(0, offset - 10)}"
+                callback_data=_search_cb(query, max(0, offset - 10))
             ))
         if total > offset + 10 or len(content) >= 10:
             nav_row.append(InlineKeyboardButton(
                 text="⏩ Ещё результаты",
-                callback_data=f"anix:search:{query[:28]}:{offset + 10}"
+                callback_data=_search_cb(query, offset + 10)
             ))
         if nav_row:
             buttons.append(nav_row)
@@ -3298,6 +3415,35 @@ async def cb_search_page(cq: CallbackQuery):
     await _do_search(cq, query, offset=offset)
 
 
+@router.callback_query(F.data.startswith("anix:sq:"))
+async def cb_search_hashed(cq: CallbackQuery):
+    """Поиск/пагинация по запросу, лежащему в кэше (кириллица и длинные запросы)."""
+    parts = cq.data.split(":")
+    offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+    query = await _sq_get(parts[2]) if len(parts) > 2 else None
+    if not isinstance(query, str) or not query:
+        await cq.answer("⌛ Кнопка устарела — повтори поиск", show_alert=True)
+        return
+    await cq.answer(f"⏩ Страница {offset // 10 + 1}…" if offset else "🔍 Ищу…")
+    await _do_search(cq, query, offset=offset)
+
+
+@router.callback_query(F.data.startswith("anix:go:"))
+async def cb_go(cq: CallbackQuery):
+    """Тайтл без id Anixart (Shikimori / календарь): находим его в Anixart и сразу открываем HUD-карточку."""
+    val = await _sq_get(cq.data.split(":")[2])
+    if not (isinstance(val, list) and val and val[0]):
+        await cq.answer("⌛ Кнопка устарела — открой список заново", show_alert=True)
+        return
+    title, alt = val[0], (val[1] if len(val) > 1 else "")
+    await cq.answer("🎬 Открываю карточку…")
+    rid = await find_release_id_by_title(title, alt)
+    if rid:
+        await _do_info(cq, rid)
+    else:
+        await _do_search(cq, title)   # в Anixart не нашёлся — покажем обычный поиск
+
+
 @router.callback_query(F.data.startswith("anix:genre:"))
 async def cb_genre(cq: CallbackQuery):
     gid = int(cq.data.split(":")[2])
@@ -3476,8 +3622,13 @@ async def cb_franchise(cq: CallbackQuery):
         await cq.message.answer("❌ Релиз не найден.")
         return
 
+    await _send_franchise(cq.message, rel, cq.from_user.id)
+
+
+async def _send_franchise(msg: Message, rel: dict, user_id: int):
+    """Хронология франшизы с кнопками (общая для кнопки и ИИ)."""
     title = rel.get("title_ru") or rel.get("title_original") or "?"
-    items = await _fetch_franchise_order(rel, cq.from_user.id)
+    items = await _fetch_franchise_order(rel, user_id)
 
     lines = [
         f"🔗 <b>Хронология и порядок просмотра:</b>\n🎬 <i>{html.escape(title)}</i>\n",
@@ -3495,11 +3646,10 @@ async def cb_franchise(cq: CallbackQuery):
         if irid > 0:
             buttons.append([InlineKeyboardButton(text=btn_lbl, callback_data=f"anix:info:{irid}")])
         else:
-            q_s = (it.get("title") or "")[:24]
-            buttons.append([InlineKeyboardButton(text=btn_lbl, callback_data=f"anix:search:{q_s}:0")])
+            buttons.append([InlineKeyboardButton(text=btn_lbl, callback_data=_go_cb(it.get("title")))])
 
     buttons.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="anix:close")])
-    await cq.message.answer(
+    await msg.answer(
         "\n".join(lines), parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
@@ -3552,7 +3702,12 @@ async def cb_oped_download(cq: CallbackQuery):
         await cq.message.answer("❌ Тема не найдена.")
         return
     theme = themes[idx]
-    status = await cq.message.answer(f"🎧 Скачиваю и тегирую: <b>{html.escape(theme.get('label', 'OP/ED'))}</b>…", parse_mode="HTML")
+    await _send_oped_audio(cq.message, rid, idx, theme, rel)
+
+
+async def _send_oped_audio(msg: Message, rid: int, idx: int, theme: dict, rel: dict):
+    """Скачивает MP3 опенинга/эндинга с тегами и обложкой и отправляет в чат (общая для кнопки и ИИ)."""
+    status = await msg.answer(f"🎧 Скачиваю и тегирую: <b>{html.escape(theme.get('label', 'OP/ED'))}</b>…", parse_mode="HTML")
 
     mp3_path, track_meta = await _download_oped_mp3_with_tags(theme, rel)
     if not mp3_path:
@@ -3567,7 +3722,7 @@ async def cb_oped_download(cq: CallbackQuery):
         InlineKeyboardButton(text="➕ Добавить в плейлист «Anime OST»", callback_data=f"anix:oped_pl:{rid}:{idx}")
     ]])
     try:
-        await cq.message.answer_audio(
+        await msg.answer_audio(
             FSInputFile(mp3_path, filename=f"{track_meta.get('artist', 'Anime')} - {track_meta.get('title', 'OST')}.mp3"),
             title=track_meta.get("title") or "Opening",
             performer=track_meta.get("artist") or "Anime OST",
@@ -3633,15 +3788,13 @@ async def cb_oped_playlist_add(cq: CallbackQuery):
 
 
 # ── Улучшение #9: Управление статусом просмотра и синхронизация с Shikimori ───
-@router.callback_query(F.data.startswith("anix:status_menu:"))
-async def cb_status_menu(cq: CallbackQuery):
-    rid = int(cq.data.split(":")[2])
-    user_id = cq.from_user.id
+async def _render_status_menu(msg: Message, user_id: int, rid: int, edit: bool = False):
     rel = await _get_release(rid) or {"id": rid, "title_ru": f"#{rid}"}
     title = rel.get("title_ru") or rel.get("title_original") or f"#{rid}"
     rate = await asyncio.to_thread(_get_user_rate_sync, user_id, rid) or {"status": "watching", "episodes": 0, "score": 0}
     cur_st = rate.get("status", "watching")
     cur_ep = rate.get("episodes", 0)
+    cur_sc = int(rate.get("score") or 0)
     ep_tot = rel.get("episodes_total") or rel.get("episodes_released") or "?"
 
     rows = []
@@ -3661,17 +3814,63 @@ async def cb_status_menu(cq: CallbackQuery):
         InlineKeyboardButton(text=f"➕ +1 серия (сейчас {cur_ep}/{ep_tot})", callback_data=f"anix:inc_ep:{rid}"),
         InlineKeyboardButton(text="🔄 Настройки Shikimori", callback_data="anix:shiki_menu"),
     ])
+
+    # Личная оценка 1–10 (улетает в Shikimori и идёт в средний балл Anime Wrapped)
+    for lo, hi in ((1, 5), (6, 10)):
+        rows.append([
+            InlineKeyboardButton(
+                text=(f"⭐{n}" if n == cur_sc else str(n)),
+                callback_data=f"anix:rate:{rid}:{n}",
+            ) for n in range(lo, hi + 1)
+        ])
+    if cur_sc:
+        rows.append([InlineKeyboardButton(text="🗑 Снять оценку", callback_data=f"anix:rate:{rid}:0")])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="anix:close")])
 
-    await cq.answer()
-    await cq.message.answer(
+    text = (
         f"📂 <b>Статус и синхронизация:</b>\n🎬 <b>{html.escape(title)}</b>\n\n"
         f"Текущий статус: <b>{WATCH_STATUSES.get(cur_st, {}).get('label', cur_st)}</b>\n"
-        f"Просмотрено серий: <b>{cur_ep} / {ep_tot}</b>\n\n"
-        "<i>Изменения мгновенно синхронизируются с твоим профилем Anixart и Shikimori (OAuth2):</i>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        f"Просмотрено серий: <b>{cur_ep} / {ep_tot}</b>\n"
+        f"Твоя оценка: <b>{('⭐ ' + str(cur_sc) + ' / 10') if cur_sc else '—'}</b>\n\n"
+        "<i>Изменения мгновенно синхронизируются с твоим профилем Anixart и Shikimori (OAuth2):</i>"
     )
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    if edit:
+        try:
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("anix:status_menu:"))
+async def cb_status_menu(cq: CallbackQuery):
+    rid = int(cq.data.split(":")[2])
+    await cq.answer()
+    await _render_status_menu(cq.message, cq.from_user.id, rid, edit=False)
+
+
+@router.callback_query(F.data.startswith("anix:rate:"))
+async def cb_rate(cq: CallbackQuery):
+    _, _, rid_s, n_s = cq.data.split(":")
+    rid = int(rid_s)
+    score = max(0, min(10, int(n_s)))
+    user_id = cq.from_user.id
+    rel = await _get_release(rid) or {"id": rid}
+    rate = await asyncio.to_thread(_get_user_rate_sync, user_id, rid)
+    st_key = (rate or {}).get("status") or "watching"
+    ep = int((rate or {}).get("episodes") or 0)
+
+    res = await sync_rate_to_shikimori_and_anixart(user_id, rel, st_key, episodes=ep, score=score)
+    badges = []
+    if res.get("shiki"):
+        badges.append("Shikimori ✅")
+    if res.get("anixart"):
+        badges.append("Anixart ✅")
+    note = f" ({', '.join(badges)})" if badges else " (сохранено в профиле)"
+    await cq.answer((f"⭐ Оценка {score}/10" if score else "🗑 Оценка снята") + note)
+    await _render_status_menu(cq.message, user_id, rid, edit=True)
 
 
 @router.callback_query(F.data.startswith("anix:set_st:"))
@@ -3880,8 +4079,7 @@ async def cb_smart_filter_action(cq: CallbackQuery):
             if it.get("id"):
                 buttons.append([InlineKeyboardButton(text=lbl, callback_data=f"anix:info:{it['id']}")])
             else:
-                q_s = (it.get("title") or "")[:24]
-                buttons.append([InlineKeyboardButton(text=lbl, callback_data=f"anix:search:{q_s}:0")])
+                buttons.append([InlineKeyboardButton(text=lbl, callback_data=_go_cb(it.get("title"), it.get("alt", "")))])
 
         nav = []
         if offset >= 8:
@@ -4396,8 +4594,168 @@ async def check_anime_episodes(bot):
     await asyncio.gather(*[_process(sub) for sub in subs])
 
 
+# ── Видеопоток для Mini App: Kodik (по shikimori_id) → фоллбэк Anixart API ───
+# KODIK_TOKEN — токен Kodik API (переменная окружения BotHost). Без него работает только
+# best-effort фоллбэк через Anixart API; если и он ничего не вернул, плеер покажет кнопку
+# «Открыть на Anixart».
+KODIK_TOKEN = os.getenv("KODIK_TOKEN", "")
+KODIK_API_URL = os.getenv("KODIK_API_URL", "https://kodikapi.com").rstrip("/")
+
+
+def _voice_key(label: str, vtype: str) -> str:
+    """Сопоставляет название озвучки с ключом из VOICEOVER_STUDIOS (anilibria, shiza, subs …)."""
+    if vtype == "subtitles":
+        return "subs"
+    low = (label or "").lower()
+    for key, meta in VOICEOVER_STUDIOS.items():
+        if key in ("any", "subs"):
+            continue
+        if any(k in low for k in meta["keywords"] if len(k) > 3):
+            return key
+    return ""
+
+
+def _norm_iframe_url(url: str) -> str:
+    url = (url or "").strip()
+    if url.startswith("//"):
+        return "https:" + url
+    return url if url.startswith("http") else ""
+
+
+async def _kodik_voices(shiki_id: int) -> list[dict]:
+    """Список озвучек/субтитров тайтла в Kodik. Один результат Kodik = одна озвучка со своей iframe-ссылкой."""
+    if not (KODIK_TOKEN and shiki_id):
+        return []
+    cache_key = f"kodik_voices:{shiki_id}"
+    cached = await _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    voices: list[dict] = []
+    try:
+        session = await _get_session()
+        params = {
+            "token": KODIK_TOKEN, "shikimori_id": shiki_id,
+            "types": "anime,anime-serial", "with_episodes": "false",
+        }
+        async with session.get(f"{KODIK_API_URL}/search", params=params,
+                               timeout=aiohttp.ClientTimeout(total=12)) as r:
+            r.raise_for_status()
+            data = await r.json()
+        seen = set()
+        for it in data.get("results") or []:
+            link = _norm_iframe_url(it.get("link") or "")
+            tr = it.get("translation") or {}
+            tid = tr.get("id")
+            if not link or tid in seen:
+                continue
+            seen.add(tid)
+            label = tr.get("title") or "Озвучка"
+            vtype = tr.get("type") or "voice"
+            voices.append({
+                "id": str(tid), "label": label, "type": vtype,
+                "key": _voice_key(label, vtype), "url": link,
+                "episodes": int(it.get("last_episode") or it.get("episodes_count") or 0),
+            })
+    except Exception as e:
+        logger.warning(f"Kodik search shiki#{shiki_id}: {e}")
+        return []     # не кэшируем сбой
+    voices.sort(key=lambda v: (-v["episodes"], v["label"].lower()))
+    await _cache_set(cache_key, voices, ttl=3600 if voices else 300)
+    return voices
+
+
+async def _anixart_voices(rid: int) -> list[dict]:
+    """Best-effort фоллбэк: /episode/{rid} → озвучки → источник → серии со ссылками на плеер.
+    Формат ответов Anixart не документирован, поэтому разбор максимально терпимый."""
+    cache_key = f"anix_voices:{rid}"
+    cached = await _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    voices: list[dict] = []
+    try:
+        data = await _api_get(f"/episode/{rid}", retries=1)
+        types_ = data.get("types") or data.get("content") or []
+        for t in types_[:4]:
+            tid = t.get("id")
+            if tid is None:
+                continue
+            src_data = await _api_get(f"/episode/{rid}/{tid}", retries=1)
+            sources = src_data.get("sources") or src_data.get("content") or []
+            if not sources or sources[0].get("id") is None:
+                continue
+            ep_data = await _api_get(f"/episode/{rid}/{tid}/{sources[0]['id']}", retries=1)
+            ep_urls: dict[str, str] = {}
+            for e in ep_data.get("episodes") or ep_data.get("content") or []:
+                pos = e.get("position") or e.get("number")
+                url = _norm_iframe_url(e.get("url") or e.get("iframe") or e.get("link") or "")
+                if pos and url:
+                    ep_urls[str(pos)] = url
+            if ep_urls:
+                label = t.get("name") or "Озвучка"
+                voices.append({
+                    "id": f"a{tid}", "label": label, "type": "voice",
+                    "key": _voice_key(label, "voice"), "url": "",
+                    "episodes": len(ep_urls), "ep_urls": ep_urls,
+                })
+    except Exception as e:
+        logger.debug(f"Anixart episodes fallback #{rid}: {e}")
+        return []
+    await _cache_set(cache_key, voices, ttl=3600 if voices else 300)
+    return voices
+
+
+def _voice_url(voice: dict, ep: int) -> str:
+    if voice.get("ep_urls"):
+        return voice["ep_urls"].get(str(ep)) or ""
+    base = voice.get("url") or ""
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}episode={ep}&hide_selectors=true"
+
+
+async def resolve_stream(rid: int, ep: int, studio: str = "", title: str = "", shiki_id: int = 0) -> dict:
+    """Возвращает iframe-ссылку на конкретную серию и выбранную озвучку (используется /api/anime/stream)."""
+    rel = await _get_release(rid) if rid else None
+    t_ru = (rel or {}).get("title_ru") or title or ""
+    t_or = (rel or {}).get("title_original") or ""
+    if not shiki_id:
+        for t in (t_or, t_ru):
+            m = await _shiki_find_anime(t) if t else None
+            if m and m.get("id"):
+                shiki_id = int(m["id"])
+                break
+
+    voices = await _kodik_voices(shiki_id) if shiki_id else []
+    source = "kodik" if voices else ""
+    if not voices and rid:
+        voices = await _anixart_voices(rid)
+        source = "anixart" if voices else ""
+
+    anix_url = f"https://anixart.tv/release/{rid}" if rid else ""
+    if not voices:
+        reason = ("Источник серий не настроен (нужен KODIK_TOKEN)" if not KODIK_TOKEN
+                  else "Эта серия не нашлась в плеере")
+        return {"ok": False, "error": reason, "fallback_url": anix_url}
+
+    studio = (studio or "").strip()
+    sel = (next((v for v in voices if v["id"] == studio), None)
+           or next((v for v in voices if studio and v["key"] == studio), None)
+           or voices[0])
+    ep_total = int(sel.get("episodes") or (rel or {}).get("episodes_released") or 0)
+    ep = max(1, min(ep, ep_total)) if ep_total else max(1, ep)
+    url = _voice_url(sel, ep)
+    if not url:
+        return {"ok": False, "error": f"Серия {ep} недоступна в этой озвучке", "fallback_url": anix_url,
+                "voices": [{k: v[k] for k in ("id", "label", "type", "episodes")} for v in voices],
+                "selected": sel["id"], "episodes": ep_total}
+    return {
+        "ok": True, "source": source, "url": url, "episode": ep, "episodes": ep_total,
+        "selected": sel["id"], "fallback_url": anix_url,
+        "voices": [{k: v[k] for k in ("id", "label", "type", "episodes")} for v in voices],
+    }
+
+
 # ── Улучшение #7: Встроенный Telegram Mini App видеоплеер для web_server.py ───
-ANIME_PLAYER_HTML = """<!DOCTYPE html>
+ANIME_PLAYER_HTML = r"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -4405,13 +4763,7 @@ ANIME_PLAYER_HTML = """<!DOCTYPE html>
 <title>Anixart Mini App Player</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  :root {
-    --bg: #0b0e1a;
-    --panel: rgba(20, 26, 46, 0.85);
-    --cyan: #00ebff;
-    --pink: #ff46c3;
-    --text: #f2f5ff;
-  }
+  :root { --bg: #0b0e1a; --panel: rgba(20, 26, 46, 0.85); --cyan: #00ebff; --pink: #ff46c3; --text: #f2f5ff; }
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
   body { background: radial-gradient(circle at top left, #141c38, var(--bg)); color: var(--text); min-height: 100vh; padding: 14px; }
   .hud-card { background: var(--panel); border: 1px solid rgba(255,255,255,0.14); border-radius: 20px; padding: 16px; backdrop-filter: blur(16px); box-shadow: 0 10px 30px rgba(0,0,0,0.45); margin-bottom: 14px; }
@@ -4422,6 +4774,8 @@ ANIME_PLAYER_HTML = """<!DOCTYPE html>
   button.primary { background: linear-gradient(90deg, var(--cyan), var(--pink)); color: #080b14; font-weight: 700; border: none; cursor: pointer; }
   .player-wrap { position: relative; width: 100%; padding-top: 56.25%; border-radius: 16px; overflow: hidden; background: #05070e; border: 1px solid rgba(255,255,255,0.12); }
   .player-wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .overlay { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 16px; text-align: center; font-size: 14px; color: #ffb3d9; }
+  .overlay button { border-color: var(--pink); cursor: pointer; }
   .ep-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; max-height: 160px; overflow-y: auto; }
   .ep-btn { min-width: 44px; padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12); color: #fff; font-size: 13px; cursor: pointer; }
   .ep-btn.active { background: var(--cyan); color: #080b14; font-weight: 700; border-color: var(--cyan); }
@@ -4433,17 +4787,15 @@ ANIME_PLAYER_HTML = """<!DOCTYPE html>
     <div class="title" id="animeTitle">Загрузка тайтла…</div>
     <div class="sub" id="animeMeta">Anixart × Kodik WebApp Player</div>
     <div class="controls">
-      <select id="studioSelect">
-        <option value="anilibria">🎙 AniLibria</option>
-        <option value="studioband">🎙 StudioBand</option>
-        <option value="dreamcast">🎙 DreamCast</option>
-        <option value="shiza">🎙 SHIZA Project</option>
-        <option value="subs">💬 Субтитры</option>
-      </select>
+      <select id="studioSelect"><option value="">🎙 Озвучка загружается…</option></select>
       <button class="primary" id="markWatchedBtn">✅ Серия просмотрена</button>
     </div>
     <div class="player-wrap">
       <iframe id="videoFrame" allowfullscreen allow="autoplay; fullscreen"></iframe>
+      <div class="overlay" id="overlay">
+        <div id="overlayText"></div>
+        <button id="openExternal">🌐 Открыть на Anixart</button>
+      </div>
     </div>
     <div class="status-bar" id="statusBar"></div>
     <div class="ep-grid" id="epGrid"></div>
@@ -4453,30 +4805,80 @@ ANIME_PLAYER_HTML = """<!DOCTYPE html>
   if (tg) { tg.ready(); tg.expand(); }
   const params = new URLSearchParams(window.location.search);
   const rid = parseInt(params.get('rid') || '0', 10);
+  const shikiId = params.get('shiki_id') || '';
   let curEp = parseInt(params.get('ep') || '1', 10);
   const uid = params.get('uid') || (tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : '0');
   const titleParam = params.get('title') || ('Релиз #' + rid);
+  const $ = (id) => document.getElementById(id);
+  let curVoice = '';
+  let epTotal = 0;
+  let fallbackUrl = 'https://anixart.tv/release/' + rid;
+  let loadSeq = 0;
 
-  document.getElementById('animeTitle').textContent = titleParam;
+  $('animeTitle').textContent = titleParam;
 
-  function updateIframe() {
-    const studio = document.getElementById('studioSelect').value;
-    const frame = document.getElementById('videoFrame');
-    const q = encodeURIComponent(titleParam + ' ' + curEp + ' серия ' + studio);
-    frame.src = 'https://anixart.tv/release/' + rid;
-    document.getElementById('animeMeta').textContent = 'Серия ' + curEp + ' • Озвучка: ' + studio.toUpperCase();
-    renderEpButtons(24);
+  function showOverlay(text) {
+    $('overlayText').textContent = text;
+    $('overlay').style.display = 'flex';
+    $('videoFrame').removeAttribute('src');
+  }
+
+  function fillVoices(voices, selected) {
+    const sel = $('studioSelect');
+    const sig = voices.map(v => v.id).join(',');
+    if (sel.dataset.sig !== sig) {
+      sel.innerHTML = '';
+      voices.forEach(v => {
+        const o = document.createElement('option');
+        o.value = v.id;
+        o.textContent = (v.type === 'subtitles' ? '💬 ' : '🎙 ') + v.label + (v.episodes ? ' (' + v.episodes + ')' : '');
+        sel.appendChild(o);
+      });
+      sel.dataset.sig = sig;
+    }
+    if (selected) sel.value = selected;
+  }
+
+  async function loadStream() {
+    const seq = ++loadSeq;
+    $('statusBar').textContent = '⏳ Ищу источник серии…';
+    let d;
+    try {
+      const qs = new URLSearchParams({ rid: rid, ep: curEp, studio: curVoice, title: titleParam });
+      if (shikiId) qs.set('shiki_id', shikiId);
+      const r = await fetch('/api/anime/stream?' + qs.toString());
+      d = await r.json();
+    } catch (e) {
+      d = { ok: false, error: 'Нет связи с сервером' };
+    }
+    if (seq !== loadSeq) return;
+    if (d.fallback_url) fallbackUrl = d.fallback_url;
+    if (d.voices && d.voices.length) { fillVoices(d.voices, d.selected); curVoice = d.selected; }
+    if (d.episodes) epTotal = d.episodes;
+    if (!d.ok) {
+      showOverlay('😔 ' + (d.error || 'Источник не найден'));
+      $('statusBar').textContent = '';
+      renderEpButtons(epTotal || 24);
+      return;
+    }
+    $('overlay').style.display = 'none';
+    curEp = d.episode || curEp;
+    $('videoFrame').src = d.url;
+    const opt = $('studioSelect').selectedOptions[0];
+    $('animeMeta').textContent = 'Серия ' + curEp + (epTotal ? ' из ' + epTotal : '') + ' • ' + (opt ? opt.textContent : '');
+    $('statusBar').textContent = '';
+    renderEpButtons(epTotal || 24);
     markProgress(curEp, true);
   }
 
   function renderEpButtons(total) {
-    const grid = document.getElementById('epGrid');
+    const grid = $('epGrid');
     grid.innerHTML = '';
     for (let i = 1; i <= total; i++) {
       const b = document.createElement('button');
       b.className = 'ep-btn' + (i === curEp ? ' active' : '');
       b.textContent = i;
-      b.onclick = () => { curEp = i; updateIframe(); };
+      b.onclick = () => { curEp = i; loadStream(); };
       grid.appendChild(b);
     }
   }
@@ -4489,15 +4891,14 @@ ANIME_PLAYER_HTML = """<!DOCTYPE html>
         body: JSON.stringify({user_id: uid, rid: rid, episode: ep, title: titleParam})
       });
       const d = await r.json();
-      if (d.ok) {
-        document.getElementById('statusBar').textContent = '✓ Серия ' + ep + ' автоматически отмечена просмотренной';
-      }
+      if (d.ok) { $('statusBar').textContent = '✓ Серия ' + ep + ' отмечена просмотренной'; }
     } catch (e) {}
   }
 
-  document.getElementById('studioSelect').onchange = updateIframe;
-  document.getElementById('markWatchedBtn').onclick = () => markProgress(curEp, false);
-  updateIframe();
+  $('studioSelect').onchange = () => { curVoice = $('studioSelect').value; loadStream(); };
+  $('markWatchedBtn').onclick = () => markProgress(curEp, false);
+  $('openExternal').onclick = () => { if (tg && tg.openLink) tg.openLink(fallbackUrl); else window.open(fallbackUrl, '_blank'); };
+  loadStream();
 </script>
 </body>
 </html>
@@ -4548,7 +4949,26 @@ def register_anime_web_routes(app):
             content_type="text/html"
         )
 
+    async def handle_anime_stream(request: web.Request):
+        q = request.query
+        try:
+            rid = int(q.get("rid") or 0)
+            ep = int(q.get("ep") or 1)
+            shiki_id = int(q.get("shiki_id") or 0)
+        except ValueError:
+            return web.json_response({"ok": False, "error": "Некорректные параметры"}, status=400)
+        if rid <= 0 and shiki_id <= 0:
+            return web.json_response({"ok": False, "error": "Не указан тайтл"}, status=400)
+        try:
+            data = await resolve_stream(rid, ep, studio=q.get("studio", ""), title=q.get("title", ""),
+                                        shiki_id=shiki_id)
+        except Exception as e:
+            logger.warning(f"/api/anime/stream rid={rid}: {e}")
+            return web.json_response({"ok": False, "error": "Ошибка сервера при поиске серии"}, status=500)
+        return web.json_response(data)
+
     app.router.add_get("/anime/player", handle_anime_player)
+    app.router.add_get("/api/anime/stream", handle_anime_stream)
     app.router.add_post("/api/anime/progress", handle_anime_progress)
     app.router.add_get("/anime/shiki/callback", handle_shiki_callback)
     app._anixart_routes_registered = True

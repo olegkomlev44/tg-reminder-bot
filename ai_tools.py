@@ -180,15 +180,90 @@ async def _tool_anime_schedule(ctx: ToolContext) -> str:
     return "Календарь выхода серий отправлен в чат."
 
 
+
+async def _anime_pick(title: str, alt: str = "", min_score: float = 0.0):
+    """Находит релиз по названию. Возвращает (rel, ошибка)."""
+    from anixart_handler import _best_release_match, _get_release
+    t = _clean(title, 120)
+    if not t:
+        return None, "ОШИБКА: не указано название аниме."
+    rid, score, shown = await _best_release_match(t, alt)
+    if not rid:
+        return None, f"ОШИБКА: в Anixart не нашлось аниме «{t}»."
+    if score < min_score:
+        return None, (f"ОШИБКА: не уверен, что «{t}» — это «{shown}». "
+                      "Уточни у пользователя точное название.")
+    rel = await _get_release(rid)
+    if not rel:
+        return None, "ОШИБКА: не удалось загрузить карточку релиза."
+    return rel, ""
+
+
+async def _tool_anime_ost(ctx: ToolContext, title: str = "", kind: str = "any", number: int = 1) -> str:
+    from anixart_handler import _fetch_oped_themes, _send_oped_audio
+    rel, err = await _anime_pick(title)
+    if err:
+        return err
+    themes = await _fetch_oped_themes(rel)
+    if not themes:
+        return "ОШИБКА: для этого аниме не нашлось опенингов и эндингов."
+    kind = _clean(kind, 5).lower()
+    want = {"op": "OP", "ed": "ED"}.get(kind)
+    matching = [i for i, t in enumerate(themes)
+                if not want or want in f"{t.get('type', '')} {t.get('label', '')}".upper()]
+    if not matching:
+        matching = list(range(len(themes)))
+    try:
+        n = max(1, int(number or 1))
+    except (TypeError, ValueError):
+        n = 1
+    idx = matching[min(n - 1, len(matching) - 1)]
+    await _send_oped_audio(ctx.message, int(rel["id"]), idx, themes[idx], rel)
+    return f"Трек «{themes[idx].get('label', 'OST')}» из «{rel.get('title_ru') or rel.get('title_original')}» отправлен в чат."
+
+
+async def _tool_anime_profile(ctx: ToolContext) -> str:
+    from anixart_handler import _do_profile
+    await _do_profile(ctx.message)
+    return "Карточка Anime Wrapped пользователя отправлена в чат."
+
+
+async def _tool_anime_mark_watched(ctx: ToolContext, title: str = "", episode: int = 1) -> str:
+    from anixart_handler import sync_rate_to_shikimori_and_anixart
+    rel, err = await _anime_pick(title, min_score=0.5)
+    if err:
+        return err
+    try:
+        ep = max(1, int(episode))
+    except (TypeError, ValueError):
+        return "ОШИБКА: номер серии не понятен."
+    total = int(rel.get("episodes_total") or 0)
+    if total and ep > total:
+        return f"ОШИБКА: в «{rel.get('title_ru')}» всего {total} серий, а названа {ep}-я."
+    status = "completed" if (total and ep >= total) else "watching"
+    res = await sync_rate_to_shikimori_and_anixart(ctx.user_id, rel, status, episodes=ep)
+    synced = [n for n, f in (("Shikimori", res.get("shiki")), ("Anixart", res.get("anixart"))) if f]
+    return (f"Отмечено: «{rel.get('title_ru') or rel.get('title_original')}», серий просмотрено {res.get('episodes', ep)}"
+            f"{f'/{total}' if total else ''}, статус «{status}». "
+            + (f"Синхронизировано: {', '.join(synced)}." if synced else "Сохранено только в профиле бота."))
+
+
+async def _tool_anime_franchise(ctx: ToolContext, title: str = "") -> str:
+    from anixart_handler import _send_franchise
+    rel, err = await _anime_pick(title)
+    if err:
+        return err
+    await _send_franchise(ctx.message, rel, ctx.user_id)
+    return f"Порядок просмотра франшизы «{rel.get('title_ru') or rel.get('title_original')}» отправлен в чат."
+
+
 # ── Товары (поиск идёт по Wildberries; команда исторически называется /ozon) ──
 async def _tool_product_search(ctx: ToolContext, query: str = "") -> str:
     from ozon_handler import ozon_search
     q = _clean(query, 150)
     if not q:
         return "ОШИБКА: не указано, какой товар искать."
-    found = await ozon_search(ctx.message, q)
-    if not found:
-        return f"По запросу «{q}» товары не найдены, но в чат отправлены прямые ссылки на поиск WB и Ozon."
+    await ozon_search(ctx.message, q)
     return f"Результаты поиска товара «{q}» отправлены в чат."
 
 
@@ -332,6 +407,32 @@ _tool("anime_recommend",
 _tool("anime_top", "Показать топ аниме, которое смотрят в этой группе.", _tool_anime_top)
 
 _tool("anime_schedule", "Показать календарь выхода новых серий аниме на неделю.", _tool_anime_schedule)
+
+_tool("anime_ost",
+      "Скинуть опенинг или эндинг аниме аудиофайлом (MP3 с обложкой). Вызывай на «скинь опенинг/эндинг/OST из …».",
+      _tool_anime_ost,
+      {"title": _s("Название аниме"),
+       "kind": {"type": "STRING", "description": "op — опенинг, ed — эндинг, any — любой", "enum": ["op", "ed", "any"]},
+       "number": {"type": "INTEGER", "description": "Номер опенинга/эндинга (1 по умолчанию)"}},
+      ["title"])
+
+_tool("anime_profile",
+      "Показать аниме-профиль пользователя: карточка Anime Wrapped (часы просмотра, жанры, средняя оценка).",
+      _tool_anime_profile)
+
+_tool("anime_mark_watched",
+      "Отметить серию аниме просмотренной (синхронизация с Shikimori и Anixart). "
+      "Вызывай на «отметь 5 серию … просмотренной», «досмотрел … до 8 серии».",
+      _tool_anime_mark_watched,
+      {"title": _s("Название аниме"),
+       "episode": {"type": "INTEGER", "description": "Номер последней просмотренной серии"}},
+      ["title", "episode"], terminal=False)
+
+_tool("anime_franchise",
+      "Показать порядок просмотра франшизы аниме (сезоны, фильмы, приквелы). "
+      "Вызывай на «в каком порядке смотреть …».",
+      _tool_anime_franchise,
+      {"title": _s("Название аниме или франшизы")}, ["title"])
 
 _tool("product_search",
       "Найти товар в магазине (Wildberries) с ценами и рейтингами. Вызывай на «найди/посмотри на озоне/"
