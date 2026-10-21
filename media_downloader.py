@@ -26,7 +26,15 @@ logger = logging.getLogger(__name__)
 # ── ЛИМИТЫ ────────────────────────────────────────────────────────────────────
 MAX_VIDEO_MB = 50          # Telegram ограничение — 50 МБ, оставляем запас
 MAX_VIDEO_BYTES = MAX_VIDEO_MB * 1024 * 1024
-DOWNLOAD_TIMEOUT = 320     # секунд на скачивание
+DOWNLOAD_TIMEOUT = int(os.getenv("MEDIA_DOWNLOAD_TIMEOUT", "900"))   # секунд на скачивание
+
+# Большие видео: качаем целиком в хорошем качестве и режем на части ≤ лимита Telegram (без пережатия).
+MAX_TOTAL_MB = int(os.getenv("MEDIA_MAX_TOTAL_MB", "600"))          # максимум исходного файла
+MAX_TOTAL_BYTES = MAX_TOTAL_MB * 1024 * 1024
+MAX_PARTS = int(os.getenv("MEDIA_MAX_PARTS", "14"))                 # максимум частей
+PART_TARGET_BYTES = 42 * 1024 * 1024                                # целевой размер части
+PART_HARD_BYTES = 49 * 1024 * 1024                                  # больше этого Telegram не примет
+MAX_HEIGHT = int(os.getenv("MEDIA_MAX_HEIGHT", "1080"))             # потолок качества YouTube
 
 # ── ПАТТЕРНЫ ССЫЛОК ───────────────────────────────────────────────────────────
 URL_PATTERNS = {
@@ -87,16 +95,16 @@ def _ydl_opts(out_path: str, platform: str) -> dict:
         "no_warnings": True,
         "noprogress": True,
         "noplaylist": True,
-        "max_filesize": MAX_VIDEO_BYTES,
+        "max_filesize": MAX_TOTAL_BYTES,
     }
 
     if platform == "youtube":
         base.update({
             # Предпочитаем mp4, <=720p, с аудио в одном файле
             "format": (
-                "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
-                "/bestvideo[height<=720]+bestaudio"
-                "/best[height<=720]"
+                f"bestvideo[ext=mp4][height<={MAX_HEIGHT}]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={MAX_HEIGHT}]+bestaudio"
+                f"/best[height<={MAX_HEIGHT}]"
                 "/best"
             ),
             "merge_output_format": "mp4",
@@ -171,8 +179,8 @@ async def _download_media(url: str, platform: str) -> tuple[str | None, dict]:
             return None, {}
 
         file_size = os.path.getsize(found)
-        if file_size > MAX_VIDEO_BYTES:
-            logger.warning(f"Файл слишком большой: {file_size/1024/1024:.1f} МБ (лимит {MAX_VIDEO_MB} МБ)")
+        if file_size > MAX_TOTAL_BYTES:
+            logger.warning(f"Файл слишком большой: {file_size/1024/1024:.1f} МБ (лимит {MAX_TOTAL_MB} МБ)")
             os.remove(found)
             os.rmdir(tmp_dir)
             return None, {"_too_large": True, "_size_mb": round(file_size / 1024 / 1024, 1)}
@@ -187,6 +195,7 @@ async def _download_media(url: str, platform: str) -> tuple[str | None, dict]:
             "ext":       raw_info.get("ext") or "",
             "is_photo":  raw_info.get("ext") in ("jpg", "jpeg", "png", "webp"),
             "_tmp_dir":  tmp_dir,
+            "_size":     file_size,
         }
 
         return found, info
@@ -272,6 +281,111 @@ async def ytdlp_instagram_post(url: str) -> dict | None:
         "media": media[:20], "username": str(username).lstrip("@"),
         "is_reel": "/reel" in url, "music": None, "fallback": "yt-dlp",
     }
+
+
+def _make_error_message(info: dict, label: str, url: str) -> str:
+    """Текст ошибки скачивания (раньше функция вызывалась, но не была определена)."""
+    if info.get("_too_large"):
+        return (f"❌ Файл слишком большой даже для нарезки: {info.get('_size_mb', '?')} МБ "
+                f"(максимум {MAX_TOTAL_MB} МБ).\n\n🔗 Оригинал: {url}")
+    if info.get("_timeout"):
+        return f"⏱ {label}: скачивание заняло слишком много времени."
+    if info.get("_private"):
+        return f"🔒 {label}: видео приватное или требует входа."
+    if info.get("_unavailable"):
+        return f"❌ {label}: видео недоступно."
+    if info.get("_no_video"):
+        return f"❌ {label}: не нашёл видео по этой ссылке."
+    return f"❌ Не удалось скачать с {label}.\n{str(info.get('_error', ''))[:200]}".strip()
+
+
+async def _probe_duration(path: str) -> float:
+    try:
+        p = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=nw=1:nk=1", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(p.communicate(), timeout=30)
+        return float((out or b"0").strip() or 0)
+    except Exception:
+        return 0.0
+
+
+async def _split_video(path: str, tmp_dir: str, duration: float = 0) -> list[str] | None:
+    """
+    Нарезать видео на части ≤ ~49 МБ БЕЗ пережатия (-c copy): качество то же, что в исходнике.
+    Резка идёт по ключевым кадрам, поэтому размеры частей «плавают» — при перелёте уменьшаем шаг и повторяем.
+    None — не вышло (нет ffmpeg / слишком много частей).
+    """
+    import glob
+    size = os.path.getsize(path)
+    duration = duration or await _probe_duration(path)
+    if not duration:
+        return None
+    if size / PART_TARGET_BYTES > MAX_PARTS:
+        return None
+    seg = max(5, int(duration * PART_TARGET_BYTES / size))
+    for _ in range(4):
+        for old in glob.glob(os.path.join(tmp_dir, "part_*.mp4")):
+            os.remove(old)
+        pattern = os.path.join(tmp_dir, "part_%03d.mp4")
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", path,
+               "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+               "-f", "segment", "-segment_time", str(seg), "-reset_timestamps", "1",
+               "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart", pattern]
+        try:
+            p = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, err = await asyncio.wait_for(p.communicate(), timeout=600)
+        except FileNotFoundError:
+            logger.error("ffmpeg не найден — нарезка невозможна")
+            return None
+        except Exception as e:
+            logger.error(f"ffmpeg split: {e}")
+            return None
+        if p.returncode != 0:
+            logger.error(f"ffmpeg split rc={p.returncode}: {(err or b'')[:200]!r}")
+            return None
+        parts = sorted(glob.glob(os.path.join(tmp_dir, "part_*.mp4")))
+        if not parts:
+            return None
+        if all(os.path.getsize(x) <= PART_HARD_BYTES for x in parts):
+            return parts if len(parts) <= MAX_PARTS else None
+        seg = max(3, int(seg * 0.75))
+    return None
+
+
+async def _send_video_parts(message: types.Message, parts: list[str], caption: str,
+                            width: int, height: int) -> None:
+    """Части — альбомами по 10, по порядку. Подпись с номерами частей."""
+    from aiogram.types import InputMediaVideo
+    n = len(parts)
+    for g in range(0, n, 10):
+        chunk = parts[g:g + 10]
+        media = []
+        for i, fp in enumerate(chunk):
+            num = g + i + 1
+            cap = (f"{caption}\n\n✂️ Часть {num}/{n}" if g == 0 and i == 0 else f"✂️ Часть {num}/{n}")
+            media.append(InputMediaVideo(
+                media=FSInputFile(fp, filename=f"part_{num:02d}_of_{n:02d}.mp4"),
+                caption=cap[:1000], parse_mode="Markdown", supports_streaming=True,
+                width=width or None, height=height or None))
+        try:
+            if len(media) == 1:
+                m0 = media[0]
+                await message.bot.send_video(
+                    message.chat.id, m0.media, caption=m0.caption, parse_mode="Markdown",
+                    supports_streaming=True, width=m0.width, height=m0.height, request_timeout=900)
+            else:
+                await message.bot.send_media_group(message.chat.id, media, request_timeout=900)
+        except TypeError:       # старый aiogram без request_timeout
+            if len(media) == 1:
+                m0 = media[0]
+                await message.bot.send_video(message.chat.id, m0.media, caption=m0.caption,
+                                             parse_mode="Markdown", supports_streaming=True)
+            else:
+                await message.bot.send_media_group(message.chat.id, media)
+        await asyncio.sleep(1.0)
 
 
 def _cleanup(filepath: str, info: dict):
@@ -386,6 +500,44 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
     except Exception:
         pass
 
+    # Большое видео: режем на части ≤ лимита Telegram без потери качества
+    if not is_photo and os.path.getsize(filepath) > MAX_VIDEO_BYTES:
+        size_mb = os.path.getsize(filepath) / 1024 / 1024
+        try:
+            await status.edit_text(f"✂️ Файл {size_mb:.0f} МБ — режу на части без потери качества…")
+        except Exception:
+            pass
+        parts = await _split_video(filepath, info.get("_tmp_dir") or os.path.dirname(filepath), duration)
+        if not parts:
+            try:
+                await status.edit_text(
+                    f"❌ Не удалось нарезать ({size_mb:.0f} МБ, максимум частей: {MAX_PARTS}).\n\n"
+                    f"🔗 Оригинал: {url}", disable_web_page_preview=True)
+            except Exception:
+                pass
+            _cleanup(filepath, info)
+            return
+        try:
+            await status.edit_text(f"{emoji} Загружаю {len(parts)} частей в Telegram…")
+        except Exception:
+            pass
+        try:
+            await _send_video_parts(message, parts, caption, width, height)
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"send parts error: {e}")
+            try:
+                await status.edit_text(f"❌ Не удалось отправить части.\n`{str(e)[:200]}`",
+                                       parse_mode="Markdown")
+            except Exception:
+                pass
+        finally:
+            _cleanup(filepath, info)
+        return
+
     try:
         if is_photo:
             with open(filepath, "rb") as f:
@@ -420,7 +572,7 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
             try:
                 await status.edit_text(
                     f"❌ Файл слишком большой для Telegram.\n"
-                    f"Лимит: {MAX_VIDEO_MB} МБ\n\n"
+                    f"Лимит одного файла: {MAX_VIDEO_MB} МБ\n\n"
                     f"🔗 Оригинал: {url}",
                     disable_web_page_preview=True
                 )
@@ -453,7 +605,8 @@ async def cmd_dl(message: types.Message):
             "🤖 Reddit (видео и гиф)\n\n"
             "Просто скинь ссылку в чат — бот сам скачает!\n"
             "Или: `/dl <ссылка>`\n\n"
-            f"⚠️ Лимит: {MAX_VIDEO_MB} МБ (ограничение Telegram)",
+            f"⚠️ Лимит файла в Telegram — {MAX_VIDEO_MB} МБ: большие видео (до {MAX_TOTAL_MB} МБ) "
+            f"бот режет на части без потери качества",
             parse_mode="Markdown"
         )
         return
