@@ -56,7 +56,7 @@ from instagram_viewer import (
     get_user_status, get_user_status_by_pk, get_latest_posts,
     get_story_by_url, get_highlights, get_highlight_items,
     ig_get_user_state, ig_get_all_user_states, ig_set_user_state, ig_rename_username,
-    ig_cache_get, ig_cache_put, ig_cache_drop,
+    ig_cache_get, ig_cache_put, ig_cache_drop, ig_get_filter, ig_set_filter,
 )
 
 logger = logging.getLogger(__name__)
@@ -510,6 +510,11 @@ async def _send_story_albums(message: types.Message, stories: list[dict], title_
     return sent
 
 
+def _mdu(text: str) -> str:
+    """Экранировать ник/текст для legacy-Markdown (underscore в нике ломал разбор: np_lf)."""
+    return re.sub(r"([_*`\[])", r"\\\1", str(text))
+
+
 def _profile_keyboard(ig_username: str, user_id: int) -> InlineKeyboardMarkup:
     uid = str(user_id)
     sub_s = ig_is_subscribed(uid, ig_username, "stories")
@@ -549,6 +554,7 @@ def _profile_keyboard(ig_username: str, user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🌟 Хайлайты", callback_data=f"ig_hl:{ig_username}"),
         ],
         [
+            InlineKeyboardButton(text="🖼 Скачать аватарку", callback_data=f"ig_avdl:{ig_username}"),
             InlineKeyboardButton(text="📋 Мои подписки", callback_data="ig_my_subs"),
         ],
     ])
@@ -710,7 +716,7 @@ async def callback_ig_stories(callback: types.CallbackQuery):
 
     if not stories:
         await callback.message.answer(
-            f"😶 У *@{ig_username}* нет активных историй прямо сейчас.\n"
+            f"😶 У *@{_mdu(ig_username)}* нет активных историй прямо сейчас.\n"
             "_Истории исчезают через 24 ч. Подпишись, чтобы получать их автоматически!_",
             parse_mode="Markdown",
             reply_markup=_stories_keyboard(ig_username, callback.from_user.id)
@@ -738,6 +744,32 @@ async def callback_ig_stories(callback: types.CallbackQuery):
         f"✅ Отправлено {sent_count} из {len(stories)} историй @{ig_username}",
         reply_markup=_stories_keyboard(ig_username, callback.from_user.id)
     )
+
+
+async def callback_ig_avatar_dl(callback: types.CallbackQuery):
+    """Скачать аватарку профиля в полном размере (фото + оригинал файлом)."""
+    ig_username = callback.data.split(":", 1)[1]
+    await callback.answer("🖼 Скачиваю аватарку...")
+    info = await get_user_info(ig_username)
+    data = None
+    if info and info.get("avatar_url"):
+        data = await _download(info["avatar_url"])          # HD-ссылка с CDN
+    if not data:
+        data = await get_avatar_bytes(ig_username)          # запасной путь через instagrapi
+    if not data:
+        await callback.message.answer("❌ Не удалось скачать аватарку.")
+        return
+    cap = f'🖼 Аватарка <a href="https://instagram.com/{ig_username}">@{ig_username}</a>'
+    try:
+        await callback.message.answer_photo(
+            BufferedInputFile(data, filename=f"{ig_username}.jpg"), caption=cap, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"avatar photo: {e}")
+    try:    # оригинал без сжатия Telegram
+        await callback.message.answer_document(
+            BufferedInputFile(data, filename=f"{ig_username}_avatar.jpg"))
+    except Exception as e:
+        logger.warning(f"avatar doc: {e}")
 
 
 async def callback_ig_stories_all(callback: types.CallbackQuery):
@@ -849,7 +881,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
 
     if result.get("private"):
         await callback.message.answer(
-            f"🔒 Профиль *@{ig_username}* приватный — посты недоступны.",
+            f"🔒 Профиль *@{_mdu(ig_username)}* приватный — посты недоступны.",
             parse_mode="Markdown",
             reply_markup=_profile_keyboard(ig_username, callback.from_user.id)
         )
@@ -937,8 +969,8 @@ async def callback_ig_posts(callback: types.CallbackQuery):
     cursor_key = _store_cursor(f"{ig_username}_{next_cursor[:40]}", next_cursor) if next_cursor else ""
     shown_up   = int(next_cursor) if next_cursor.isdigit() else 0
     shown_from = max(0, shown_up - 10)
-    total_str  = f" из ~{total}" if total else ""
-    footer = f"✅ Посты {shown_from+1}–{shown_from+len(album_items)}{total_str} @{ig_username}"
+    total_str  = f" из {total}" if total else ""
+    footer = f"✅ Посты {shown_from+1}–{shown_from+len(posts)}{total_str} @{ig_username}"
     await callback.message.answer(
         footer,
         reply_markup=_posts_keyboard(ig_username, callback.from_user.id, cursor_key, has_more)
@@ -973,69 +1005,101 @@ async def callback_ig_sub(callback: types.CallbackQuery):
 
 # ── МОИ ПОДПИСКИ ──────────────────────────────────────────────────────────────
 
-async def callback_ig_my_subs(callback: types.CallbackQuery):
-    uid = str(callback.from_user.id)
+def _subs_view(uid: str):
+    """Текст и клавиатура «Мои подписки»: у каждого ника быстрые действия."""
     subs = ig_get_subscriptions(uid)
-
     if not subs:
+        return None, None
+    grouped: dict[str, list[str]] = {}
+    for sb in subs:
+        grouped.setdefault(sb["ig_username"], []).append(sb["sub_type"])
+
+    icons = {"stories": "📸", "posts": "🖼", "avatar": "👤"}
+    lines = ["📋 *Мои Instagram подписки:*\n"]
+    buttons = []
+    for uname, types_list in list(grouped.items())[:15]:
+        lines.append(f"{' '.join(icons.get(t, t) for t in types_list)} @{_mdu(uname)}")
+        buttons.append([InlineKeyboardButton(text=f"🔍 @{uname}", callback_data=f"ig_profile:{uname}")])
+        buttons.append([
+            InlineKeyboardButton(text="🖼 Посл. пост", callback_data=f"ig_last:{uname}"),
+            InlineKeyboardButton(text="📸 Истории",    callback_data=f"ig_stall:{uname}"),
+            InlineKeyboardButton(text="👤 Аватарка",   callback_data=f"ig_avdl:{uname}"),
+        ])
+    if len(grouped) > 15:
+        lines.append(f"\n_…и ещё {len(grouped) - 15}_")
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="ig_my_subs")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def callback_ig_my_subs(callback: types.CallbackQuery):
+    text, kb = _subs_view(str(callback.from_user.id))
+    if not text:
         await callback.answer("📋 У тебя нет подписок на Instagram-аккаунты.", show_alert=True)
         return
-
-    grouped: dict[str, list[str]] = {}
-    for s in subs:
-        grouped.setdefault(s["ig_username"], []).append(s["sub_type"])
-
-    lines = ["📋 *Мои Instagram подписки:*\n"]
-    type_labels = {"stories": "📸 истории", "posts": "🖼 посты", "avatar": "👤 аватарка"}
-    for uname, types_list in grouped.items():
-        t_str = " · ".join(type_labels.get(t, t) for t in types_list)
-        lines.append(f"@{uname} → {t_str}")
-
-    buttons = [
-        [InlineKeyboardButton(text=f"🔍 @{uname}", callback_data=f"ig_profile:{uname}")]
-        for uname in grouped
-    ]
-
-    await callback.message.answer(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
-    )
+    await callback.message.answer(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
 
 async def cmd_ig_subs(message: types.Message):
     """/ig_subs — список активных подписок."""
-    uid = str(message.from_user.id)
-    subs = ig_get_subscriptions(uid)
-    if not subs:
+    text, kb = _subs_view(str(message.from_user.id))
+    if not text:
         await message.answer("📋 У тебя нет Instagram-подписок. Найди профиль через /ig и подпишись.")
         return
+    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
-    grouped: dict[str, list[str]] = {}
-    for s in subs:
-        grouped.setdefault(s["ig_username"], []).append(s["sub_type"])
 
-    type_labels = {"stories": "📸", "posts": "🖼", "avatar": "👤"}
-    lines = ["📋 *Мои Instagram подписки:*\n"]
-    for uname, types_list in grouped.items():
-        icons = " ".join(type_labels.get(t, t) for t in types_list)
-        lines.append(f"{icons} @{uname}")
+async def callback_ig_last_post(callback: types.CallbackQuery):
+    """Самый свежий пост ника (закреплённые не считаются) — прямо из «Мои подписки»."""
+    ig_username = callback.data.split(":", 1)[1]
+    await callback.answer("🖼 Ищу последний пост...")
+    posts = await get_latest_posts(ig_username)
+    if not posts:
+        await callback.message.answer(
+            f"😶 Не получил посты @{ig_username}: профиль приватный, пустой или Instagram сейчас недоступен.")
+        return
+    post = max(posts, key=lambda p: p.get("timestamp", 0))
+    media = (post.get("media") or [])[:10]
+    if not media:
+        await callback.message.answer("❌ В посте нет медиа.")
+        return
 
-    buttons = [
-        [InlineKeyboardButton(text=f"🔍 @{uname}", callback_data=f"ig_profile:{uname}")]
-        for uname in grouped
-    ]
-    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="ig_my_subs")])
+    sc = post.get("shortcode", "")
+    cap = _post_caption_html(ig_username, post.get("caption") or "",
+                             post.get("like_count", 0), post.get("comment_count", 0))
+    if sc:
+        cap = (cap + f'\n🔗 <a href="https://www.instagram.com/p/{sc}/">Открыть в Instagram</a>')[:1020]
+    out = _out_message(callback.message, reply=False)
+    kb = _profile_btn(ig_username) if len(media) == 1 else None
 
-    await message.answer(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
+    row = ig_cache_get(sc) if sc else None
+    if row and len(row["items"]) == row["total"] == len(media):
+        try:
+            await _send_cached(out, row, caption=cap, kb=kb)
+            return
+        except Exception as e:
+            logger.warning(f"last post cached: {e}")
+            ig_cache_drop(sc)
+
+    files, too_big = await _fetch_media_files(media, limit=10)
+    if not files:
+        await callback.message.answer("❌ Не удалось скачать файлы поста.")
+        return
+    try:
+        msgs, complete = await _send_files_safe(out, files, cap, kb=kb)
+    except Exception as e:
+        logger.warning(f"last post send: {e}")
+        await callback.message.answer("❌ Ошибка отправки поста.")
+        return
+    if sc and complete and not too_big and len(files) == len(media) and not any(f["degraded"] for f in files):
+        ig_cache_put(sc, ig_username,
+                     _post_caption_html(ig_username, post.get("caption") or "",
+                                        post.get("like_count", 0), post.get("comment_count", 0)),
+                     _cache_items(msgs), len(media))
 
 
 # ── ФОНОВЫЙ ОПРОС ПОДПИСОК ────────────────────────────────────────────────────
+
 
 async def _seed_subscription(user_id: str, ig_username: str, sub_type: str) -> None:
     """
@@ -1164,13 +1228,6 @@ async def _run_ig_check(bot: Bot):
         await asyncio.sleep(random.uniform(2, 5))
 
 
-def _rename_filters(old: str, new: str) -> None:
-    """Перенести фильтры уведомлений на новый ник."""
-    for k in [k for k in _SUB_FILTERS if k.split(":")[1:2] == [old]]:
-        uid, _, sub_type = k.split(":", 2)
-        _SUB_FILTERS[f"{uid}:{new}:{sub_type}"] = _SUB_FILTERS.pop(k)
-
-
 async def _notify_users(bot: Bot, user_ids, text: str, kb=None) -> None:
     for uid in user_ids:
         try:
@@ -1202,7 +1259,6 @@ async def _handle_missing_or_renamed(bot: Bot, old: str, subs: list[dict], st: d
         new = (new_info.get("username") or "").lower()
         if new and new != old:
             users = ig_rename_username(old, new)
-            _rename_filters(old, new)
             ig_set_user_state(new, pk=pk, is_private=new_info.get("is_private", False),
                               notfound_count=0, is_gone=False)
             logger.info(f"[ig-check] @{old} → @{new} (pk {pk}), подписчиков: {len(users)}")
@@ -1343,12 +1399,12 @@ async def _check_avatar(bot: Bot, user_id: str, ig_username: str, info: dict, la
             await bot.send_photo(
                 user_id,
                 BufferedInputFile(data, filename="avatar.jpg"),
-                caption=f"👤 *@{ig_username}* сменил(а) аватарку!",
+                caption=f"👤 *@{_mdu(ig_username)}* сменил(а) аватарку!",
                 parse_mode="Markdown",
             )
         else:
             await bot.send_message(
-                user_id, f"👤 *@{ig_username}* сменил(а) аватарку!", parse_mode="Markdown"
+                user_id, f"👤 *@{_mdu(ig_username)}* сменил(а) аватарку!", parse_mode="Markdown"
             )
     except Exception as e:
         logger.warning(f"IG avatar notify {user_id}: {e}")
@@ -1398,7 +1454,7 @@ async def _check_stories(bot: Bot, user_id: str, ig_username: str) -> bool:
 
     await bot.send_message(
         user_id,
-        f"📸 *@{ig_username}* добавил(а) {len(ready)} новых историй!",
+        f"📸 *@{_mdu(ig_username)}* добавил(а) {len(ready)} новых историй!",
         parse_mode="Markdown",
     )
     for story, data in ready:
@@ -2139,11 +2195,11 @@ def _filter_key(user_id: str, ig_username: str, sub_type: str) -> str:
 
 
 def _get_filter(user_id: str, ig_username: str, sub_type: str) -> str:
-    return _SUB_FILTERS.get(_filter_key(user_id, ig_username, sub_type), "all")
+    return ig_get_filter(user_id, ig_username, sub_type)      # хранится в БД, переживает рестарт
 
 
 def _set_filter(user_id: str, ig_username: str, sub_type: str, f: str):
-    _SUB_FILTERS[_filter_key(user_id, ig_username, sub_type)] = f
+    ig_set_filter(user_id, ig_username, sub_type, f)
 
 
 def _post_passes_filter(post: dict, filter_name: str) -> bool:
@@ -2985,6 +3041,8 @@ def register_ig_handlers(dp: Dispatcher):
     dp.callback_query.register(callback_ig_profile,         F.data.startswith("ig_profile:"))
     dp.callback_query.register(callback_ig_stories,         F.data.startswith("ig_stories:"))
     dp.callback_query.register(callback_ig_stories_all,     F.data.startswith("ig_stall:"))
+    dp.callback_query.register(callback_ig_avatar_dl,       F.data.startswith("ig_avdl:"))
+    dp.callback_query.register(callback_ig_last_post,       F.data.startswith("ig_last:"))
     dp.callback_query.register(callback_ig_highlights,      F.data.startswith("ig_hl:"))
     dp.callback_query.register(callback_ig_highlight_view,  F.data.startswith("ig_hlv:"))
     dp.callback_query.register(callback_ig_posts,           F.data.startswith("ig_posts:"))

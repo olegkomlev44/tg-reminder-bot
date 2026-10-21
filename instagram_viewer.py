@@ -1223,11 +1223,17 @@ async def get_stories(username: str) -> list:
         return []
 
 
+_POSTS_LOCKS: dict[str, asyncio.Lock] = {}
+
+
 async def get_posts(username: str, after_cursor: str = "") -> dict:
     """
-    Получить посты пользователя.
+    Посты пользователя, страница по 10.
     after_cursor — числовой offset (строка) или пустая строка для начала.
+    Страницы IG подгружаются по мере листания (user_medias_paginated), а не
+    «первые 33 и всё»: кэш хранит уже загруженное и курсор для продолжения.
     """
+    username = username.lower().strip("@").strip()
     info = await get_user_info(username)
     if not info:
         return {"posts": [], "next_cursor": "", "has_more": False}
@@ -1236,35 +1242,57 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
 
     user_id = info.get("id", "")
     offset = int(after_cursor) if after_cursor.isdigit() else 0
+    need = offset + 10
 
-    all_posts = _cache_get(username)
+    lock = _POSTS_LOCKS.setdefault(username, asyncio.Lock())
+    async with lock:
+        e = _POSTS_CACHE.get(username)
+        if e and time.time() - e["ts"] > _POSTS_CACHE_TTL:
+            _POSTS_CACHE.pop(username, None)
+            e = None
+        if e is None:
+            e = {"posts": [], "ts": time.time(), "cursor": "", "done": False}
+            _POSTS_CACHE[username] = e
 
-    if all_posts is None:
-        def _fetch(cl: Client):
-            medias = cl.user_medias(int(user_id), amount=33)
-            return [_media_to_post(m) for m in medias if m]
+        # дотягиваем страницы, пока не хватает постов для запрошенного окна
+        while len(e["posts"]) < need and not e["done"]:
+            cursor = e["cursor"]
+            want = max(10, need - len(e["posts"]))
 
-        try:
-            all_posts = await _POOL.run(_fetch) or []
-            all_posts = [p for p in all_posts if p.get("id")]
-            if all_posts:
-                _cache_set(username, all_posts)
-                logger.info(f"📦 get_posts @{username}: {len(all_posts)} в кэш")
-        except PrivateAccount:
-            return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
-        except Exception as e:
-            logger.error(f"get_posts @{username}: {e}")
-            return {"posts": [], "next_cursor": "", "has_more": False, "user": info}
+            def _fetch(cl: Client, _c=cursor, _w=want):
+                medias, nxt = cl.user_medias_paginated(int(user_id), amount=_w, end_cursor=_c)
+                return [_media_to_post(m) for m in medias if m], nxt
 
-    chunk    = all_posts[offset: offset + 10]
-    has_more = (offset + 10) < len(all_posts)
-    next_cur = str(offset + 10) if has_more else ""
+            try:
+                res = await _POOL.run(_fetch)
+            except PrivateAccount:
+                return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
+            except Exception as ex:
+                logger.error(f"get_posts @{username}: {ex}")
+                res = None
+            if res is None:                      # сбой — отдаём, что уже есть
+                break
+            page, nxt = res
+            seen = {p["id"] for p in e["posts"]}
+            e["posts"] += [p for p in page if p.get("id") and p["id"] not in seen]
+            e["cursor"] = nxt or ""
+            if not nxt or not page:
+                e["done"] = True
+            logger.info(f"📦 get_posts @{username}: загружено {len(e['posts'])}"
+                        f"{'' if e['done'] else ' (есть ещё)'}")
 
+        all_posts = e["posts"]
+
+    chunk = all_posts[offset: offset + 10]
+    has_more = (offset + 10) < len(all_posts) or (not e["done"] and bool(all_posts))
+    total = int(info.get("posts_count") or 0)
+    if total and (offset + 10) >= total:
+        has_more = False                        # IG-счётчик говорит, что дальше пусто
     return {
         "posts":        chunk,
-        "next_cursor":  next_cur,
+        "next_cursor":  str(offset + 10) if has_more else "",
         "has_more":     has_more,
-        "total_cached": len(all_posts),
+        "total_cached": total or len(all_posts),
         "user":         info,
     }
 
@@ -1504,6 +1532,14 @@ def init_ig_db():
         total     INTEGER NOT NULL,
         created   REAL NOT NULL
     )""")
+    # Фильтры уведомлений (раньше жили в памяти и терялись при рестарте)
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_sub_filters (
+        user_id     TEXT NOT NULL,
+        ig_username TEXT NOT NULL,
+        sub_type    TEXT NOT NULL,
+        filter      TEXT NOT NULL,
+        PRIMARY KEY (user_id, ig_username, sub_type)
+    )""")
     # Копии session.json (на случай стирания диска при деплое)
     c.execute("""CREATE TABLE IF NOT EXISTS ig_sessions (
         login   TEXT PRIMARY KEY,
@@ -1538,6 +1574,10 @@ def ig_unsubscribe(user_id: str, ig_username: str, sub_type: str) -> bool:
     conn = sqlite3.connect(IG_DB)
     conn.execute(
         "DELETE FROM ig_subscriptions WHERE user_id=? AND ig_username=? AND sub_type=?",
+        (str(user_id), ig_username, sub_type),
+    )
+    conn.execute(
+        "DELETE FROM ig_sub_filters WHERE user_id=? AND ig_username=? AND sub_type=?",
         (str(user_id), ig_username, sub_type),
     )
     conn.commit()
@@ -1761,6 +1801,10 @@ def ig_rename_username(old: str, new: str) -> list[str]:
                 "VALUES (?,?,?,?)", (uid, new, st, ls),
             )
         conn.execute("DELETE FROM ig_subscriptions WHERE ig_username=?", (old,))
+        conn.execute(
+            "INSERT OR IGNORE INTO ig_sub_filters (user_id, ig_username, sub_type, filter) "
+            "SELECT user_id, ?, sub_type, filter FROM ig_sub_filters WHERE ig_username=?", (new, old))
+        conn.execute("DELETE FROM ig_sub_filters WHERE ig_username=?", (old,))
 
         st = conn.execute(
             f"SELECT {_STATE_COLS} FROM ig_user_state WHERE ig_username=?", (old,)
@@ -1826,6 +1870,37 @@ def ig_cache_drop(shortcode: str) -> None:
     conn = sqlite3.connect(IG_DB)
     try:
         conn.execute("DELETE FROM ig_file_cache WHERE shortcode=?", (shortcode,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── ФИЛЬТРЫ УВЕДОМЛЕНИЙ (персистентные) ───────────────────────────────────────
+
+def ig_get_filter(user_id: str, ig_username: str, sub_type: str) -> str:
+    conn = sqlite3.connect(IG_DB)
+    try:
+        r = conn.execute(
+            "SELECT filter FROM ig_sub_filters WHERE user_id=? AND ig_username=? AND sub_type=?",
+            (str(user_id), ig_username.lower().strip("@"), sub_type),
+        ).fetchone()
+    finally:
+        conn.close()
+    return r[0] if r else "all"
+
+
+def ig_set_filter(user_id: str, ig_username: str, sub_type: str, f: str) -> None:
+    ig_username = ig_username.lower().strip("@")
+    conn = sqlite3.connect(IG_DB)
+    try:
+        if f in ("", "all"):
+            conn.execute(
+                "DELETE FROM ig_sub_filters WHERE user_id=? AND ig_username=? AND sub_type=?",
+                (str(user_id), ig_username, sub_type))
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO ig_sub_filters (user_id, ig_username, sub_type, filter) "
+                "VALUES (?,?,?,?)", (str(user_id), ig_username, sub_type, f))
         conn.commit()
     finally:
         conn.close()
