@@ -209,6 +209,71 @@ async def _download_media(url: str, platform: str) -> tuple[str | None, dict]:
         return None, {"_error": err_str[:200]}
 
 
+async def ytdlp_instagram_post(url: str) -> dict | None:
+    """
+    Метаданные поста/рилса Instagram через yt-dlp БЕЗ скачивания файла — только прямые CDN-ссылки.
+    Возвращает dict в формате instagram_viewer (media: [{type,url,thumb}], username, caption…) или None.
+    Опционально: IG_YTDLP_COOKIES=/путь/cookies.txt (Netscape) — для постов, требующих логин.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        return None
+
+    def _run():
+        opts = {
+            "quiet": True, "no_warnings": True, "noprogress": True,
+            "skip_download": True, "socket_timeout": 20, "format": "best",
+        }
+        cookie = os.getenv("IG_YTDLP_COOKIES", "").strip()
+        if cookie and os.path.exists(cookie):
+            opts["cookiefile"] = cookie
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        info = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, _run), timeout=60)
+    except Exception as e:
+        logger.info(f"yt-dlp instagram {url[:70]}: {str(e)[:150]}")
+        return None
+    if not info:
+        return None
+
+    def _one(e: dict) -> dict | None:
+        thumb = e.get("thumbnail") or ""
+        ext = (e.get("ext") or "").lower()
+        fmts = [f for f in (e.get("formats") or [])
+                if f.get("url") and f.get("vcodec") not in (None, "none")]
+        with_audio = [f for f in fmts if f.get("acodec") not in (None, "none")]
+        pool = with_audio or fmts
+        if pool:
+            best = max(pool, key=lambda f: ((f.get("height") or 0), (f.get("tbr") or 0)))
+            return {"type": "video", "url": best["url"], "thumb": thumb}
+        if e.get("url") and ext in ("mp4", "mov", "webm", "m4v"):
+            return {"type": "video", "url": e["url"], "thumb": thumb}
+        img = e.get("url") if ext in ("jpg", "jpeg", "png", "webp") else thumb
+        if img:
+            return {"type": "photo", "url": img, "thumb": img}
+        return None
+
+    entries = info.get("entries") or [info]
+    media = [m for m in (_one(e) for e in entries if isinstance(e, dict)) if m]
+    if not media:
+        return None
+    sc_m = re.search(r"instagram\.com/(?:[A-Za-z0-9_.]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
+    sc = sc_m.group(1) if sc_m else str(info.get("id") or "")
+    username = (info.get("channel") or info.get("uploader_id") or info.get("uploader") or "")
+    return {
+        "id": str(info.get("id") or sc), "shortcode": sc,
+        "timestamp": int(info.get("timestamp") or 0),
+        "caption": (info.get("description") or info.get("title") or "")[:500],
+        "like_count": int(info.get("like_count") or 0),
+        "comment_count": int(info.get("comment_count") or 0),
+        "media": media[:20], "username": str(username).lstrip("@"),
+        "is_reel": "/reel" in url, "music": None, "fallback": "yt-dlp",
+    }
+
+
 def _cleanup(filepath: str, info: dict):
     """Удалить временные файлы."""
     try:

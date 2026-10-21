@@ -994,6 +994,38 @@ def _user_to_dict(user) -> dict:
         return {}
 
 
+def _music_from_media(media) -> dict | None:
+    """Метаданные звука рилса: licensed-трек (исполнитель/название) или оригинальный звук."""
+    try:
+        cm = getattr(media, "clips_metadata", None)
+        if not isinstance(cm, dict):
+            return None
+        mi = cm.get("music_info")
+        ma = mi.get("music_asset_info") if isinstance(mi, dict) else None
+        if isinstance(ma, dict) and (ma.get("title") or ma.get("display_artist")):
+            return {
+                "kind":      "licensed",
+                "artist":    str(ma.get("display_artist") or "").strip(),
+                "title":     str(ma.get("title") or "").strip(),
+                "audio_url": str(ma.get("progressive_download_url") or ""),
+            }
+        osi = cm.get("original_sound_info")
+        if isinstance(osi, dict) and (osi.get("original_audio_title") or osi.get("progressive_download_url")):
+            artist = ""
+            ig_artist = osi.get("ig_artist")
+            if isinstance(ig_artist, dict):
+                artist = str(ig_artist.get("username") or "")
+            return {
+                "kind":      "original",
+                "artist":    artist,
+                "title":     str(osi.get("original_audio_title") or "Оригинальный звук").strip(),
+                "audio_url": str(osi.get("progressive_download_url") or ""),
+            }
+    except Exception as e:
+        logger.debug(f"_music_from_media: {e}")
+    return None
+
+
 def _media_to_post(media) -> dict:
     """instagrapi Media → наш dict поста."""
     try:
@@ -1037,10 +1069,64 @@ def _media_to_post(media) -> dict:
             "like_count":    likes,
             "comment_count": comments,
             "media":         urls,
+            "music":         _music_from_media(media),
         }
     except Exception as e:
         logger.error(f"_media_to_post error: {e}")
         return {}
+
+
+def _unwrap_ig_link(u: str) -> str:
+    """l.instagram.com/?u=<реальная ссылка> → реальная ссылка."""
+    try:
+        from urllib.parse import urlparse, parse_qs
+        p = urlparse(u)
+        if p.netloc.endswith("l.instagram.com"):
+            real = (parse_qs(p.query).get("u") or [""])[0]
+            return real or u
+    except Exception:
+        pass
+    return u
+
+
+def _story_extras(item) -> dict:
+    """taken_at / mentions / link из StoryItem (всё, что пришло в том же ответе — доп. запросов нет)."""
+    out: dict = {"taken_at": 0, "mentions": [], "link": ""}
+    try:
+        t = getattr(item, "taken_at", None)
+        if t:
+            out["taken_at"] = int(t.timestamp())
+    except Exception:
+        pass
+    try:
+        seen = []
+        for m in getattr(item, "mentions", None) or []:
+            usr = getattr(m, "user", None)
+            name = (getattr(usr, "username", "") or "").lower()
+            if name and name not in seen:
+                seen.append(name)
+        out["mentions"] = seen[:10]
+    except Exception:
+        pass
+    try:
+        link = ""
+        for l in getattr(item, "links", None) or []:
+            u = str(getattr(l, "webUri", "") or getattr(l, "web_uri", "") or "")
+            if u:
+                link = u
+                break
+        if not link:
+            cta = getattr(item, "story_cta", None)
+            if isinstance(cta, list) and cta and isinstance(cta[0], dict):
+                for l in cta[0].get("links") or []:
+                    u = str(l.get("webUri") or "")
+                    if u:
+                        link = u
+                        break
+        out["link"] = _unwrap_ig_link(link) if link else ""
+    except Exception:
+        pass
+    return out
 
 
 def _story_to_dict(item) -> dict:
@@ -1065,6 +1151,7 @@ def _story_to_dict(item) -> dict:
             "url":      url,
             "thumb":    thumb,
             "duration": dur,
+            **_story_extras(item),
         }
     except Exception as e:
         logger.error(f"_story_to_dict error: {e}")
@@ -1371,11 +1458,77 @@ async def get_avatar_bytes(username: str) -> bytes | None:
 
 # ── ПОСТ / РИЛС ПО ССЫЛКЕ (пункт 9) ───────────────────────────────────────────
 
+# yt-dlp / embed как запасной путь: работает, даже когда все аккаунты пула в 429 / с мёртвыми куками.
+# IG_YTDLP_FIRST=1 — наоборот, пробовать yt-dlp ПЕРВЫМ (бережёт лимиты доноров, но без точных лайков/музыки).
+IG_YTDLP_FIRST = os.getenv("IG_YTDLP_FIRST", "0") == "1"
+
+
+async def _embed_post(url: str) -> dict | None:
+    """Публичный /embed/captioned — последний шанс для публичных постов и рилсов."""
+    import re as _re
+    import aiohttp
+    m = _re.search(r"instagram\.com/(?:[A-Za-z0-9_.]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
+    if not m:
+        return None
+    sc = m.group(1)
+    headers = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://www.instagram.com/p/{sc}/embed/captioned/", headers=headers,
+                             timeout=aiohttp.ClientTimeout(total=15)) as r:
+                if r.status != 200:
+                    return None
+                html = await r.text()
+    except Exception as e:
+        logger.debug(f"embed {sc}: {e}")
+        return None
+
+    def _unesc(x: str) -> str:
+        try:
+            return json.loads('"' + x + '"')
+        except Exception:
+            return x.replace("\\u0026", "&").replace("\\/", "/")
+
+    vm = _re.search(r'"video_url":"([^"]+)"', html)
+    im = (_re.search(r'"display_url":"([^"]+)"', html)
+          or _re.search(r'class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html))
+    um = _re.search(r'"username":"([^"]+)"', html)
+    thumb = _unesc(im.group(1)).replace("&amp;", "&") if im else ""
+    if vm:
+        media = [{"type": "video", "url": _unesc(vm.group(1)), "thumb": thumb}]
+    elif thumb:
+        media = [{"type": "photo", "url": thumb, "thumb": thumb}]
+    else:
+        return None
+    return {
+        "id": sc, "shortcode": sc, "timestamp": 0, "caption": "", "like_count": 0,
+        "comment_count": 0, "media": media, "username": um.group(1) if um else "",
+        "is_reel": "/reel" in url, "music": None, "fallback": "embed",
+    }
+
+
+async def _media_fallback(url: str) -> dict | None:
+    try:
+        from media_downloader import ytdlp_instagram_post
+        post = await ytdlp_instagram_post(url)
+        if post and post.get("media"):
+            logger.info(f"get_media_by_url: yt-dlp-фоллбэк сработал для {url[:70]}")
+            return post
+    except Exception as e:
+        logger.warning(f"yt-dlp fallback {url[:70]}: {e}")
+    post = await _embed_post(url)
+    if post:
+        logger.info(f"get_media_by_url: embed-фоллбэк сработал для {url[:70]}")
+    return post
+
+
 async def get_media_by_url(url: str) -> dict | None:
     """
     Достать пост/рилс/IGTV по ссылке.
-    Возвращает наш dict поста (как в get_posts) + username и is_reel,
+    Возвращает наш dict поста (как в get_posts) + username, is_reel, music,
     либо None если не получилось.
+    Порядок: пул instagrapi → yt-dlp → embed (при IG_YTDLP_FIRST=1 — yt-dlp раньше пула).
     """
     def _fetch(cl: Client):
         pk = cl.media_pk_from_url(url)
@@ -1388,11 +1541,19 @@ async def get_media_by_url(url: str) -> dict | None:
         post["is_reel"] = getattr(m, "product_type", "") == "clips"
         return post
 
+    if IG_YTDLP_FIRST:
+        post = await _media_fallback(url)
+        if post:
+            return post
     try:
-        return await _POOL.run(_fetch)
+        post = await _POOL.run(_fetch)
+        if post and post.get("media"):
+            return post
     except Exception as e:
         logger.warning(f"get_media_by_url {url[:80]}: {e}")
+    if IG_YTDLP_FIRST:
         return None
+    return await _media_fallback(url)
 
 
 # ── ИСТОРИЯ ПО ССЫЛКЕ / ХАЙЛАЙТЫ ──────────────────────────────────────────────
@@ -1523,6 +1684,12 @@ def init_ig_db():
         notfound_count   INTEGER DEFAULT 0,
         is_gone          INTEGER DEFAULT 0
     )""")
+    # Миграция: текст БИО и имени для отслеживания изменений (0 доп. запросов к IG)
+    for col in ("biography TEXT", "full_name TEXT"):
+        try:
+            c.execute(f"ALTER TABLE ig_user_state ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
     # Кэш Telegram file_id: один и тот же пост/рилс не скачиваем и не заливаем дважды
     c.execute("""CREATE TABLE IF NOT EXISTS ig_file_cache (
         shortcode TEXT PRIMARY KEY,
@@ -1725,6 +1892,7 @@ def ig_set_check_state(ig_username: str, last_checked: float, last_activity: flo
 
 _USER_STATE_FIELDS = {
     "pk", "media_count", "last_posts_fetch", "is_private", "notfound_count", "is_gone",
+    "biography", "full_name",
 }
 
 
@@ -1737,10 +1905,13 @@ def _state_row(r) -> dict:
         "is_private":       None if r[4] is None else bool(r[4]),
         "notfound_count":   r[5] or 0,
         "is_gone":          bool(r[6]),
+        "biography":        r[7],      # None — ещё не запоминали
+        "full_name":        r[8],
     }
 
 
-_STATE_COLS = "ig_username, pk, media_count, last_posts_fetch, is_private, notfound_count, is_gone"
+_STATE_COLS = ("ig_username, pk, media_count, last_posts_fetch, is_private, notfound_count, is_gone, "
+               "biography, full_name")
 
 
 def ig_get_user_state(ig_username: str) -> dict | None:
@@ -1812,8 +1983,8 @@ def ig_rename_username(old: str, new: str) -> list[str]:
         conn.execute("DELETE FROM ig_user_state WHERE ig_username=?", (old,))
         if st:
             conn.execute(
-                f"INSERT OR REPLACE INTO ig_user_state ({_STATE_COLS}) VALUES (?,?,?,?,?,?,?)",
-                (new, st[1], st[2], st[3], st[4], 0, 0),
+                f"INSERT OR REPLACE INTO ig_user_state ({_STATE_COLS}) VALUES (?,?,?,?,?,?,?,?,?)",
+                (new, st[1], st[2], st[3], st[4], 0, 0, st[7], st[8]),
             )
         conn.execute("DELETE FROM ig_check_state WHERE ig_username=?", (new,))
         conn.execute("UPDATE ig_check_state SET ig_username=? WHERE ig_username=?", (new, old))

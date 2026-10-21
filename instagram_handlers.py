@@ -28,7 +28,8 @@ from aiogram.filters import Command, StateFilter
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile, InputMediaPhoto, InputMediaVideo, InputMediaDocument,
-    InlineQueryResultArticle, InlineQueryResultCachedPhoto, InputTextMessageContent,
+    InlineQueryResultArticle, InlineQueryResultCachedPhoto, InlineQueryResultCachedVideo,
+    InputTextMessageContent,
 )
 try:  # aiogram ≥ 3.2
     from aiogram.types import LinkPreviewOptions
@@ -79,6 +80,12 @@ IG_INLINE_TIMEOUT    = float(os.getenv("IG_INLINE_TIMEOUT", "7"))       # ско
 _IG_INLINE_STORAGE   = os.getenv("IG_INLINE_STORAGE_CHAT", "").strip()
 _TG_FILE_LIMIT       = 49 * 1024 * 1024
 _DL_HARD_LIMIT       = 200 * 1024 * 1024
+# Авто-сжатие видео 49–200 МБ через ffmpeg вместо пропуска файла
+IG_COMPRESS          = os.getenv("IG_COMPRESS", "1") != "0"
+IG_COMPRESS_TIMEOUT  = int(os.getenv("IG_COMPRESS_TIMEOUT", "300"))   # сек на один проход ffmpeg
+_COMPRESS_TARGET     = 45 * 1024 * 1024
+_COMPRESS_SEM        = asyncio.Semaphore(1)                           # ffmpeg тяжёлый — по одному
+IG_INLINE_DL_TIMEOUT = float(os.getenv("IG_INLINE_DL_TIMEOUT", "5"))  # ждём скачивания ролика в inline
 _BG_TASKS: set = set()
 
 
@@ -311,11 +318,56 @@ async def _video_meta(data: bytes) -> dict:
         return {}
 
 
-async def _fetch_media_files(media_list: list[dict], limit: int = 10) -> tuple[list[dict], int]:
+async def _compress_video(data: bytes) -> bytes | None:
     """
-    Скачать элементы медиа (dict'ы с type/url/thumb) параллельно (до 4 одновременно).
-    Возвращает ([{kind, data, meta, declared, degraded}], сколько_не_влезло_в_50МБ).
-    kind — реальный тип по байтам; degraded=True — видео не скачалось, взяли превью.
+    Пережать видео до ≤45 МБ (720p, crf 28; если мало — 480p, crf 33). None — не вышло / нет ffmpeg.
+    Работает отдельным процессом, event loop не блокируется; одновременно — одно сжатие.
+    """
+    import tempfile
+    async with _COMPRESS_SEM:
+        with tempfile.TemporaryDirectory(prefix="igc_") as d:
+            src = os.path.join(d, "in.mp4")
+            with open(src, "wb") as f:
+                f.write(data)
+            for crf, h in ((28, 720), (33, 480)):
+                dst = os.path.join(d, f"out_{crf}.mp4")
+                cmd = ["ffmpeg", "-y", "-v", "error", "-i", src,
+                       "-vf", f"scale=-2:min({h}\\,ih)",
+                       "-c:v", "libx264", "-crf", str(crf), "-preset", "veryfast",
+                       "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+                       "-threads", "2", dst]
+                try:
+                    p = await asyncio.create_subprocess_exec(
+                        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+                    try:
+                        _, err = await asyncio.wait_for(p.communicate(), timeout=IG_COMPRESS_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        p.kill()
+                        await p.wait()
+                        logger.warning("ffmpeg compress: таймаут")
+                        return None
+                except FileNotFoundError:
+                    logger.warning("ffmpeg не найден — сжатие недоступно")
+                    return None
+                except Exception as e:
+                    logger.warning(f"ffmpeg compress: {e}")
+                    return None
+                if p.returncode != 0 or not os.path.exists(dst):
+                    logger.warning(f"ffmpeg compress rc={p.returncode}: {(err or b'')[:200]!r}")
+                    return None
+                size = os.path.getsize(dst)
+                if 500 < size <= _COMPRESS_TARGET:
+                    logger.info(f"сжато {len(data)/1048576:.1f} → {size/1048576:.1f} МБ (crf {crf}, {h}p)")
+                    with open(dst, "rb") as f:
+                        return f.read()
+    return None
+
+
+async def _fetch_indexed(media_list: list[dict], limit: int = 10) -> list:
+    """
+    Скачать элементы параллельно (до 4). Результат — СТРОГО по порядку входа:
+    dict {kind,data,meta,declared,degraded,compressed} | "big" | None (не скачалось).
+    Видео 49–200 МБ не отбрасываются, а сжимаются ffmpeg (IG_COMPRESS=0 — выключить).
     """
     sem = asyncio.Semaphore(4)
 
@@ -333,13 +385,28 @@ async def _fetch_media_files(media_list: list[dict], limit: int = 10) -> tuple[l
         if not data:
             return None
         kind = _sniff_kind(data, declared)
+        compressed = False
         if len(data) > _TG_FILE_LIMIT:
-            return "big"
+            if kind == "video" and IG_COMPRESS:
+                small = await _compress_video(data)
+                if small:
+                    data, compressed = small, True
+            if len(data) > _TG_FILE_LIMIT:
+                return "big"
         meta = await _video_meta(data) if kind == "video" else {}
-        return {"kind": kind, "data": data, "meta": meta,
-                "declared": declared, "degraded": degraded or (m.get("type") == "video" and kind != "video")}
+        return {"kind": kind, "data": data, "meta": meta, "declared": declared,
+                "degraded": degraded or (m.get("type") == "video" and kind != "video"),
+                "compressed": compressed}
 
-    res = await asyncio.gather(*[_one(m) for m in media_list[:limit]])
+    return list(await asyncio.gather(*[_one(m) for m in media_list[:limit]]))
+
+
+async def _fetch_media_files(media_list: list[dict], limit: int = 10) -> tuple[list[dict], int]:
+    """
+    Скачать элементы медиа (dict'ы с type/url/thumb) параллельно.
+    Возвращает ([{kind, data, meta, declared, degraded, compressed}], сколько_не_влезло_в_50МБ).
+    """
+    res = await _fetch_indexed(media_list, limit)
     files = [r for r in res if isinstance(r, dict)]
     too_big = sum(1 for r in res if r == "big")
     return files, too_big
@@ -510,6 +577,91 @@ async def _send_story_albums(message: types.Message, stories: list[dict], title_
     return sent
 
 
+def _ago(ts) -> str:
+    if not ts:
+        return ""
+    d = max(0, int(time.time() - float(ts)))
+    if d < 60:
+        return "только что"
+    if d < 3600:
+        return f"{d // 60} мин. назад"
+    if d < 86400:
+        return f"{d // 3600} ч. назад"
+    return f"{d // 86400} дн. назад"
+
+
+def _safe_link(u: str) -> str:
+    u = (u or "").strip()
+    return u if u.startswith(("http://", "https://")) and len(u) <= 400 else ""
+
+
+def _story_caption(user: str, story: dict) -> str:
+    """📸 История @user · 🕒 3 ч. назад / 🔗 ссылка / 👥 отмечены. HTML."""
+    import html as _h
+    head = f"📸 История @{user}"
+    ago = _ago(story.get("taken_at"))
+    if ago:
+        head += f" · 🕒 {ago}"
+    lines = [head]
+    link = _safe_link(story.get("link", ""))
+    if link:
+        lines.append(f'🔗 <a href="{_h.escape(link, quote=True)}">Ссылка со стикера</a>')
+    ments = story.get("mentions") or []
+    if ments:
+        lines.append("👥 Отмечены: " + ", ".join(
+            f'<a href="https://instagram.com/{_h.escape(m)}">@{_h.escape(m)}</a>' for m in ments[:5]))
+    return "\n".join(lines)[:1020]
+
+
+def _stories_batch_caption(user: str, stories: list[dict]) -> str:
+    """Единая подпись к альбому историй: заголовок + по строке на историю."""
+    import html as _h
+    n = len(stories)
+    if n == 1:
+        return _story_caption(user, stories[0])
+    lines = [f'📸 <b>@{_h.escape(user)}</b> добавил(а) {n} новых историй']
+    for i, s in enumerate(stories, 1):
+        parts = []
+        ago = _ago(s.get("taken_at"))
+        if ago:
+            parts.append(f"🕒 {ago}")
+        if _safe_link(s.get("link", "")):
+            parts.append("🔗 ссылка")
+        if s.get("mentions"):
+            parts.append("👥 " + " ".join("@" + m for m in s["mentions"][:3]))
+        if parts:
+            line = f"{i}. " + " · ".join(parts)
+            if sum(len(x) + 1 for x in lines) + len(line) > 950:
+                break
+            lines.append(line)
+    return "\n".join(lines)[:1020]
+
+
+def _stories_meta_kb(stories: list[dict]):
+    """Кнопки: профили отмеченных людей + ссылки со стикеров. None — если нечего показывать."""
+    rows, row, seen = [], [], set()
+    for s in stories:
+        for m in s.get("mentions") or []:
+            if m in seen or len(seen) >= 6:
+                continue
+            seen.add(m)
+            row.append(InlineKeyboardButton(text=f"👤 @{m}", callback_data=f"ig_profile:{m}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+    if row:
+        rows.append(row)
+    links = [(i, _safe_link(s.get("link", ""))) for i, s in enumerate(stories, 1)]
+    links = [(i, u) for i, u in links if u][:4]
+    if links:
+        rows.append([InlineKeyboardButton(
+            text=("🔗 Ссылка со стикера" if len(stories) == 1 else f"🔗 История #{i}"), url=u)
+            for i, u in links[:2]])
+        if len(links) > 2:
+            rows.append([InlineKeyboardButton(text=f"🔗 История #{i}", url=u) for i, u in links[2:]])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
 def _mdu(text: str) -> str:
     """Экранировать ник/текст для legacy-Markdown (underscore в нике ломал разбор: np_lf)."""
     return re.sub(r"([_*`\[])", r"\\\1", str(text))
@@ -577,9 +729,20 @@ def _stories_keyboard(ig_username: str, user_id: int) -> InlineKeyboardMarkup:
 
 
 def _posts_keyboard(
-    ig_username: str, user_id: int, next_cursor: str, has_more: bool
+    ig_username: str, user_id: int, next_cursor: str, has_more: bool,
+    carousels: list | None = None,
 ) -> InlineKeyboardMarkup:
     buttons = []
+    # «🗂 Пост #3 (10 слайдов)» — по клику выгружаем все слайды альбомом
+    row = []
+    for num, sc, n in (carousels or [])[:12]:
+        row.append(InlineKeyboardButton(
+            text=f"🗂 Пост #{num} ({n} сл.)", callback_data=f"ig_car:{sc}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     if has_more and next_cursor:
         safe_cursor = next_cursor[:100]
         buttons.append([InlineKeyboardButton(
@@ -595,6 +758,14 @@ def _posts_keyboard(
 # ── CURSOR КЭШИ ───────────────────────────────────────────────────────────────
 
 _CURSOR_CACHE: dict[str, str] = {}
+_CAROUSEL_CACHE: dict[str, dict] = {}      # shortcode → пост (все слайды уже известны — 0 запросов к IG)
+
+
+def _carousel_remember(sc: str, post: dict, username: str) -> None:
+    if len(_CAROUSEL_CACHE) > 300:
+        for k in list(_CAROUSEL_CACHE)[:100]:
+            _CAROUSEL_CACHE.pop(k, None)
+    _CAROUSEL_CACHE[sc] = {**post, "username": username}
 
 
 def _store_cursor(key: str, cursor: str) -> str:
@@ -730,7 +901,8 @@ async def callback_ig_stories(callback: types.CallbackQuery):
         if not files:
             continue
         try:
-            await _send_files(out, files, f"📸 История @{ig_username}")
+            await _send_files(out, files, _story_caption(ig_username, story),
+                              kb=_stories_meta_kb([story]))
             sent_count += 1
         except Exception as e:
             logger.error(f"IG send story error: {e}")
@@ -896,6 +1068,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         return
 
     album_items = []
+    carousels: list = []         # (номер в ленте, shortcode, число слайдов)
     to_cache: list = []          # параллельно album_items: (shortcode, total) или None
     for i, post in enumerate(posts[:10]):
         media_list = post.get("media", [])
@@ -921,6 +1094,9 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         # Уже отправляли этот пост — берём file_id, ничего не качаем
         row = ig_cache_get(sc) if sc else None
         if row and row["items"]:
+            if n_media > 1 and sc:
+                carousels.append((len(album_items) + 1, sc, n_media))
+                _carousel_remember(sc, post, ig_username)
             album_items.append(_mk_cached_media(row["items"][0], cap))
             to_cache.append(None)
             continue
@@ -929,6 +1105,9 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if not files:
             continue
         f = files[0]
+        if n_media > 1 and sc:
+            carousels.append((len(album_items) + 1, sc, n_media))
+            _carousel_remember(sc, post, ig_username)
         album_items.append(_mk_input_media(f, cap, None, f"post_{i}"))
         # в кэш кладём только одиночные посты: набор должен быть полным
         to_cache.append((sc, 1) if (sc and n_media == 1 and not f["degraded"]) else None)
@@ -973,7 +1152,8 @@ async def callback_ig_posts(callback: types.CallbackQuery):
     footer = f"✅ Посты {shown_from+1}–{shown_from+len(posts)}{total_str} @{ig_username}"
     await callback.message.answer(
         footer,
-        reply_markup=_posts_keyboard(ig_username, callback.from_user.id, cursor_key, has_more)
+        reply_markup=_posts_keyboard(ig_username, callback.from_user.id, cursor_key, has_more,
+                                     carousels)
     )
 
 
@@ -1322,6 +1502,7 @@ async def _check_user(bot: Bot, ig_username: str, subs: list[dict]) -> bool:
                 (f"🔓 <b>@{ig_username}</b> снова открытый аккаунт — слежу дальше."),
             )
         upd["is_private"] = priv
+        await _check_profile_text(bot, ig_username, subs, st, info, upd)
     if upd:
         ig_set_user_state(ig_username, **upd)
 
@@ -1364,6 +1545,42 @@ async def _check_user(bot: Bot, ig_username: str, subs: list[dict]) -> bool:
         ig_set_user_state(ig_username, media_count=info.get("posts_count"),
                           last_posts_fetch=time.time())
     return found
+
+
+def _norm_text(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").replace("\r", "")).strip()
+
+
+async def _check_profile_text(bot: Bot, ig_username: str, subs: list[dict], st: dict,
+                              info: dict, upd: dict) -> None:
+    """
+    Смена БИО / имени. Данные уже пришли в get_user_status(force=True) — доп. запросов к IG ноль.
+    Первый раз просто запоминаем (без уведомления). Пишем в upd — сохранит вызывающий.
+    """
+    import html as _h
+    new_bio = (info.get("biography") or "").strip()
+    new_name = (info.get("full_name") or "").strip()
+    old_bio, old_name = st.get("biography"), st.get("full_name")
+    msgs: list[str] = []
+
+    def _q(x: str) -> str:
+        return f"<i>{_h.escape(x[:250])}</i>" if x else "<i>(пусто)</i>"
+
+    if old_bio is None:
+        upd["biography"] = new_bio
+    elif _norm_text(old_bio) != _norm_text(new_bio):
+        upd["biography"] = new_bio
+        msgs.append(f"📝 <b>@{_h.escape(ig_username)}</b> обновил(а) биографию:\n"
+                    f"<b>Было:</b> {_q(old_bio)}\n<b>Стало:</b> {_q(new_bio)}")
+    if old_name is None:
+        upd["full_name"] = new_name
+    elif _norm_text(old_name) != _norm_text(new_name):
+        upd["full_name"] = new_name
+        msgs.append(f"✏️ <b>@{_h.escape(ig_username)}</b> сменил(а) имя:\n"
+                    f"{_q(old_name)} → {_q(new_name)}")
+    if msgs:
+        await _notify_users(bot, _sub_users(subs), "\n\n".join(msgs),
+                            kb=_profile_btn(ig_username))
 
 
 async def _check_avatar(bot: Bot, user_id: str, ig_username: str, info: dict, last_seen: str) -> bool:
@@ -1438,46 +1655,52 @@ async def _check_stories(bot: Bot, user_id: str, ig_username: str) -> bool:
     ]
     if not new_stories:
         return False
+    new_stories.sort(key=lambda s: s.get("taken_at") or 0)      # от старых к новым
 
-    # Сначала качаем — и только потом пишем «добавил(а) N историй»,
-    # иначе при недоступном CDN заголовок прилетал бы каждый цикл без самих историй.
-    ready = []
-    for story in new_stories[:10]:
-        data = await _download(story.get("url", ""), story.get("type", "photo"))
-        if data and len(data) <= _TG_FILE_LIMIT:
-            ready.append((story, data))
+    # Сначала качаем — и только потом шлём, иначе при недоступном CDN
+    # заголовок прилетал бы каждый цикл без самих историй.
+    batch = new_stories[:10]
+    res = await _fetch_indexed(batch, limit=10)
+    ready: list[tuple[dict, dict]] = []
+    for story, r in zip(batch, res):
+        if isinstance(r, dict):
+            ready.append((story, r))
         else:
             _story_fail(user_id, story["id"])
-        await asyncio.sleep(0.3)
     if not ready:
         return False
 
-    await bot.send_message(
-        user_id,
-        f"📸 *@{_mdu(ig_username)}* добавил(а) {len(ready)} новых историй!",
-        parse_mode="Markdown",
-    )
-    for story, data in ready:
-        try:
-            kind = _sniff_kind(data, story.get("type", "photo"))
-            if kind == "video":
-                await bot.send_video(
-                    user_id, BufferedInputFile(data, filename="story.mp4"),
-                    caption=f"📸 История @{ig_username}",
-                    supports_streaming=True, **(await _video_meta(data)),
-                )
-            else:
-                await bot.send_photo(
-                    user_id, BufferedInputFile(data, filename="story.jpg"),
-                    caption=f"📸 История @{ig_username}",
-                )
-            ig_mark_sent(user_id, f"story_{story['id']}")
-            _STORY_FAILS.pop((user_id, story["id"]), None)
-        except Exception as e:
-            logger.warning(f"IG story notify {user_id}: {e}")
-            _story_fail(user_id, story["id"])
-        await asyncio.sleep(0.5)
-    return True
+    # Одной пачкой (альбом до 10, подпись — в первом элементе) вместо N отдельных пушей.
+    out = _out_chat(bot, user_id)
+    st_list = [s for s, _ in ready]
+    files = [f for _, f in ready]
+    kb = _stories_meta_kb(st_list)
+    delivered: list[dict] = []
+    try:
+        await _send_files(out, files, _stories_batch_caption(ig_username, st_list),
+                          kb=kb if len(files) == 1 else None)
+        delivered = st_list
+        if len(files) > 1 and kb is not None:      # кнопки к альбому — тихим сообщением (без звука)
+            try:
+                await bot.send_message(user_id, f"👥 Отметки и ссылки из историй @{ig_username}:",
+                                       reply_markup=kb, disable_notification=True)
+            except Exception as e:
+                logger.debug(f"stories kb {user_id}: {e}")
+    except Exception as e:
+        logger.warning(f"IG stories album {user_id}: {e} — шлю по одной")
+        for i, (story, f) in enumerate(ready):
+            try:
+                await _send_files(out, [f], _story_caption(ig_username, story),
+                                  kb=_stories_meta_kb([story]))
+                delivered.append(story)
+            except Exception as e2:
+                logger.warning(f"IG story notify {user_id}: {e2}")
+                _story_fail(user_id, story["id"])
+            await asyncio.sleep(0.5)
+    for story in delivered:
+        ig_mark_sent(user_id, f"story_{story['id']}")
+        _STORY_FAILS.pop((user_id, story["id"]), None)
+    return bool(delivered)
 
 
 async def _check_posts(bot: Bot, user_id: str, ig_username: str, last_seen: str,
@@ -1584,6 +1807,10 @@ _IG_MEDIA_RE = re.compile(
 )
 _IG_SC_RE = re.compile(
     r"instagram\.com/(?:[A-Za-z0-9_.]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", re.I)
+# Мобильное «Поделиться → Копировать ссылку»: instagram.com/share/reel/XXXX, /share/p/XXXX, /share/XXXX
+_IG_SHARE_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?instagram\.com/share/(?:(?:p|reel|reels|tv|story|stories)/)?[A-Za-z0-9_-]+[^\s]*",
+    re.I)
 _IG_HL_RE = re.compile(r"(?:https?://)?(?:www\.)?instagram\.com/stories/highlights/(\d+)", re.I)
 _IG_STORY_RE = re.compile(
     r"(?:https?://)?(?:www\.)?instagram\.com/stories/([A-Za-z0-9_.]+)/(\d+)", re.I)
@@ -1597,11 +1824,29 @@ def _extract_media_link(text: str) -> str | None:
 
 
 def _shortcode_from_link(link: str) -> str:
+    if "/share/" in (link or ""):          # код в share-ссылке ≠ shortcode поста
+        return ""
     m = _IG_SC_RE.search(link or "")
     return m.group(1) if m else ""
 
 
 def _parse_ig_link(text: str):
+    """
+    Что за ссылка на Instagram (share-ссылки проверяются первыми, иначе «share/reel/X» ложно
+    принимается за пост):
+      ("share", (url,))               — instagram.com/share/... (резолвится редиректом в _dispatch_ig_link)
+    остальное — см. _parse_ig_link_core.
+    """
+    m = _IG_SHARE_RE.search(text or "")
+    if m:
+        url = m.group(0)
+        if not url.startswith("http"):
+            url = "https://" + url
+        return "share", (url,)
+    return _parse_ig_link_core(text)
+
+
+def _parse_ig_link_core(text: str):
     """
     Что за ссылка на Instagram:
       ("highlight", (pk,))            — instagram.com/stories/highlights/<pk>
@@ -1628,9 +1873,91 @@ def _parse_ig_link(text: str):
     return None
 
 
+async def _resolve_share_link(url: str, timeout: float = 6.0) -> str | None:
+    """
+    instagram.com/share/... → конечная ссылка на пост/рилс/сторис.
+    Идём по редиректам вручную (allow_redirects=False), без скачивания тела.
+    Если IG отправил на логин (accounts/login/?next=/reel/XXX/) — достаём путь из next.
+    """
+    from urllib.parse import urljoin, parse_qs
+    if not url.startswith("http"):
+        url = "https://" + url
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 "
+                       "(KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"),
+        "Accept": "text/html,*/*;q=0.8",
+    }
+    cur = url
+    try:
+        async with aiohttp.ClientSession() as s:
+            for _ in range(6):
+                async with s.get(cur, headers=headers, allow_redirects=False, ssl=False,
+                                 timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                    loc = r.headers.get("Location")
+                    if r.status not in (301, 302, 303, 307, 308) or not loc:
+                        break
+                    cur = urljoin(cur, loc)
+                nxt = parse_qs(urlparse(cur).query).get("next")
+                if "accounts/login" in cur and nxt:
+                    cur = urljoin("https://www.instagram.com", nxt[0])
+                clean = cur.split("?")[0]
+                if _IG_SHARE_RE.search(clean):
+                    continue
+                if _parse_ig_link_core(clean):
+                    return clean
+    except Exception as e:
+        logger.warning(f"share resolve {url[:70]}: {e}")
+    return None
+
+
 async def _is_ig_media_link(message: types.Message) -> bool:
     t = message.text or ""
     return bool(t) and not t.startswith("/") and _parse_ig_link(t) is not None
+
+
+# ── Музыка из Reels ───────────────────────────────────────────────────────────
+_MUSIC_MEM: dict[str, dict] = {}
+
+
+def _remember_music(sc: str, post: dict) -> None:
+    m = post.get("music")
+    if not sc or not m:
+        return
+    if len(_MUSIC_MEM) > 300:
+        for k in list(_MUSIC_MEM)[:100]:
+            _MUSIC_MEM.pop(k, None)
+    vurl = next((x.get("url") for x in post.get("media", []) if x.get("type") == "video"), "")
+    _MUSIC_MEM[sc] = {**m, "video_url": vurl or "", "username": post.get("username", "")}
+
+
+def _music_line(music: dict) -> str:
+    import html as _h
+    a, t = music.get("artist", ""), music.get("title", "")
+    if music.get("kind") == "original":
+        txt = f"Оригинальный звук — {a}" if a else (t or "Оригинальный звук")
+    else:
+        txt = f"{a} — {t}" if a and t else (t or a)
+    return f"🎵 {_h.escape(txt)}"[:200]
+
+
+def _post_kb(user: str, sc: str, music_kind: str | None):
+    """Профиль + (для рилсов со звуком) кнопки «найти трек» / «скачать звук»."""
+    rows = []
+    if sc and music_kind == "licensed":
+        rows.append([InlineKeyboardButton(text="🎵 Найти трек", callback_data=f"ig_music:s:{sc}"),
+                     InlineKeyboardButton(text="🎧 Только звук", callback_data=f"ig_music:a:{sc}")])
+    elif sc and music_kind == "original":
+        rows.append([InlineKeyboardButton(text="🎧 Скачать звук", callback_data=f"ig_music:a:{sc}")])
+    if user:
+        rows.append([InlineKeyboardButton(text=f"👤 профиль @{user}", callback_data=f"ig_profile:{user}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+def _music_kind_from_caption(caption: str) -> str | None:
+    c = caption or ""
+    if "🎵 Оригинальный звук" in c:
+        return "original"
+    return "licensed" if "🎵 " in c else None
 
 
 async def _send_ig_media(message: types.Message, link: str) -> bool:
@@ -1647,7 +1974,9 @@ async def _send_ig_media(message: types.Message, link: str) -> bool:
         row = ig_cache_get(url_sc)
         if row and len(row["items"]) == row["total"]:
             try:
-                await _send_cached(out, row, kb=_profile_btn(row["username"]) if row["total"] == 1 else None)
+                kb = (_post_kb(row["username"], url_sc, _music_kind_from_caption(row.get("caption", "")))
+                      if row["total"] == 1 else None)
+                await _send_cached(out, row, kb=kb)
                 return True
             except Exception as e:
                 logger.warning(f"cached send {url_sc}: {e} — сбрасываю кэш")
@@ -1658,35 +1987,180 @@ async def _send_ig_media(message: types.Message, link: str) -> bool:
     except Exception:
         pass
 
-    post = await get_media_by_url(link)
+    post = await get_media_by_url(link)       # пул → yt-dlp → embed
     if not post or not post.get("media"):
         return False
+    return await _send_post_dict(message, post, url_sc)
 
-    media = post["media"][:10]
-    files, too_big = await _fetch_media_files(media, limit=10)
-    if not files:
-        return False
 
-    user = post.get("username", "")
+async def _send_post_dict(message: types.Message, post: dict, url_sc: str = "") -> bool:
+    """Скачать и отправить уже известный пост (dict из get_media_by_url / get_posts). Карусель >10 — несколькими альбомами."""
+    out = _out_message(message, reply=True)
+    media = post["media"][:20]
+    user = post.get("username", "") or ""
+    sc = post.get("shortcode") or url_sc
+    music = post.get("music")
+    if music and sc:
+        _remember_music(sc, post)
     base_caption = _post_caption_html(
-        user, post.get("caption") or "", post.get("like_count", 0), post.get("comment_count", 0))
-    caption = base_caption
-    if too_big:
-        caption = (base_caption + f"\n\n⚠️ {too_big} файл(ов) больше 50 МБ — не влезли")[:1020]
+        user, post.get("caption") or "", post.get("like_count", 0), post.get("comment_count", 0),
+        extra=(("\n" + _music_line(music)) if music else ""))
+    kb_single = _post_kb(user, sc, music.get("kind") if music else None)
 
-    try:
-        msgs, complete = await _send_files_safe(
-            out, files, caption, kb=_profile_btn(user) if len(files) == 1 else None)
-    except Exception as e:
-        logger.warning(f"_send_ig_media {link[:60]}: {e}")
-        return False
+    all_msgs: list = []
+    n_files = too_big_total = compressed = 0
+    degraded = False
+    complete_all = True
+    for ci in range(0, len(media), 10):
+        chunk = media[ci:ci + 10]
+        files, too_big = await _fetch_media_files(chunk, limit=10)
+        too_big_total += too_big
+        if not files:
+            if ci == 0:
+                return False
+            complete_all = False
+            continue
+        cap = base_caption if ci == 0 else f"🗂 {ci + 1}–{ci + len(chunk)} из {len(media)}"
+        notes = []
+        if too_big:
+            notes.append(f"⚠️ {too_big} файл(ов) больше 50 МБ — не влезли")
+        comp = sum(1 for f in files if f.get("compressed"))
+        if comp:
+            notes.append("🗜 видео сжато до ≤45 МБ")
+        if notes:
+            cap = (cap + "\n\n" + "\n".join(notes))[:1020]
+        try:
+            msgs, complete = await _send_files_safe(
+                out, files, cap, kb=kb_single if len(media) == 1 and len(files) == 1 else None)
+        except Exception as e:
+            logger.warning(f"_send_post_dict {sc}: {e}")
+            if ci == 0:
+                return False
+            complete_all = False
+            continue
+        all_msgs += msgs
+        complete_all = complete_all and complete
+        n_files += len(files)
+        compressed += comp
+        degraded = degraded or any(f["degraded"] for f in files)
+        if len(media) > 10:
+            await asyncio.sleep(1.0)
 
-    # 2. Запоминаем file_id — только если пост ушёл целиком и без деградации (видео → превью)
-    if complete and not too_big and len(files) == len(media) and not any(f["degraded"] for f in files):
-        items = _cache_items(msgs)
+    # Запоминаем file_id — только если пост ушёл целиком и без деградации (видео → превью)
+    if (complete_all and not too_big_total and not compressed and n_files == len(media)
+            and not degraded and len(media) <= 10):
+        items = _cache_items(all_msgs)
         for key in {post.get("shortcode") or "", url_sc} - {""}:
             ig_cache_put(key, user, base_caption, items, len(media))
     return True
+
+
+async def callback_ig_carousel(callback: types.CallbackQuery):
+    """«🗂 Пост #N (K слайдов)» → все слайды поста альбомом."""
+    sc = callback.data.split(":", 1)[1]
+    await callback.answer("🗂 Загружаю карусель...")
+    post = _CAROUSEL_CACHE.get(sc)
+    row = ig_cache_get(sc)
+    cached_full = bool(row and len(row["items"]) == row["total"] and row["total"] > 1)
+    ok = False
+    try:
+        if post and not cached_full:
+            ok = await _send_post_dict(callback.message, post, sc)     # слайды уже известны — IG не дёргаем
+        if not ok:
+            ok = await _send_ig_media(callback.message, f"https://www.instagram.com/p/{sc}/")
+    except Exception as e:
+        logger.error(f"callback carousel {sc}: {e}")
+    if not ok:
+        await callback.message.answer("❌ Не удалось загрузить карусель.")
+
+
+# ── «🎵 Найти трек / Скачать звук» ────────────────────────────────────────────
+
+async def _to_mp3(data: bytes) -> bytes | None:
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="igm_") as d:
+        src, dst = os.path.join(d, "in.mp4"), os.path.join(d, "out.mp3")
+        with open(src, "wb") as f:
+            f.write(data)
+        try:
+            p = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-v", "error", "-i", src, "-vn",
+                "-c:a", "libmp3lame", "-q:a", "3", dst,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await asyncio.wait_for(p.wait(), timeout=90)
+        except Exception as e:
+            logger.warning(f"ffmpeg mp3: {e}")
+            return None
+        if p.returncode != 0 or not os.path.exists(dst):
+            return None
+        with open(dst, "rb") as f:
+            out = f.read()
+    return out if len(out) > 500 else None
+
+
+async def _music_meta(sc: str, refresh: bool = False) -> dict | None:
+    if not refresh and sc in _MUSIC_MEM:
+        return _MUSIC_MEM[sc]
+    post = await get_media_by_url(f"https://www.instagram.com/reel/{sc}/")
+    if post:
+        if not post.get("music"):
+            post["music"] = {"kind": "original", "artist": post.get("username", ""),
+                             "title": "Оригинальный звук", "audio_url": ""}
+        _remember_music(sc, post)
+    return _MUSIC_MEM.get(sc)
+
+
+async def _reel_audio_mp3(sc: str, meta: dict) -> bytes | None:
+    for attempt in range(2):
+        for url in (meta.get("video_url"), meta.get("audio_url")):
+            if not url:
+                continue
+            data = await _download(url, "video")
+            if data:
+                mp3 = await _to_mp3(data)
+                if mp3:
+                    return mp3
+        if attempt == 0:                                  # CDN-ссылка могла протухнуть — перечитаем пост
+            fresh = await _music_meta(sc, refresh=True)
+            if not fresh:
+                break
+            meta = fresh
+    return None
+
+
+async def callback_ig_music(callback: types.CallbackQuery):
+    """ig_music:s:<sc> — найти полный трек; ig_music:a:<sc> — вырезать звук из видео."""
+    _, mode, sc = callback.data.split(":", 2)
+    await callback.answer("🎵 Ищу трек..." if mode == "s" else "🎧 Достаю звук...")
+    meta = await _music_meta(sc)
+    if not meta:
+        await callback.message.answer("❌ Не удалось получить данные о звуке.")
+        return
+    artist, title = meta.get("artist", ""), meta.get("title", "")
+
+    if mode == "s" and meta.get("kind") == "licensed":
+        try:
+            from music_engine import music_engine
+            from music_handlers import send_track_to_user
+            tracks = await music_engine.search_multi(f"{artist} {title}".strip(), limit=3)
+            if tracks:
+                await send_track_to_user(callback.message, tracks[0]["id"])
+                return
+        except Exception as e:
+            logger.warning(f"ig_music search {sc}: {e}")
+        await callback.message.answer("🔎 Полную версию не нашёл — вырезаю звук из видео…")
+
+    mp3 = await _reel_audio_mp3(sc, meta)
+    if not mp3:
+        await callback.message.answer("❌ Не удалось вырезать звук (нет ffmpeg или видео недоступно).")
+        return
+    try:
+        await callback.message.answer_audio(
+            BufferedInputFile(mp3, filename=f"{(artist or 'reel')}_{sc}.mp3"),
+            title=title or "Звук из Reels", performer=artist or meta.get("username") or None)
+    except Exception as e:
+        logger.error(f"ig_music send audio: {e}")
+        await callback.message.answer("❌ Не получилось отправить аудио.")
 
 
 async def _send_story_link(message: types.Message, user: str, sid: str, url: str) -> bool:
@@ -1702,10 +2176,12 @@ async def _send_story_link(message: types.Message, user: str, sid: str, url: str
     files, _ = await _fetch_media_files([story], limit=1)
     if not files:
         return False
+    kb = _stories_meta_kb([story])
+    if kb is None:
+        kb = _profile_btn(user)
     await _send_files(
         _out_message(message, reply=True), files,
-        f'📸 История <a href="https://instagram.com/{user}">@{user}</a>',
-        kb=_profile_btn(user),
+        _story_caption(user, story), kb=kb,
     )
     return True
 
@@ -1732,6 +2208,12 @@ async def _send_highlight_link(message: types.Message, pk: str) -> bool:
 
 async def _dispatch_ig_link(message: types.Message, parsed) -> bool:
     kind, args = parsed
+    if kind == "share":                       # instagram.com/share/... → реальная ссылка
+        real = await _resolve_share_link(args[0])
+        parsed = _parse_ig_link_core(real) if real else None
+        if not parsed:
+            return False
+        kind, args = parsed
     if kind == "media":
         return await _send_ig_media(message, args[0])
     try:
@@ -2861,6 +3343,10 @@ async def cmd_ig_status(message: types.Message):
 _IG_INLINE_RE = re.compile(
     r"^\s*(?:ig|insta|instagram|инста|инст)\s*[:\s]\s*@?([A-Za-z0-9_.]{1,30})\s*$", re.I)
 _IG_INLINE_BARE_RE = re.compile(r"^\s*(?:ig|insta|instagram|инста|инст)\s*:?\s*$", re.I)
+_IG_INLINE_LINK_RE = re.compile(
+    r"^\s*(?:(?:ig|insta|instagram|инста|инст)\s*[:\s]\s*)?(?:https?://)?(?:www\.)?"
+    r"(instagram\.com/(?:share/(?:[a-z]+/)?|(?:[A-Za-z0-9_.]+/)?(?:p|reel|reels|tv)/)[A-Za-z0-9_-]+[^\s]*)\s*$",
+    re.I)
 _IG_INLINE_URL_RE = re.compile(
     r"^\s*(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9_.]{1,30})/?(?:\?\S*)?\s*$", re.I)
 _IG_RESERVED = {"p", "reel", "reels", "tv", "stories", "explore", "share", "accounts"}
@@ -2869,10 +3355,14 @@ _IG_RESERVED = {"p", "reel", "reels", "tv", "stories", "explore", "share", "acco
 def parse_ig_inline(text: str) -> str | None:
     """
     None — это не Instagram-запрос (пусть обработают музыка/аниме);
-    ""   — введён только префикс («ig») — покажем подсказку;
+    ""   — введён только префикс («ig») — покажем личный список (подписки/недавние);
+    "http…" — ссылка на пост/рилс (в т.ч. share) → inline-скачивание;
     иначе — ник.
     """
     t = (text or "").strip()
+    ml = _IG_INLINE_LINK_RE.match(t)
+    if ml:
+        return "https://www." + ml.group(1)
     m = _IG_INLINE_RE.match(t)
     if m:
         return m.group(1).lower()
@@ -2970,13 +3460,159 @@ def _ig_article(rid: str, title: str, desc: str, text: str, kb=None, thumb: str 
         reply_markup=kb, **kw)
 
 
+_INLINE_BUILDS: dict[str, asyncio.Task] = {}
+_VIEW_LABELS = {"stories": "истории", "posts": "посты", "avatar": "аватарка"}
+
+
+async def _inline_personal(iq: types.InlineQuery) -> None:
+    """Пустой «ig»: подписки пользователя + недавно просмотренные профили → поделиться в один тап."""
+    try:
+        from instagram_viewer import _ucache_get
+    except Exception:       # pragma: no cover
+        _ucache_get = lambda u: None            # noqa: E731
+    uid = str(iq.from_user.id)
+    subs: dict[str, list[str]] = {}
+    for s in ig_get_subscriptions(uid):
+        subs.setdefault(s["ig_username"], []).append(_VIEW_LABELS.get(s["sub_type"], s["sub_type"]))
+    names = list(subs)
+    for v in _get_my_viewed(uid, 10):
+        if v["username"] not in names:
+            names.append(v["username"])
+    names = names[:25]
+
+    results = []
+    for u in names:
+        link = f"https://instagram.com/{u}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📸 Открыть в Instagram", url=link)]])
+        info = _ucache_get(u)                      # только из кэша — без запросов к IG
+        desc = ("🔔 " + ", ".join(subs[u])) if u in subs else "👁 недавно смотрел"
+        if info:
+            text = _inline_profile_text(info)
+            title = f"{info.get('full_name') or u} (@{u})"
+            thumb = info.get("avatar_url") or None
+        else:
+            text, title, thumb = f'📸 <a href="{link}">@{u}</a> в Instagram', f"@{u}", None
+        results.append(_ig_article(_iq_id("me", u), title, desc, text, kb, thumb=thumb))
+    if not results:
+        results.append(_ig_article(
+            "ig_hint", "📸 Instagram: введи ник или ссылку", "например: ig natgeo  или  ссылка на рилс",
+            "📸 Напиши после имени бота: <code>ig ник</code> или вставь ссылку на пост/рилс"))
+    try:
+        await iq.answer(results, cache_time=5, is_personal=True)
+    except Exception as e:
+        logger.warning(f"inline ig personal: {e}")
+
+
+async def _inline_media_row(bot: Bot, link: str, sc: str) -> dict | None:
+    """Строка ig_file_cache для ссылки: из кэша или скачать → залить в IG_INLINE_STORAGE_CHAT (≤ IG_INLINE_DL_TIMEOUT с)."""
+    row = ig_cache_get(sc) if sc else None
+    if row and row["items"] and len(row["items"]) == row["total"]:
+        return row
+    chat = _inline_storage_chat()
+    if chat is None or not sc:
+        return None
+
+    task = _INLINE_BUILDS.get(sc)
+    if task is None or task.done():
+        async def _build():
+            post = await get_media_by_url(link)
+            if not post or not post.get("media"):
+                return None
+            media = post["media"][:10]
+            files, too_big = await _fetch_media_files(media, limit=10)
+            if not files:
+                return None
+            user = post.get("username", "") or ""
+            music = post.get("music")
+            cap = _post_caption_html(
+                user, post.get("caption") or "", post.get("like_count", 0), post.get("comment_count", 0),
+                extra=(("\n" + _music_line(music)) if music else ""))
+            msgs, complete = await _send_files_safe(_out_chat(bot, chat), files, cap)
+            if (complete and not too_big and len(files) == len(media)
+                    and not any(f["degraded"] or f.get("compressed") for f in files)):
+                items = _cache_items(msgs)
+                for key in {post.get("shortcode") or "", sc} - {""}:
+                    ig_cache_put(key, user, cap, items, len(media))
+                return ig_cache_get(sc)
+            return None
+
+        task = asyncio.ensure_future(_build())
+        _INLINE_BUILDS[sc] = task
+        _BG_TASKS.add(task)
+
+        def _done(t, _sc=sc):
+            _BG_TASKS.discard(t)
+            _INLINE_BUILDS.pop(_sc, None)
+            if not t.cancelled() and t.exception():
+                logger.warning(f"inline media build {_sc}: {t.exception()}")
+        task.add_done_callback(_done)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=IG_INLINE_DL_TIMEOUT)
+    except Exception:
+        return None
+
+
+async def _inline_media(iq: types.InlineQuery, link: str) -> None:
+    """@бот <ссылка на пост/рилс> → видео/фото прямо в чат через CachedVideo/CachedPhoto."""
+    if "/share/" in link:
+        try:
+            real = await asyncio.wait_for(_resolve_share_link(link, timeout=3), timeout=3.5)
+        except Exception:
+            real = None
+        if not real:
+            await iq.answer([_ig_article(
+                _iq_id("shr", link), "📸 Не удалось раскрыть ссылку", "попробуй обычную ссылку на рилс",
+                f'📸 <a href="{link}">Instagram</a>')], cache_time=3, is_personal=True)
+            return
+        link = real
+    sc = _shortcode_from_link(link)
+    row = await _inline_media_row(iq.bot, link, sc)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📸 Открыть в Instagram", url=link)]])
+    results = []
+    if row:
+        items, cap, n = row["items"], row.get("caption") or None, len(row["items"])
+        for i, it in enumerate(items[:10]):
+            rid = _iq_id("m", f"{sc}:{i}")
+            suffix = f" · слайд {i + 1}/{n}" if n > 1 else ""
+            if it.get("kind") == "video":
+                results.append(InlineQueryResultCachedVideo(
+                    id=rid, video_file_id=it["file_id"], title=f"🎬 Видео{suffix}",
+                    description=f"@{row['username']}" if row.get("username") else None,
+                    caption=cap, parse_mode="HTML", reply_markup=kb))
+            else:
+                results.append(InlineQueryResultCachedPhoto(
+                    id=rid, photo_file_id=it["file_id"], title=f"🖼 Фото{suffix}",
+                    description=f"@{row['username']}" if row.get("username") else None,
+                    caption=cap, parse_mode="HTML", reply_markup=kb))
+        cache_time = 60
+    else:
+        if _inline_storage_chat() is None:
+            desc = "для видео в inline задай IG_INLINE_STORAGE_CHAT — пока отправлю ссылку"
+        else:
+            desc = "ролик ещё скачивается — повтори запрос через пару секунд"
+        results.append(_ig_article(
+            _iq_id("pend", sc or link), "⏳ Скачиваю… (или отправить ссылкой)", desc,
+            f'📸 <a href="{link}">Instagram</a>', kb))
+        cache_time = 1
+    try:
+        await iq.answer(results, cache_time=cache_time, is_personal=False)
+    except Exception as e:
+        logger.warning(f"inline ig media answer: {e}")
+
+
 async def inline_instagram(iq: types.InlineQuery):
-    """Inline: `ig natgeo` / `ig:natgeo` / ссылка на профиль → карточка профиля."""
+    """Inline: `ig` → мои подписки; `ig natgeo` / ссылка на профиль → карточка; ссылка на пост/рилс → видео."""
     uname = parse_ig_inline(iq.query)
+    if uname == "":
+        await _inline_personal(iq)
+        return
     if not uname:
-        await iq.answer([_ig_article(
-            "ig_hint", "📸 Instagram: введи ник", "например: ig natgeo",
-            "📸 Напиши после имени бота: <code>ig ник</code>")], cache_time=5, is_personal=True)
+        return
+    if uname.startswith("http"):
+        await _inline_media(iq, uname)
         return
 
     try:
@@ -3046,6 +3682,8 @@ def register_ig_handlers(dp: Dispatcher):
     dp.callback_query.register(callback_ig_highlights,      F.data.startswith("ig_hl:"))
     dp.callback_query.register(callback_ig_highlight_view,  F.data.startswith("ig_hlv:"))
     dp.callback_query.register(callback_ig_posts,           F.data.startswith("ig_posts:"))
+    dp.callback_query.register(callback_ig_carousel,        F.data.startswith("ig_car:"))
+    dp.callback_query.register(callback_ig_music,           F.data.startswith("ig_music:"))
     dp.callback_query.register(callback_ig_sub,             F.data.startswith("ig_sub:"))
     dp.callback_query.register(callback_ig_my_subs,         F.data == "ig_my_subs")
     dp.callback_query.register(callback_ig_related,         F.data.startswith("ig_related:"))
