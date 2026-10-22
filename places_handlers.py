@@ -22,6 +22,7 @@ from collections import OrderedDict
 
 import aiohttp
 from aiogram import F, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     ForceReply, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -126,7 +127,7 @@ def yandex_multi(points: list[tuple[float, float]], center: tuple[float, float])
 def build_query(lat: float, lon: float, radius: int) -> str:
     a = f"(around:{radius},{lat:.6f},{lon:.6f})"
     return (
-        "[out:json][timeout:25];(\n"
+        "[out:json][timeout:18];(\n"
         f'  nwr["amenity"~"^(cafe|restaurant|fast_food)$"]{a};\n'
         f'  nwr["amenity"="pharmacy"]{a};\n'
         f'  nwr["shop"~"^(supermarket|convenience|mall|department_store|general|greengrocer)$"]{a};\n'
@@ -181,17 +182,30 @@ def parse_overpass(data: dict, lat0: float, lon0: float) -> dict[str, list[dict]
     return res
 
 
+async def _overpass_one(session: aiohttp.ClientSession, url: str, query: str) -> dict | None:
+    try:
+        async with session.post(url, data={"data": query}) as r:
+            if r.status == 200:
+                return await r.json(content_type=None)
+            logger.info(f"overpass {url} → HTTP {r.status}")
+    except Exception as e:
+        logger.info(f"overpass {url}: {type(e).__name__}: {e}")
+    return None
+
+
 async def _overpass(query: str) -> dict | None:
-    timeout = aiohttp.ClientTimeout(total=28)
-    async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as s:
-        for url in OVERPASS_MIRRORS:
-            try:
-                async with s.post(url, data={"data": query}, timeout=timeout) as r:
-                    if r.status == 200:
-                        return await r.json(content_type=None)
-                    logger.info(f"overpass {url} → HTTP {r.status}")
-            except Exception as e:
-                logger.info(f"overpass {url}: {type(e).__name__}: {e}")
+    """Опрашивает все зеркала параллельно, берёт первый успешный ответ (общий лимит ~20 с)."""
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}, timeout=timeout) as s:
+        tasks = [asyncio.create_task(_overpass_one(s, u, query)) for u in OVERPASS_MIRRORS]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                res = await fut
+                if res is not None:
+                    return res
+        finally:
+            for t in tasks:
+                t.cancel()
     return None
 
 
@@ -291,16 +305,38 @@ def _kb(tok: str, sr: dict, only: str | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def _safe_edit(status: types.Message, text: str, **kw) -> None:
+    """edit_text, а если сообщение нельзя редактировать — удаляем и шлём новое."""
+    try:
+        await status.edit_text(text, **kw)
+    except TelegramBadRequest as e:
+        if "not modified" in str(e):
+            return
+        logger.info(f"places: edit failed ({e}), sending new message")
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        await status.answer(text, **kw)
+
+
 # ── Основной сценарий ─────────────────────────────────────────────────────────
 async def show_nearby(message: types.Message, lat: float, lon: float,
                       only: str | None = None, label: str = "", user_id: int | None = None) -> bool:
     uid = user_id or (message.from_user.id if message.from_user else 0)
     if uid:
         remember_location(uid, lat, lon)
-    status = await message.reply("🔎 Ищу кафе, аптеки и магазины рядом…", reply_markup=ReplyKeyboardRemove())
+    # ВАЖНО: без reply_markup=ReplyKeyboardRemove — такие сообщения Telegram не даёт редактировать.
+    status = await message.reply("🔎 Ищу кафе, аптеки и магазины рядом…")
+    if message.chat.type == "private":
+        try:  # убираем клавиатуру «Отправить геопозицию» отдельным, сразу удаляемым сообщением
+            rm = await message.answer("⌛", reply_markup=ReplyKeyboardRemove())
+            await rm.delete()
+        except Exception:
+            pass
     found = await search_places(lat, lon)
     if found is None:
-        await status.edit_text("❌ Карты сейчас не отвечают (Overpass). Попробуй через минуту.")
+        await _safe_edit(status, "❌ Карты сейчас не отвечают (Overpass). Попробуй через минуту.")
         return False
     places, radius = found
     sr = {"lat": lat, "lon": lon, "radius": radius, "places": places, "label": label}
@@ -309,10 +345,10 @@ async def show_nearby(message: types.Message, lat: float, lon: float,
     while len(_SEARCHES) > 100:
         _SEARCHES.popitem(last=False)
     if not any(places.values()):
-        await status.edit_text("🤷 В радиусе 3 км по картам ничего не нашлось.")
+        await _safe_edit(status, "🤷 В радиусе 3 км по картам ничего не нашлось.")
         return False
-    await status.edit_text(_summary_text(sr, only), parse_mode="HTML",
-                           reply_markup=_kb(tok, sr, only), disable_web_page_preview=True)
+    await _safe_edit(status, _summary_text(sr, only), parse_mode="HTML",
+                     reply_markup=_kb(tok, sr, only), disable_web_page_preview=True)
     return True
 
 
