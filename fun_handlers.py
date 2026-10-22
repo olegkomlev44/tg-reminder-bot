@@ -1,9 +1,10 @@
 """
 fun_handlers.py — рулетки и выбор.
 
-  /pick кофе или чай, пицца      — выбрать из вариантов (случайный стиль анимации)
+  /pick кофе или чай, пицца      — выбрать из вариантов (случайный стиль анимации из 11)
   /pick Что заказать: пицца, суши — то же, с заголовком
-  /pick -слот|-рулетка|-взлом|-вылет|-прожектор кофе или чай — стиль анимации вручную
+  /pick -слот кофе или чай       — стиль вручную; список: /pick -стили
+  (слот, рулетка, взлом, вылет, прожектор, скачки, карты, лото, бомба, турнир, оракул)
   /who кто моет посуду           — лобби: люди жмут «🙋 Участвую», потом честный жребий
   /who кто моет посуду: Глеб, Дима, Олег — жребий сразу среди названных
   /roll [N | NdM]                — кубик (по умолчанию d6)
@@ -97,8 +98,9 @@ _LOBBIES: dict[str, Lobby] = {}
 
 # ── Анимации ──────────────────────────────────────────────────────────────────
 # Победитель выбирается ЗАРАНЕЕ криптостойким ГСЧ, анимация лишь «докручивается» до него.
-# Стили: слот-машина, рулетка казино, взлом, «на вылет», прожектор.
-# Telegram режет частые edit'ы, поэтому кадров немного (~8–10) и пауза между ними ≥0.5 с.
+# Стили: слот, рулетка, взлом, на вылет, прожектор, скачки, карты, лототрон, бомба, турнир, оракул.
+# Telegram режет частые edit'ы, поэтому кадров немного (~8–12) и пауза между ними ≥0.5 с.
+# Соседние кадры ВСЕГДА различаются (иначе Telegram отвечает «message is not modified»).
 
 async def _safe_edit(msg: types.Message, text: str, reply_markup=None) -> bool:
     try:
@@ -124,100 +126,141 @@ def _head(icon: str, label: str, title: str) -> str:
 
 def _intro_text(title: str) -> str:
     t = f"\n<b>{_esc(_cut(title, 70))}</b>" if title else ""
-    return f"🎲 <b>Готовим розыгрыш…</b>{t}\n\n🎰 · 🎡 · 🎲"
+    return f"🎲 <b>Готовим розыгрыш…</b>{t}\n\n🎰 · 🎡 · 🃏 · 🎱 · 🔮"
 
 
-# 1) 🎰 Слот-машина: три барабана с символами по очереди «встают» на 7️⃣, в окне крутятся варианты
+def _hop_seq(n: int, idx: int, hops: int) -> list[int]:
+    """Хаотичные прыжки курсора: соседние кадры различаются, последний — победитель."""
+    seq: list[int] = []
+    prev_ = -1
+    for k in range(hops):
+        if k == hops - 1:
+            cur = idx
+        else:
+            cur = _RNG.randrange(n)
+            while cur == prev_ or (k == hops - 2 and cur == idx and n > 2):
+                cur = _RNG.randrange(n)
+        seq.append(cur)
+        prev_ = cur
+    return seq
+
+
+# 1) 🎰 Слот-машина: рычаг → размытие → три барабана по очереди встают на 7️⃣ → джекпот
 _SLOT_SYMS = ["🍒", "🍋", "🔔", "🍇", "💎", "⭐", "🍀", "🎲", "🍉"]
 
 
 async def _anim_slot(msg, options, title, idx):
     n = len(options)
-    delays = [0.5, 0.5, 0.5, 0.55, 0.65, 0.8, 0.9, 1.0, 1.1, 1.25]
+    delays = [0.6, 0.5, 0.5, 0.5, 0.55, 0.65, 0.8, 0.9, 1.0, 1.1, 1.25, 0.6]
     frames = len(delays)
-    stops = (5, 7, 9)                      # на каком кадре «встаёт» каждый барабан
+    stops = (6, 8, 10)                       # кадры, на которых встают барабаны
     for k in range(frames):
         pos = (idx - (frames - 1 - k)) % n
         locked = sum(k >= s for s in stops)
-        syms = ["7️⃣" if i < locked else _RNG.choice(_SLOT_SYMS) for i in range(3)]
+        blur = k < 3
+        syms = []
+        for i in range(3):
+            if i < locked:
+                syms.append("7️⃣")
+            elif blur:
+                syms.append(_RNG.choice(["💫", "🌀", "✨"]))
+            else:
+                syms.append(_RNG.choice(_SLOT_SYMS))
+        if k == 0:
+            status = "🕹 дёргаем рычаг…"
+        elif locked == 3:
+            status = "💥 <b>ДЖЕКПОТ!</b> 💥"
+        elif locked:
+            status = f"🔒 встало барабанов: {locked}/3"
+        else:
+            status = "🌀 крутится…"
+        lamps = "💡🔴" * 4 if k % 2 == 0 else "🔴💡" * 4
         prev_, cur, nxt = options[(pos - 1) % n], options[pos % n], options[(pos + 1) % n]
         text = (
             _head("🎰", "СЛОТ-МАШИНА", title)
+            + f"{lamps}\n"
             + f"【 {syms[0]} │ {syms[1]} │ {syms[2]} 】\n"
             + "━━━━━━━━━━━━━━\n"
             + f"<code>   {_esc(_cut(prev_))}</code>\n"
             + f"▶️ <b>{_esc(_cut(cur))}</b> ◀️\n"
             + f"<code>   {_esc(_cut(nxt))}</code>\n"
-            + "━━━━━━━━━━━━━━"
-            + ("\n\n💥 <b>ДЖЕКПОТ!</b>" if locked == 3 else "")
+            + "━━━━━━━━━━━━━━\n"
+            + f"<i>{status}</i>"
         )
         await _safe_edit(msg, text)
         await asyncio.sleep(delays[k])
 
 
-# 2) 🎡 Рулетка казино: цветная лента, большие прыжки в начале (скорость), затем замедление и «подскок шарика»
+# 2) 🎡 Рулетка казино: ставки → быстрый разгон → замедление → подскок шарика → 🟩
 async def _anim_roulette(msg, options, title, idx):
     n = len(options)
 
     def color(i: int) -> str:
         return "🟥" if i % 2 == 0 else "⬛"
 
-    # смещения относительно победителя: чем больше шаг — тем быстрее вращение
-    offsets = [-29, -22, -16, -11, -7, -4, -2, 1, -1, 0]
-    delays = [0.5, 0.5, 0.55, 0.65, 0.8, 0.95, 1.1, 0.9, 0.9, 1.0]
-    notes = ["набираем скорость", "набираем скорость", "крутится", "крутится", "замедляется",
-             "замедляется", "почти…", "шарик подпрыгнул…", "шарик колеблется…", "СТОП!"]
+    offsets = [None, -31, -24, -18, -13, -9, -6, -3, -2, 2, -1, 0]
+    delays = [0.8, 0.5, 0.5, 0.55, 0.65, 0.8, 0.95, 1.05, 1.0, 0.9, 0.9, 0.8]
+    notes = ["ставки сделаны, ставок больше нет", "разгоняем колесо", "разгоняем колесо", "крутится",
+             "крутится", "замедляется", "замедляется", "почти…", "шарик скачет…",
+             "шарик подпрыгнул…", "шарик колеблется…", "СТОП!"]
     for k, off in enumerate(offsets):
-        pos = (idx + off) % n
+        pos = (idx + (off or 0)) % n
+        last = k == len(offsets) - 1
         cells = []
         for d in range(-4, 5):
-            c = color((pos + d) % n)
+            c = "🟩" if (last and d == 0) else color((pos + d) % n)
             cells.append(f"【{c}】" if d == 0 else c)
-        ball = "⚪" if k < len(offsets) - 1 else "🔴"
+        ball = "🟢" if last else ("🎱" if k else "💰")
+        l_name = _esc(_cut(options[(pos - 1) % n], 12))
+        r_name = _esc(_cut(options[(pos + 1) % n], 12))
         text = (
             _head("🎡", "РУЛЕТКА", title)
             + "".join(cells) + "\n"
-            + f"{ball} <b>{_esc(_cut(options[pos]))}</b>  <i>(№{pos % n + 1})</i>\n\n"
+            + f"{ball} <b>{_esc(_cut(options[pos]))}</b>  <i>(№{pos + 1})</i>\n"
+            + f"<code>◂ {l_name} · {r_name} ▸</code>\n\n"
             + f"<i>{'◐◓◑◒'[k % 4]} {notes[k]}</i>"
         )
         await _safe_edit(msg, text)
         await asyncio.sleep(delays[k])
 
 
-# 3) 🕶 Взлом: буквы-«шум» постепенно расшифровываются в имя победителя
+# 3) 🕶 Взлом: терминал с логами, буквы-«шум» расшифровываются в имя победителя
 _GLYPHS = "█▓▒░#$%&@*+=?<>/\\|0123456789"
+_HACK_LOGS = ["подключаюсь к серверу…", "порт 443 открыт", "обход фаервола", "инъекция пакета",
+              "перебор ключей 2048 bit", "хеш найден", "расшифровка блока", "ключ подошёл"]
 
 
 async def _anim_hack(msg, options, title, idx):
     winner = _cut(options[idx], 28)
-    frames = 9
+    frames = 10
     order = [i for i, ch in enumerate(winner) if ch != " "]
     _RNG.shuffle(order)
-    states = ["сканирую порты…", "подбираю ключ…", "обхожу фаервол…", "ломаю шифр…",
-              "расшифровываю…", "расшифровываю…", "почти готово…", "последние байты…", "ДОСТУП ОТКРЫТ"]
     for k in range(frames):
         reveal = set(order[: round(len(order) * k / (frames - 1))])
         s = "".join(ch if (i in reveal or ch == " ") else _RNG.choice(_GLYPHS)
                     for i, ch in enumerate(winner))
         pct = int(100 * k / (frames - 1))
-        bar = "▰" * round(10 * pct / 100) + "▱" * (10 - round(10 * pct / 100))
+        filled = round(10 * pct / 100)
+        bar = "▰" * filled + "▱" * (10 - filled)
+        logs = _HACK_LOGS[max(0, min(k, len(_HACK_LOGS) - 1) - 2): min(k, len(_HACK_LOGS) - 1) + 1]
+        log_txt = "\n".join(f"[✓] {l}" for l in logs)
+        done = k == frames - 1
         text = (
             _head("🕶", "ВЗЛОМ СИСТЕМЫ", title)
-            + f"<code>&gt; {_esc(s)}</code>\n\n"
+            + f"<code>$ crack --target pick\n{_esc(log_txt)}\n&gt; {_esc(s)}</code>\n\n"
             + f"<code>{bar} {pct}%</code>\n"
-            + f"<i>{states[k]}</i>"
+            + ("🔓 <b>ДОСТУП ОТКРЫТ</b>" if done else "<i>🔐 идёт расшифровка…</i>")
         )
         await _safe_edit(msg, text)
-        await asyncio.sleep(0.75 if k < frames - 1 else 0.3)
+        await asyncio.sleep(0.7 if not done else 0.3)
 
 
-# 4) ⚔️ На вылет: варианты зачёркиваются по одному, остаётся последний выживший
+# 4) ⚔️ На вылет: варианты выбывают по одному/пачками, финал «один на один»
 async def _anim_duel(msg, options, title, idx):
     n = len(options)
     losers = [i for i in range(n) if i != idx]
     _RNG.shuffle(losers)
     frames = min(len(losers), 8)
-    # делим вылетающих на frames примерно равных пачек
     chunks, start = [], 0
     for f in range(frames):
         size = len(losers) // frames + (1 if f < len(losers) % frames else 0)
@@ -235,32 +278,32 @@ async def _anim_duel(msg, options, title, idx):
                 lines.append(f"👑 <b>{_esc(_cut(o))}</b>")
             else:
                 lines.append(f"🟢 {_esc(_cut(o))}")
-        tail = "остался один!" if alive == 1 else f"осталось в живых: <b>{alive}</b>"
+        if len(chunk) <= 3:
+            event = "💥 выбыл: " + ", ".join(f"<b>{_esc(_cut(options[i], 16))}</b>" for i in chunk)
+        else:
+            event = f"💥 выбыло сразу: <b>{len(chunk)}</b>"
+        if alive == 1:
+            tail = "👑 <b>остался один!</b>"
+        elif alive == 2:
+            tail = f"{event}\n⚡ остались двое — финал!"
+        else:
+            tail = f"{event}\nв живых: <b>{alive}</b>"
         text = _head("⚔️", "НА ВЫЛЕТ", title) + "\n".join(lines) + f"\n\n<i>{tail}</i>"
         await _safe_edit(msg, text)
         await asyncio.sleep(0.9 + 0.1 * k)
 
 
-# 5) 💡 Прожектор: лампочка прыгает по вариантам хаотично, прыжки редеют — как в «Поле чудес»
+# 5) 💡 Прожектор: лампочка хаотично прыгает по вариантам, прыжки редеют
 async def _anim_spot(msg, options, title, idx):
     n = len(options)
-    hops = 10
-    seq: list[int] = []
-    prev_ = -1
-    for k in range(hops):
-        if k == hops - 1:
-            cur = idx
-        else:
-            cur = _RNG.randrange(n)
-            while cur == prev_ or (k == hops - 2 and cur == idx and n > 2):
-                cur = _RNG.randrange(n)
-        seq.append(cur)
-        prev_ = cur
-    delays = [0.5, 0.5, 0.55, 0.6, 0.7, 0.8, 0.9, 1.0, 1.15, 1.3]
+    seq = _hop_seq(n, idx, 11)
+    delays = [0.45, 0.45, 0.5, 0.55, 0.6, 0.7, 0.8, 0.9, 1.05, 1.2, 1.3]
     for k, cur in enumerate(seq):
+        last = k == len(seq) - 1
         bulbs = ("💡⚫" * 5) if k % 2 == 0 else ("⚫💡" * 5)
+        lamp = "🌟" if last else "💡"
         lines = [
-            f"💡 <b>{_esc(_cut(o))}</b>" if i == cur else f"▫️ {_esc(_cut(o))}"
+            f"{lamp} <b>{_esc(_cut(o))}</b>" if i == cur else f"▫️ {_esc(_cut(o))}"
             for i, o in enumerate(options)
         ]
         text = _head("💡", "ПРОЖЕКТОР", title) + bulbs + "\n" + "\n".join(lines) + "\n" + bulbs
@@ -268,12 +311,186 @@ async def _anim_spot(msg, options, title, idx):
         await asyncio.sleep(delays[k])
 
 
+# 6) 🏇 Скачки: у каждого варианта своя дорожка, победитель первым пересекает финиш
+async def _anim_race(msg, options, title, idx):
+    n = len(options)
+    L = 12 if n <= 8 else 8
+    F = 10
+    icons = ["🐎", "🏎", "🚀", "🐢", "🦄", "🛵", "🐇", "🚲"]
+    traj: list[list[int]] = []
+    for i in range(n):
+        pos, last = [], 0
+        sp = _RNG.uniform(0.75, 1.1)
+        for k in range(F):
+            if i == idx:
+                t = L if k == F - 1 else int(L * (k + 1) / F + _RNG.uniform(-1.5, 1.0))
+                t = L if k == F - 1 else max(last, min(L - 1, t))
+            else:
+                t = int((L - 1) * (k + 1) / F * sp + _RNG.uniform(-1, 1))
+                t = max(last, min(L - 1, t))
+            pos.append(t)
+            last = t
+        traj.append(pos)
+    notes = ["🚦 старт!", "🚦 пошли!", "🏃 набирают ход", "🏃 набирают ход", "🔥 борьба идёт",
+             "🔥 борьба идёт", "📣 финиш близко!", "📣 финиш близко!", "🏁 последний рывок!", "🏆 ФИНИШ!"]
+    for k in range(F):
+        lines = []
+        for i, o in enumerate(options):
+            p = traj[i][k]
+            won = (k == F - 1 and i == idx)
+            icon = "🏆" if won else icons[i % len(icons)]
+            name = f"<b>{_esc(_cut(o, 14))}</b>" if won else _esc(_cut(o, 14))
+            lines.append(f"{'┈' * p}{icon}{'┈' * (L - p)}🏁 {name}")
+        text = (_head("🏇", "СКАЧКИ", title) + "\n".join(lines)
+                + f"\n\n<i>{notes[k]} {'▸' * (k + 1)}</i>")
+        await _safe_edit(msg, text)
+        await asyncio.sleep(0.85 if k < F - 1 else 0.3)
+
+
+# 7) 🃏 Карты: тасуем колоду, тянем карту, переворачиваем — на лице имя победителя
+async def _anim_cards(msg, options, title, idx):
+    n = len(options)
+    suits = ["♠️", "♥️", "♦️", "♣️"]
+    pre = [
+        ("🂠 🂠 🂠 🂠 🂠", "🃏 тасуем колоду…"),
+        ("🂠🂠🂠🂠🂠🂠🂠", "🃏 тасуем колоду…"),
+        ("🂠  🂠  🂠  🂠", "✂️ снимаем…"),
+        ("🂠 🂠 🂠", "👆 тянем карту…"),
+        ("     🂠 ⟶", "👆 тянем карту…"),
+    ]
+    for k, (row, note) in enumerate(pre):
+        await _safe_edit(msg, _head("🃏", "КАРТЫ", title) + f"{row}\n\n<i>{note} {'▸' * (k + 1)}</i>")
+        await asyncio.sleep(0.7)
+    flicker_prev = -1
+    for k in range(4):
+        j = _RNG.randrange(n)
+        while j == flicker_prev and n > 1:
+            j = _RNG.randrange(n)
+        flicker_prev = j
+        s = suits[k % 4]
+        text = (_head("🃏", "КАРТЫ", title)
+                + f"🎴 карта переворачивается…\n\n{s} <i>{_esc(_cut(options[j]))}</i> {s}"
+                + f"\n\n<i>{'▸' * (6 + k)}</i>")
+        await _safe_edit(msg, text)
+        await asyncio.sleep(0.65 + 0.15 * k)
+    s = _RNG.choice(suits)
+    await _safe_edit(msg, _head("🃏", "КАРТЫ", title)
+                     + f"🂡 <b>ТУЗ!</b>\n\n{s} <b>{_esc(_cut(options[idx]))}</b> {s}")
+    await asyncio.sleep(0.5)
+
+
+# 8) 🎱 Лототрон: шарики в барабане перемешиваются, один выкатывается с номером
+_BALLS = ["🔴", "🟡", "🟢", "🔵", "🟣", "🟠", "⚪"]
+
+
+async def _anim_lotto(msg, options, title, idx):
+    def drum(note: str, spout: str = "", k: int = 0) -> str:
+        rows = ["┃ " + " ".join(_RNG.choice(_BALLS) for _ in range(3)) + " ┃" for _ in range(3)]
+        return (_head("🎱", "ЛОТОТРОН", title)
+                + "╭━━━━━━━╮\n" + "\n".join(rows) + "\n╰━━━┳━━━╯\n"
+                + f"      {spout or '┃'}\n\n<i>{note} {'▸' * (k + 1)}</i>")
+
+    for k in range(7):
+        await _safe_edit(msg, drum("барабан крутится…", k=k))
+        await asyncio.sleep(0.55 + 0.05 * k)
+    await _safe_edit(msg, drum("шар покатился…", "⚪", 7))
+    await asyncio.sleep(0.8)
+    await _safe_edit(msg, drum("вылетает!", "🎱", 8))
+    await asyncio.sleep(0.9)
+    await _safe_edit(msg, _head("🎱", "ЛОТОТРОН", title)
+                     + f"🎱 <b>шар №{idx + 1}</b>\n\n<b>{_esc(_cut(options[idx]))}</b>")
+    await asyncio.sleep(0.5)
+
+
+# 9) 💣 Горячая картошка: бомба перелетает от варианта к варианту, фитиль горит, БУМ!
+async def _anim_bomb(msg, options, title, idx):
+    n = len(options)
+    hops = 9
+    seq = _hop_seq(n, idx, hops)
+    delays = [0.5, 0.5, 0.55, 0.6, 0.7, 0.8, 0.95, 1.1, 1.3]
+    for k, cur in enumerate(seq):
+        last = k == hops - 1
+        fuse = f"🧨{'━' * (hops - 1 - k)}{'💥' if last else '🔥'}"
+        lines = []
+        for i, o in enumerate(options):
+            if i == cur:
+                lines.append(f"{'💥' if last else '💣'} <b>{_esc(_cut(o))}</b>")
+            else:
+                lines.append(f"▫️ {_esc(_cut(o))}")
+        note = "💥 БА-БАХ!" if last else ("😰 сейчас рванёт…" if k >= hops - 3 else "💨 бомба летит дальше!")
+        text = _head("💣", "ГОРЯЧАЯ КАРТОШКА", title) + fuse + "\n\n" + "\n".join(lines) + f"\n\n<i>{note}</i>"
+        await _safe_edit(msg, text)
+        await asyncio.sleep(delays[k])
+
+
+# 10) 🏟 Турнир: сетка плей-офф, в каждом раунде пары, победитель идёт дальше
+async def _anim_cup(msg, options, title, idx):
+    n = len(options)
+    cur = list(range(n))
+    _RNG.shuffle(cur)
+    rnd = 0
+    while len(cur) > 1:
+        rnd += 1
+        pairs, nxt, bye = [], [], None
+        for a, b in zip(cur[0::2], cur[1::2]):
+            w = idx if idx in (a, b) else _RNG.choice((a, b))
+            pairs.append((a, b, w))
+            nxt.append(w)
+        if len(cur) % 2:
+            bye = cur[-1]
+            nxt.append(bye)
+        label = {2: "ФИНАЛ", 4: "ПОЛУФИНАЛ", 8: "1/4 ФИНАЛА", 16: "1/8 ФИНАЛА"}.get(len(cur), f"РАУНД {rnd}")
+        lines = []
+        for a, b, w in pairs:
+            na, nb = _esc(_cut(options[a], 13)), _esc(_cut(options[b], 13))
+            lines.append(f"<b>{na}</b> ⚔ <s>{nb}</s> ✅" if w == a else f"<s>{na}</s> ⚔ <b>{nb}</b> ✅")
+        if bye is not None:
+            lines.append(f"🎟 <b>{_esc(_cut(options[bye], 13))}</b> — проходит без боя")
+        text = _head("🏟", "ТУРНИР", title) + f"<b>{label}</b>\n" + "\n".join(lines) \
+            + f"\n\n<i>дальше: {len(nxt)}</i>"
+        await _safe_edit(msg, text)
+        await asyncio.sleep(1.2 if len(cur) > 2 else 1.5)
+        cur = nxt
+
+
+# 11) 🔮 Шар-оракул: туман, мерцающие имена, духи сходятся на одном ответе
+async def _anim_oracle(msg, options, title, idx):
+    n = len(options)
+    mist = "✧･ﾟ:*˙·"
+    frames = 9
+    prev_ = -1
+    for k in range(frames):
+        fog = "".join(_RNG.choice(mist) for _ in range(14))
+        if k == frames - 1:
+            body = f"🔮 <b>{_esc(_cut(options[idx]))}</b>"
+            note = "✨ духи сказали своё слово"
+        else:
+            j = _RNG.randrange(n)
+            while j == prev_ and n > 1:
+                j = _RNG.randrange(n)
+            prev_ = j
+            fade = "<i>" if k < frames - 3 else "<b>"
+            fade_c = "</i>" if k < frames - 3 else "</b>"
+            body = f"🔮 {fade}{_esc(_cut(options[j]))}{fade_c}"
+            note = ("🌫 духи совещаются…", "🌫 духи совещаются…", "🌫 туман сгущается…")[k % 3] if k < frames - 3 \
+                else "🌟 ответ проступает…"
+        text = _head("🔮", "ОРАКУЛ", title) + f"{fog}\n{body}\n{fog[::-1]}\n\n<i>{note} {'▸' * (k + 1)}</i>"
+        await _safe_edit(msg, text)
+        await asyncio.sleep(0.6 + 0.08 * k)
+
+
 STYLES = {
-    "slot":     ("🎰", "слот-машина",   _anim_slot),
-    "roulette": ("🎡", "рулетка",       _anim_roulette),
-    "hack":     ("🕶", "взлом",         _anim_hack),
-    "duel":     ("⚔️", "на вылет",      _anim_duel),
-    "spot":     ("💡", "прожектор",     _anim_spot),
+    "slot":     ("🎰", "слот-машина",       _anim_slot),
+    "roulette": ("🎡", "рулетка",           _anim_roulette),
+    "hack":     ("🕶", "взлом",             _anim_hack),
+    "duel":     ("⚔️", "на вылет",          _anim_duel),
+    "spot":     ("💡", "прожектор",         _anim_spot),
+    "race":     ("🏇", "скачки",            _anim_race),
+    "cards":    ("🃏", "карты",             _anim_cards),
+    "lotto":    ("🎱", "лототрон",          _anim_lotto),
+    "bomb":     ("💣", "горячая картошка",  _anim_bomb),
+    "cup":      ("🏟", "турнир",            _anim_cup),
+    "oracle":   ("🔮", "оракул",            _anim_oracle),
 }
 _STYLE_ALIASES = {
     "slot": "slot", "слот": "slot", "slots": "slot", "слоты": "slot", "автомат": "slot",
@@ -281,14 +498,30 @@ _STYLE_ALIASES = {
     "hack": "hack", "взлом": "hack", "хак": "hack",
     "duel": "duel", "battle": "duel", "вылет": "duel", "дуэль": "duel", "битва": "duel",
     "spot": "spot", "light": "spot", "свет": "spot", "прожектор": "spot", "лампочка": "spot",
+    "race": "race", "скачки": "race", "гонка": "race", "гонки": "race",
+    "cards": "cards", "card": "cards", "карты": "cards", "карта": "cards",
+    "lotto": "lotto", "лото": "lotto", "лототрон": "lotto", "шары": "lotto", "барабан": "lotto",
+    "bomb": "bomb", "бомба": "bomb", "картошка": "bomb", "бум": "bomb",
+    "cup": "cup", "турнир": "cup", "tournament": "cup", "bracket": "cup", "плейофф": "cup",
+    "oracle": "oracle", "оракул": "oracle", "шар": "oracle", "магия": "oracle", "ball": "oracle",
+    "random": "random", "рандом": "random", "любой": "random",
+    "list": "list", "стили": "list", "styles": "list", "help": "list",
 }
-_LAST_STYLE: list[str] = []          # последний стиль — чтобы подряд не повторялся
+_LAST_STYLE: list[str] = []          # последние стили — чтобы подряд не повторялись
+
+
+def _styles_help() -> str:
+    lines = [f"{ic} <code>-{key}</code> — {label}" for key, (ic, label, _) in STYLES.items()]
+    return ("🎨 <b>Стили анимации /pick</b>\n" + "\n".join(lines)
+            + "\n\nПример: <code>/pick -слот кофе или чай</code>\nБез флага стиль случайный.")
 
 
 def _pick_style(requested: str | None = None, avoid: str | None = None) -> str:
     if requested in STYLES:
         return requested
-    bad = {avoid} if avoid else set(_LAST_STYLE[-1:])
+    bad = set(_LAST_STYLE[-2:])
+    if avoid:
+        bad.add(avoid)
     pool = [k for k in STYLES if k not in bad] or list(STYLES)
     key = _RNG.choice(pool)
     _LAST_STYLE.append(key)
@@ -305,23 +538,26 @@ def _extract_style_flag(text: str) -> tuple[str | None, str]:
 
 
 async def _finale(msg, title: str, winner: str):
-    """Короткая «вспышка» победы перед итоговым сообщением."""
+    """Салют победы перед итоговым сообщением."""
     t = f"<b>{_esc(_cut(title, 70))}</b>\n\n" if title else ""
+    w = _esc(_cut(winner, 50))
     frames = [
-        "🎉✨🎊✨🎉✨🎊✨🎉",
-        "✨🎊✨🎉✨🎊✨🎉✨",
-        "🎊🎉🎊🎉🎊🎉🎊🎉🎊",
+        ("💫 · · · · · · · 💫", f"{t}❓ <b>…</b>"),
+        ("🎆 ✨ 🎇 ✨ 🎆 ✨ 🎇", f"{t}👑 <b>{w}</b>"),
+        ("🎉✨🎊✨🎉✨🎊✨🎉", f"{t}🏆 <b>ПОБЕДИТЕЛЬ!</b>\n👑 <b>{w}</b>"),
+        ("🎊🎉🎊🎉🎊🎉🎊🎉🎊", f"{t}🏆 <b>ПОБЕДИТЕЛЬ!</b>\n👑 <b>{w}</b>"),
     ]
-    for fr in frames:
-        await _safe_edit(msg, f"{fr}\n\n{t}👑 <b>{_esc(_cut(winner, 50))}</b>\n\n{fr}")
-        await asyncio.sleep(0.6)
+    for fr, body in frames:
+        await _safe_edit(msg, f"{fr}\n\n{body}\n\n{fr}")
+        await asyncio.sleep(0.55)
 
 
 async def spin(msg: types.Message, options: list[str], title: str,
                winner_idx: int | None = None, style: str | None = None) -> int:
     """
     Крутит анимацию редактированием сообщения и возвращает индекс победителя.
-    style: slot | roulette | hack | duel | spot (None — случайный, не такой же как прошлый).
+    style: slot|roulette|hack|duel|spot|race|cards|lotto|bomb|cup|oracle
+    (None — случайный, не повторяющий последние).
     """
     n = len(options)
     idx = _RNG.randrange(n) if winner_idx is None else winner_idx
@@ -336,20 +572,26 @@ async def spin(msg: types.Message, options: list[str], title: str,
     return idx
 
 
-def _again_kb(tok: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔁 Ещё раз (новый стиль)", callback_data=f"fun:again:{tok}")
-    ]])
+def _again_kb(tok: str, current: str = "") -> InlineKeyboardMarkup:
+    """«Ещё раз» + кнопки выбора стиля (текущий отмечен ✔️)."""
+    rows = [[InlineKeyboardButton(text="🔁 Ещё раз (новый стиль)", callback_data=f"fun:again:{tok}")]]
+    btns = [InlineKeyboardButton(text=("✔️" if k == current else ic), callback_data=f"fun:st:{tok}:{k}")
+            for k, (ic, _l, _f) in STYLES.items()]
+    for i in range(0, len(btns), 6):
+        rows.append(btns[i:i + 6])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _result_text(title: str, winner: str, mention: str | None = None, style_label: str = "") -> str:
+def _result_text(title: str, winner: str, mention: str | None = None,
+                 style_label: str = "", n: int = 0) -> str:
     who = mention or f"<b>{_esc(winner)}</b>"
     head = f"🏆 <b>{_esc(title)}</b>\n\n" if title else "🏆 <b>Выпало:</b>\n\n"
     line = "━━━━━━━━━━━━━━"
+    odds = f"🎯 шанс каждого: 1 из {n} ({100 / n:.0f}%)\n" if n >= 2 else ""
     tail = "🎲 жребий криптостойким ГСЧ — подтасовать нельзя"
     if style_label:
         tail = f"{style_label} · {tail}"
-    return f"{head}{line}\n👑 {who}\n{line}\n\n<i>{tail}</i>"
+    return f"{head}{line}\n👑 {who}\n{line}\n\n{odds}<i>{tail}</i>"
 
 
 async def run_pick(message: types.Message, options: list[str], title: str = "",
@@ -358,7 +600,8 @@ async def run_pick(message: types.Message, options: list[str], title: str = "",
     options = [o for o in options if o][:MAX_OPTIONS]
     if len(options) < 2:
         await message.reply(
-            "🎲 Нужно минимум 2 варианта.\nПример: <code>/pick кофе или чай, пицца</code>",
+            "🎲 Нужно минимум 2 варианта.\nПример: <code>/pick кофе или чай, пицца</code>\n"
+            "Список стилей: <code>/pick -стили</code>",
             parse_mode="HTML")
         return False
     msg = await message.reply(_intro_text(title), parse_mode="HTML")
@@ -367,7 +610,8 @@ async def run_pick(message: types.Message, options: list[str], title: str = "",
     idx = await spin(msg, options, title, style=key)
     tok = _remember_pick(options, title, forced=style, last=key)
     icon, label, _ = STYLES[key]
-    await _safe_edit(msg, _result_text(title, options[idx], style_label=f"{icon} {label}"), _again_kb(tok))
+    await _safe_edit(msg, _result_text(title, options[idx], style_label=f"{icon} {label}", n=len(options)),
+                     _again_kb(tok, key))
     return True
 
 
@@ -377,12 +621,16 @@ async def cmd_pick(message: types.Message):
     if not arg and message.reply_to_message:
         arg = message.reply_to_message.text or message.reply_to_message.caption or ""
     style, arg = _extract_style_flag(arg)
+    if style == "list":
+        await message.reply(_styles_help(), parse_mode="HTML")
+        return
+    if style == "random":
+        style = None
     title, options = split_title_and_options(arg)
     await run_pick(message, options, title, style=style)
 
 
-async def callback_again(callback: types.CallbackQuery):
-    tok = (callback.data or "").split(":", 2)[-1]
+async def _rerun(callback: types.CallbackQuery, tok: str, requested: str | None):
     data = _PICKS.get(tok)
     if not data:
         await callback.answer("Это уже устарело — запусти заново", show_alert=True)
@@ -394,14 +642,28 @@ async def callback_again(callback: types.CallbackQuery):
     data["busy"] = True
     try:
         msg = callback.message
-        key = _pick_style(data.get("forced"), avoid=data.get("last"))
+        key = _pick_style(requested or data.get("forced"), avoid=data.get("last"))
         data["last"] = key
         idx = await spin(msg, data["options"], data["title"], style=key)
         icon, label, _ = STYLES[key]
         await _safe_edit(msg, _result_text(data["title"], data["options"][idx],
-                                           style_label=f"{icon} {label}"), _again_kb(tok))
+                                           style_label=f"{icon} {label}", n=len(data["options"])),
+                         _again_kb(tok, key))
     finally:
         data["busy"] = False
+
+
+async def callback_again(callback: types.CallbackQuery):
+    tok = (callback.data or "").split(":", 2)[-1]
+    await _rerun(callback, tok, None)
+
+
+async def callback_style(callback: types.CallbackQuery):
+    parts = (callback.data or "").split(":")          # fun:st:<tok>:<style>
+    if len(parts) != 4 or parts[3] not in STYLES:
+        await callback.answer("Неизвестный стиль", show_alert=True)
+        return
+    await _rerun(callback, parts[2], parts[3])
 
 
 # ── /who — лобби ──────────────────────────────────────────────────────────────
@@ -476,7 +738,7 @@ async def _finish_lobby(msg: types.Message, tok: str):
     lb.finished = True
     winner = people[idx]
     await _safe_edit(
-        msg, _result_text(lb.question, winner.name, _user_link(winner)),
+        msg, _result_text(lb.question, winner.name, _user_link(winner), n=len(people)),
         InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="🔁 Ещё раз (те же)", callback_data=f"who:redo:{tok}")]]),
     )
@@ -645,6 +907,7 @@ def register_fun_handlers(dp):
     dp.message.register(cmd_roll, Command("roll", "dice"))
     dp.message.register(cmd_coin, Command("coin", "flip"))
     dp.callback_query.register(callback_again, F.data.startswith("fun:again:"))
+    dp.callback_query.register(callback_style, F.data.startswith("fun:st:"))
     dp.callback_query.register(callback_who_join, F.data.startswith("who:join:"))
     dp.callback_query.register(callback_who_leave, F.data.startswith("who:leave:"))
     dp.callback_query.register(callback_who_duty, F.data.startswith("who:duty:"))
