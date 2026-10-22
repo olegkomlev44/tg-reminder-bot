@@ -83,6 +83,11 @@ IG_POSTS_CHECK_AMOUNT = int(os.getenv("IG_POSTS_CHECK_AMOUNT", "5"))
 # Если media_count не менялся — посты не тянем, но не реже, чем раз в N сек
 # (страховка от «удалили один и выложили другой» — счётчик тот же)
 IG_POSTS_FORCE_EVERY  = int(os.getenv("IG_POSTS_FORCE_EVERY", str(6 * 3600)))
+# Устаревшая карточка: сколько дней держим копию профиля в БД, чтобы показать её,
+# когда Instagram не отвечает
+IG_STALE_MAX_DAYS     = int(os.getenv("IG_STALE_MAX_DAYS", "30"))
+# Эскалация кэша «не найден»: 1-й раз, 2-й раз, 3-й и дальше (сек)
+IG_NOTFOUND_TTLS      = (300, 3600, 86400)
 # Сколько хранить кэш Telegram file_id
 IG_FILE_CACHE_DAYS    = int(os.getenv("IG_FILE_CACHE_DAYS", "60"))
 
@@ -687,6 +692,29 @@ class _AccountPool:
         logger.info(f"[pool] ✅ reload_client {login}: клиент заменён и протестирован")
         return True, "Клиент успешно перезагружен и протестирован"
 
+    # ── пометки живой / мёртвой сессии (health-check и ручные проверки) ───────
+
+    def _idx_of(self, login: str) -> Optional[int]:
+        return next((i for i, (l, _) in enumerate(self._accounts) if l == login), None)
+
+    def mark_dead(self, login: str) -> bool:
+        """Пометить сессию мёртвой (с отметкой времени — иначе _usable() её не исключит).
+        True — раньше она мёртвой не считалась (стоит слать алерт)."""
+        first = login not in self._known_dead
+        self._known_dead.add(login)
+        self._dead_ts[login] = time.time()
+        idx = self._idx_of(login)
+        if idx is not None and self._clients and idx == self._current % len(self._clients):
+            self._rotate_from(idx)
+        return first
+
+    def mark_alive(self, login: str) -> bool:
+        """Снять пометку «мёртвая». True — сессия действительно ожила."""
+        was = login in self._known_dead
+        self._known_dead.discard(login)
+        self._dead_ts.pop(login, None)
+        return was
+
     # ── выполнение запроса с ротацией ────────────────────────────────────────
 
     async def run(self, fn, *args, retries: int | None = None, prio: int | None = None, **kwargs):
@@ -870,6 +898,9 @@ def get_sessions_status() -> list[dict]:
             "is_current": total > 0 and (i == _POOL._current % total),
             "requests": _POOL._request_counts.get(i, 0),
             "limited_for": max(0, int(_POOL._rate_limited_until.get(i, 0) - now)),
+            "dead": login in _POOL._known_dead,
+            "dead_for": int(now - _POOL._dead_ts.get(login, now)) if login in _POOL._known_dead else 0,
+            "proxy": bool(getattr(getattr(cl, "private", None), "proxies", None)) if cl is not None else False,
         })
     return result
 
@@ -901,11 +932,17 @@ def get_pool_health(window: int = 3600) -> dict:
     }
 
 
-async def validate_session(login: str) -> bool:
+async def validate_session(login: str, strict: bool = True) -> bool:
     """
-    Проверить что сессия для login работает.
-    Делает лёгкий запрос к профилю самого аккаунта.
-    Используется в /ig_refresh для подтверждения новых кук.
+    Проверить, что сессия для login реально авторизована.
+    Раньше дёргали user_info_by_username(login): он сначала идёт публичным запросом
+    БЕЗ авторизации, и мёртвая сессия проходила проверку. Теперь бьём приватным
+    users/<pk>/info/ — он без живых кук не отвечает.
+      • LoginRequired            → False (сессия мертва);
+      • 429 / PleaseWait         → True (сессия жива, просто лимит);
+      • сеть / прочие ошибки     → False при strict=True (проверка новых кук),
+                                    True при strict=False (health-check: сбой сети
+                                    — не повод объявлять сессию мёртвой).
     """
     idx = next(
         (i for i, (l, _) in enumerate(_POOL._accounts) if l == login),
@@ -920,7 +957,17 @@ async def validate_session(login: str) -> bool:
 
     def _ping(c: Client):
         _unwrap_percent_re()
-        return c.user_info_by_username(login)
+        uid = getattr(c, "user_id", None)
+        if uid:
+            try:
+                return bool(c.user_info_v1(str(uid)))
+            except LoginRequired:
+                raise
+            except (RateLimitError, PleaseWaitFewMinutes):
+                return True
+            except ClientError:
+                pass      # эндпоинт капризничает — проверим старым способом ниже
+        return bool(c.user_info_by_username(login))
 
     try:
         async with _POOL._gate.hold():
@@ -928,9 +975,14 @@ async def validate_session(login: str) -> bool:
                 None, lambda: _ping(cl)
             )
         return bool(result)
-    except Exception as e:
-        logger.warning(f"validate_session {login}: {e}")
+    except LoginRequired as e:
+        logger.warning(f"validate_session {login}: LoginRequired {e}")
         return False
+    except (RateLimitError, PleaseWaitFewMinutes):
+        return True
+    except Exception as e:
+        logger.warning(f"validate_session {login}: {type(e).__name__}: {e}")
+        return (not strict) if isinstance(e, _NET_ERRORS) else False
 
 
 # ── КЭШ ПОСТОВ ────────────────────────────────────────────────────────────────
@@ -1158,14 +1210,264 @@ def _story_to_dict(item) -> dict:
         return {}
 
 
+def _fail_if_endpoint_404(cl, exc: Exception) -> None:
+    """
+    instagrapi превращает ЛЮБОЙ 404 в UserNotFound. Но 404 «Endpoint ... does not exist» —
+    это Instagram режет сам эндпоинт (устаревший девайс/блок), а не «ника нет».
+    Такое надо считать сбоем метода (идём дальше по каскаду), а не «не найден».
+    """
+    msg = str((getattr(cl, "last_json", None) or {}).get("message", ""))
+    if "endpoint" in msg.lower():
+        raise ClientError(f"IG endpoint 404: {msg}") from exc
+
+
+# ── КАСКАД ПОЛУЧЕНИЯ ПРОФИЛЯ ──────────────────────────────────────────────────
+# Раньше: instagrapi.user_info_by_username → публичный запрос БЕЗ кук → 429 с IP хостинга →
+# приватный usernameinfo → 404 → «не найден». Теперь методы пробуются по очереди:
+#   web     — web_profile_info, но С КУКАМИ аккаунта (с авторизацией лимиты мягче);
+#   gql     — публичный метод instagrapi (если есть в установленной версии);
+#   private — приватный usernameinfo;
+#   search  — поиск по нику + users/<pk>/info/ (последний шанс).
+# «Не найден» объявляем только если это подтвердил web (404) либо приватный API ответил
+# настоящим «User not found». Любой сбой/лимит → пул ротирует аккаунт и повторяет.
+
+_WEB_APP_ID = "936619743392459"
+_WEB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+_LOOKUP_STATS: dict[str, dict[str, int]] = {}
+_LOOKUP_ORDER = ("web", "gql", "private", "search")
+
+
+def _lk_note(method: str, ok: bool) -> None:
+    d = _LOOKUP_STATS.setdefault(method, {"ok": 0, "fail": 0})
+    d["ok" if ok else "fail"] += 1
+
+
+def _web_profile_info(cl, username: str):
+    """web_profile_info с куками аккаунта (sessionid/csrftoken/ds_user_id)."""
+    import requests
+    from instagrapi.extractors import extract_user_gql
+
+    jar: dict = {}
+    try:
+        jar = dict(cl.private.cookies.get_dict())
+    except Exception:
+        pass
+    if not jar.get("sessionid"):
+        try:
+            jar.update((cl.get_settings() or {}).get("cookies") or {})
+        except Exception:
+            pass
+
+    headers = {
+        "User-Agent": _WEB_UA,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "X-IG-App-ID": _WEB_APP_ID,
+        "X-Requested-With": "XMLHttpRequest",
+        "X-CSRFToken": jar.get("csrftoken", ""),
+        "Referer": f"https://www.instagram.com/{username}/",
+    }
+    proxies = None
+    try:
+        proxies = dict(getattr(cl.private, "proxies", None) or {}) or None
+    except Exception:
+        pass
+
+    sess = requests.Session()
+    for k, v in jar.items():
+        if v:
+            sess.cookies.set(k, str(v), domain=".instagram.com")
+    r = sess.get(
+        "https://www.instagram.com/api/v1/users/web_profile_info/",
+        params={"username": username}, headers=headers, proxies=proxies, timeout=20,
+    )
+    if r.status_code == 404:
+        raise UserNotFound(f"web 404 @{username}", username=username)
+    if r.status_code == 429:
+        raise RateLimitError(f"web 429 @{username}")
+    if r.status_code in (401, 403):
+        raise LoginRequired(f"web {r.status_code} @{username}")
+    if r.status_code != 200:
+        raise ClientError(f"web HTTP {r.status_code}")
+    try:
+        data = r.json()
+    except ValueError:
+        raise ClientError("web: не JSON (логин-стена)")
+    user = ((data or {}).get("data") or {}).get("user")
+    if not user:
+        raise UserNotFound(f"web: пустой ответ @{username}", username=username)
+    return extract_user_gql(user)
+
+
+def _lookup_via_search(cl, username: str):
+    """Последний шанс: ищем ник в поиске IG, берём точное совпадение."""
+    fn = (getattr(cl, "fbsearch_accounts", None)
+          or getattr(cl, "search_users_v1", None)
+          or getattr(cl, "search_users", None))
+    if not fn:
+        raise ClientError("search: метод недоступен")
+    for u in fn(username) or []:
+        if (getattr(u, "username", "") or "").lower() == username:
+            try:
+                return cl.user_info_v1(str(u.pk))
+            except LoginRequired:
+                raise
+            except ClientError:
+                d = _user_to_dict(u)
+                d["partial"] = True       # без счётчиков — не кэшируем
+                return d
+    raise ClientError("search: точного совпадения нет")
+
+
+def _lookup_user(cl, username: str) -> dict:
+    """Каскад методов. Возвращает dict профиля или бросает исключение для пула."""
+    steps: list[tuple[str, Callable]] = [("web", lambda: _web_profile_info(cl, username))]
+    gql = getattr(cl, "user_info_by_username_gql", None)
+    if gql:
+        steps.append(("gql", lambda: gql(username)))
+    v1 = getattr(cl, "user_info_by_username_v1", None)
+    if v1:
+        steps.append(("private", lambda: v1(username)))
+    steps.append(("search", lambda: _lookup_via_search(cl, username)))
+
+    rate = login = net = None
+    nf_votes = 0
+    notes: list[str] = []
+
+    for name, fn in steps:
+        try:
+            _unwrap_percent_re()
+            res = fn()
+            d = res if isinstance(res, dict) else _user_to_dict(res)
+            if not d or not d.get("username"):
+                raise ClientError("пустой результат")
+            _lk_note(name, True)
+            return d
+        except PrivateAccount:
+            raise
+        except UserNotFound as e:
+            if name == "web":
+                _lk_note(name, True)       # метод отработал — ответ подтверждённый
+                raise
+            try:
+                _fail_if_endpoint_404(cl, e)
+                nf_votes += 1              # настоящий «User not found» от приватного API
+                _lk_note(name, True)
+            except ClientError as ce:
+                _lk_note(name, False)
+                notes.append(f"{name}: {ce}")
+        except (RateLimitError, PleaseWaitFewMinutes) as e:
+            _lk_note(name, False)
+            rate = rate or e
+            notes.append(f"{name}: 429")
+        except LoginRequired as e:
+            _lk_note(name, False)
+            login = login or e
+            notes.append(f"{name}: login")
+        except ClientError as e:
+            _lk_note(name, False)
+            notes.append(f"{name}: {e}")
+        except _NET_ERRORS as e:
+            _lk_note(name, False)
+            net = net or e
+            notes.append(f"{name}: net {type(e).__name__}")
+        except Exception as e:                 # битый ответ/pydantic и т.п. — не роняем каскад
+            _lk_note(name, False)
+            notes.append(f"{name}: {type(e).__name__}: {e}")
+
+    logger.warning(f"[lookup] @{username}: все методы не сработали — {'; '.join(notes)}")
+    if nf_votes:
+        raise UserNotFound(f"private: User not found @{username}", username=username)
+    if rate:
+        raise rate
+    if login:
+        raise login
+    if net:
+        raise net
+    raise ClientError(f"lookup @{username}: " + "; ".join(notes))
+
+
 # ── ПУБЛИЧНЫЙ API ─────────────────────────────────────────────────────────────
 
-# Пункт 2: кэш профилей. Раньше get_posts / get_stories / get_avatar_bytes и
-# проверка подписок каждый раз заново дёргали user_info_by_username —
-# на один профиль уходило 2–3 лишних запроса к IG.
+# Кэш профилей: память (TTL IG_USER_CACHE_TTL) + диск (SQLite, переживает рестарт и
+# нужен, чтобы показать устаревшую карточку, когда Instagram не отвечает).
 _USER_CACHE: dict[str, dict] = {}
-_NOTFOUND_CACHE: dict[str, float] = {}
-_NOTFOUND_TTL = 300  # 5 минут не долбим несуществующие ники
+_NOTFOUND_CACHE: dict[str, tuple[float, int]] = {}   # ник → (когда, сколько раз подряд «не найден»)
+_CSTAT: Counter = Counter()
+
+
+def _pc_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(IG_DB, timeout=10)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ig_profile_cache ("
+        "username TEXT PRIMARY KEY, data TEXT NOT NULL, ts REAL NOT NULL)"
+    )
+    return conn
+
+
+def _pc_save(username: str, info: dict) -> None:
+    try:
+        conn = _pc_conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO ig_profile_cache (username, data, ts) VALUES (?,?,?)",
+                (username, json.dumps(info, ensure_ascii=False, default=str), time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"profile cache save {username}: {e}")
+
+
+def _pc_load(username: str) -> tuple[dict, float] | None:
+    try:
+        conn = _pc_conn()
+        try:
+            row = conn.execute(
+                "SELECT data, ts FROM ig_profile_cache WHERE username=?", (username,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        return json.loads(row[0]), float(row[1])
+    except Exception as e:
+        logger.debug(f"profile cache load {username}: {e}")
+        return None
+
+
+def _pc_drop(username: str | None = None) -> None:
+    try:
+        conn = _pc_conn()
+        try:
+            if username:
+                conn.execute("DELETE FROM ig_profile_cache WHERE username=?", (username,))
+            else:
+                conn.execute("DELETE FROM ig_profile_cache")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"profile cache drop: {e}")
+
+
+def cached_usernames(limit: int = 500) -> list[str]:
+    """Ники, которые бот уже видел (для подсказок при опечатке)."""
+    names = set(_USER_CACHE)
+    try:
+        conn = _pc_conn()
+        try:
+            for (u,) in conn.execute(
+                "SELECT username FROM ig_profile_cache ORDER BY ts DESC LIMIT ?", (limit,)
+            ):
+                names.add(u)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return list(names)
 
 
 def _ucache_get(username: str) -> dict | None:
@@ -1183,15 +1485,54 @@ def _ucache_set(username: str, info: dict) -> None:
         oldest = min(_USER_CACHE, key=lambda k: _USER_CACHE[k]["ts"])
         _USER_CACHE.pop(oldest, None)
     _USER_CACHE[username] = {"info": dict(info), "ts": time.time()}
+    _pc_save(username, info)
 
 
-async def get_user_status(username: str, force: bool = False) -> tuple[str, dict | None]:
+def _ucache_stale(username: str) -> tuple[dict, float] | None:
+    """Копия профиля любого возраста (до IG_STALE_MAX_DAYS): память, потом диск."""
+    e = _USER_CACHE.get(username)
+    if e:
+        return dict(e["info"]), e["ts"]
+    row = _pc_load(username)
+    if row and time.time() - row[1] <= IG_STALE_MAX_DAYS * 86400:
+        return row
+    return None
+
+
+def _nf_ttl(count: int) -> int:
+    return IG_NOTFOUND_TTLS[min(max(count, 1), len(IG_NOTFOUND_TTLS)) - 1]
+
+
+def _nf_mark(username: str) -> None:
+    prev = _NOTFOUND_CACHE.get(username)
+    _NOTFOUND_CACHE[username] = (time.time(), (prev[1] if prev else 0) + 1)
+    if len(_NOTFOUND_CACHE) > 1000:
+        _NOTFOUND_CACHE.pop(min(_NOTFOUND_CACHE, key=lambda k: _NOTFOUND_CACHE[k][0]), None)
+
+
+def _fail_result(username: str, allow_stale: bool) -> tuple[str, dict | None]:
+    """Сбой получения профиля: устаревшая копия (если разрешили) или «error»."""
+    if allow_stale:
+        st = _ucache_stale(username)
+        if st:
+            info, ts = st
+            info["_stale_ts"] = ts
+            _CSTAT["stale"] += 1
+            return "stale", info
+    return "error", None
+
+
+async def get_user_status(username: str, force: bool = False,
+                          allow_stale: bool = False) -> tuple[str, dict | None]:
     """
     Как get_user_info, но различает причины пустого ответа:
       ("ok", info)       — профиль получен (в т.ч. приватный);
-      ("notfound", None) — IG ответил, что такого ника нет;
+      ("notfound", None) — IG подтвердил, что такого ника нет;
+      ("stale", info)    — только при allow_stale=True: IG не ответил, но есть сохранённая
+                           копия (info["_stale_ts"] — когда она получена);
       ("error", None)    — не вышло (429, сеть, пул пуст) — это НЕ «аккаунта нет».
     Нужно фоновой проверке: без этого смена ника и сбой сети выглядят одинаково.
+    «error» никогда не кэшируется; «notfound» кэшируется с эскалацией TTL (5 мин → 1 ч → сутки).
     """
     username = username.lower().strip("@").strip()
     if not username:
@@ -1200,20 +1541,22 @@ async def get_user_status(username: str, force: bool = False) -> tuple[str, dict
     if not force:
         cached = _ucache_get(username)
         if cached:
+            _CSTAT["hit"] += 1
             return "ok", cached
         nf = _NOTFOUND_CACHE.get(username)
-        if nf and time.time() - nf < _NOTFOUND_TTL:
+        if nf and time.time() - nf[0] < _nf_ttl(nf[1]):
+            _CSTAT["nf_hit"] += 1
             return "notfound", None
+    _CSTAT["miss"] += 1
 
     def _fetch(cl: Client):
-        user = cl.user_info_by_username(username)
-        return _user_to_dict(user)
+        return _lookup_user(cl, username)
 
     try:
         result = await _POOL.run(_fetch)
     except UserNotFound:
         logger.warning(f"UserNotFound: @{username}")
-        _NOTFOUND_CACHE[username] = time.time()
+        _nf_mark(username)
         return "notfound", None
     except PrivateAccount:
         logger.info(f"PrivateAccount: @{username}")
@@ -1226,14 +1569,17 @@ async def get_user_status(username: str, force: bool = False) -> tuple[str, dict
         return "ok", info
     except Exception as e:
         logger.error(f"get_user_info @{username}: {e}")
-        return "error", None
+        return _fail_result(username, allow_stale)
 
     if result:
+        if result.get("partial"):
+            logger.info(f"get_user_info @{username}: частичные данные (через поиск), в кэш не кладу")
+            return "ok", result
         _ucache_set(username, result)
         _NOTFOUND_CACHE.pop(username, None)
         logger.info(f"✅ get_user_info @{username}: {result.get('followers')} фолловеров")
         return "ok", result
-    return "error", None
+    return _fail_result(username, allow_stale)
 
 
 async def get_user_info(username: str, force: bool = False) -> dict | None:
@@ -1255,7 +1601,11 @@ async def get_user_status_by_pk(pk: str) -> tuple[str, dict | None]:
         return "error", None
 
     def _fetch(cl: Client):
-        return _user_to_dict(cl.user_info(int(pk)))
+        try:
+            return _user_to_dict(cl.user_info(int(pk)))
+        except UserNotFound as e:
+            _fail_if_endpoint_404(cl, e)
+            raise
 
     try:
         result = await _POOL.run(_fetch)
@@ -1280,6 +1630,109 @@ def forget_user_cache(username: str) -> None:
     _POSTS_CACHE.pop(username, None)
     for k in [k for k in _LATEST_CACHE if k[0] == username]:
         _LATEST_CACHE.pop(k, None)
+
+
+def reset_notfound_cache(username: str | None = None) -> None:
+    """Сбросить «не найден» (кнопка «повторить»): один ник или все."""
+    if username:
+        _NOTFOUND_CACHE.pop(username.lower().strip("@"), None)
+    else:
+        _NOTFOUND_CACHE.clear()
+
+
+def clear_profile_caches() -> dict:
+    """Админская кнопка «сбросить кэш»: память + диск + notfound. Возвращает, сколько стёрто."""
+    n = {"mem": len(_USER_CACHE), "nf": len(_NOTFOUND_CACHE), "search": len(_SEARCH_CACHE)}
+    _USER_CACHE.clear()
+    _NOTFOUND_CACHE.clear()
+    _SEARCH_CACHE.clear()
+    _pc_drop()
+    return n
+
+
+def get_lookup_stats() -> dict:
+    """Сводка для /ig_status: методы каскада, кэш, устаревшие карточки."""
+    db_n = 0
+    try:
+        conn = _pc_conn()
+        try:
+            db_n = conn.execute("SELECT COUNT(*) FROM ig_profile_cache").fetchone()[0]
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return {
+        "methods": {m: dict(_LOOKUP_STATS.get(m, {"ok": 0, "fail": 0})) for m in _LOOKUP_ORDER},
+        "cache_mem": len(_USER_CACHE),
+        "cache_db": db_n,
+        "notfound": len(_NOTFOUND_CACHE),
+        "hit": _CSTAT["hit"], "miss": _CSTAT["miss"],
+        "nf_hit": _CSTAT["nf_hit"], "stale": _CSTAT["stale"],
+    }
+
+
+# ── ПОИСК АККАУНТОВ ПО ИМЕНИ ──────────────────────────────────────────────────
+
+_SEARCH_CACHE: dict[str, tuple[float, list]] = {}
+_SEARCH_TTL = 600
+
+
+async def search_accounts(query: str, limit: int = 8) -> list[dict] | None:
+    """
+    Поиск аккаунтов по имени/нику («leya cakey», «эмма уотсон»).
+    Возвращает список dict (username, full_name, is_verified, is_private, pk) —
+    пустой, если ничего нет, и None, если Instagram не ответил (сбой ≠ «пусто»).
+    """
+    q = " ".join((query or "").split())[:60]
+    if len(q) < 2:
+        return []
+    key = q.lower()
+    hit = _SEARCH_CACHE.get(key)
+    if hit and time.time() - hit[0] < _SEARCH_TTL:
+        return list(hit[1])[:limit]
+
+    def _fetch(cl: Client):
+        res = None
+        last: Exception | None = None
+        for name in ("fbsearch_accounts", "search_users_v1", "search_users"):
+            fn = getattr(cl, name, None)
+            if not fn:
+                continue
+            try:
+                res = fn(q)
+                if res:
+                    break
+            except (LoginRequired, RateLimitError, PleaseWaitFewMinutes):
+                raise
+            except ClientError as e:
+                last = e
+        if res is None and last is not None:
+            raise last
+        out = []
+        for u in res or []:
+            uname = getattr(u, "username", "") or ""
+            if not uname:
+                continue
+            out.append({
+                "username": uname,
+                "full_name": getattr(u, "full_name", "") or "",
+                "is_verified": bool(getattr(u, "is_verified", False)),
+                "is_private": bool(getattr(u, "is_private", False)),
+                "pk": str(getattr(u, "pk", "") or ""),
+            })
+        return out
+
+    try:
+        out = await _POOL.run(_fetch)
+    except Exception as e:
+        logger.warning(f"search_accounts {q!r}: {e}")
+        return None
+    if out is None:
+        return None
+    _SEARCH_CACHE[key] = (time.time(), out)
+    if len(_SEARCH_CACHE) > 200:
+        _SEARCH_CACHE.pop(min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0]), None)
+    return out[:limit]
 
 
 async def get_stories(username: str) -> list:
@@ -1443,7 +1896,7 @@ async def get_avatar_bytes(username: str) -> bytes | None:
     pk = (info or {}).get("id", "")
 
     def _fetch(cl: Client):
-        user_pk = int(pk) if pk else cl.user_info_by_username(username).pk
+        user_pk = int(pk) if pk else int(_lookup_user(cl, username)["id"])
         with tempfile.TemporaryDirectory() as tmpdir:
             path = cl.user_download_profile_pic(user_pk, folder=tmpdir)
             with open(path, "rb") as f:
@@ -1690,6 +2143,12 @@ def init_ig_db():
             c.execute(f"ALTER TABLE ig_user_state ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    # Кэш профилей на диске (устаревшая карточка, подсказки при опечатке)
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_profile_cache (
+        username TEXT PRIMARY KEY, data TEXT NOT NULL, ts REAL NOT NULL
+    )""")
+    c.execute("DELETE FROM ig_profile_cache WHERE ts < ?",
+              (time.time() - max(IG_STALE_MAX_DAYS, 1) * 2 * 86400,))
     # Кэш Telegram file_id: один и тот же пост/рилс не скачиваем и не заливаем дважды
     c.execute("""CREATE TABLE IF NOT EXISTS ig_file_cache (
         shortcode TEXT PRIMARY KEY,

@@ -10,6 +10,7 @@ instagram_handlers.py — хендлеры Telegram-бота для аноним
 """
 
 import asyncio
+import difflib
 import hashlib
 import io
 import logging
@@ -58,6 +59,8 @@ from instagram_viewer import (
     get_story_by_url, get_highlights, get_highlight_items,
     ig_get_user_state, ig_get_all_user_states, ig_set_user_state, ig_rename_username,
     ig_cache_get, ig_cache_put, ig_cache_drop, ig_get_filter, ig_set_filter,
+    search_accounts, reset_notfound_cache, clear_profile_caches,
+    get_lookup_stats, cached_usernames,
 )
 
 logger = logging.getLogger(__name__)
@@ -823,8 +826,52 @@ async def process_ig_username(message: types.Message, state: FSMContext):
     await _show_profile(message, username, message.from_user.id)
 
 
-async def _show_profile(source, ig_username: str, tg_user_id: int):
-    """Показать профиль Instagram."""
+def _cb(prefix: str, text: str) -> str:
+    """callback_data ≤ 64 БАЙТ (кириллица — 2 байта на букву): режем по байтам."""
+    room = 64 - len(prefix.encode("utf-8"))
+    return prefix + text.encode("utf-8")[:room].decode("utf-8", "ignore")
+
+
+def _suggest_usernames(name: str, tg_user_id: int, n: int = 3) -> list[str]:
+    """Похожие ники из того, что бот и пользователь уже видели (подсказка при опечатке)."""
+    cands: set[str] = set()
+    for fn in (
+        lambda: [x["ig_username"] for x in ig_get_subscriptions(str(tg_user_id))],
+        lambda: [x["username"] for x in _get_my_viewed(str(tg_user_id), 50)],
+        lambda: [x["username"] for x in _get_popular_profiles(100)],
+        lambda: cached_usernames(300),
+    ):
+        try:
+            cands.update(u.lower() for u in fn() if u)
+        except Exception:
+            pass
+    cands.discard(name)
+    return difflib.get_close_matches(name, sorted(cands), n=n, cutoff=0.6)
+
+
+async def _profile_fail_message(source, ig_username: str, tg_user_id: int, status: str) -> None:
+    """Сообщение, когда профиль не получен: «нет такого» и «инста глючит» — разные вещи."""
+    import html
+    esc = html.escape(ig_username)
+    rows: list[list[InlineKeyboardButton]] = []
+    q = ig_username[:30]
+    if status == "notfound":
+        text = f"❌ <b>@{esc}</b> — такого ника нет\n<i>проверь, как он написан</i>"
+        sugg = _suggest_usernames(ig_username, tg_user_id)
+        if sugg:
+            text += "\n\nможет, это?"
+            rows += [[InlineKeyboardButton(text=f"👤 @{u}", callback_data=f"ig_profile:{u}")] for u in sugg]
+        rows.append([InlineKeyboardButton(text="🔎 искать по имени", callback_data=_cb("ig_find:", q))])
+    else:
+        text = (f"⚠️ инста сейчас не отдаёт профиль <b>@{esc}</b> (лимиты или сессия). "
+                "это не значит, что ника нет — попробуй ещё раз через минуту")
+        rows.append([InlineKeyboardButton(text="🔄 повторить", callback_data=_cb("ig_retry:", q))])
+        rows.append([InlineKeyboardButton(text="🔎 искать по имени", callback_data=_cb("ig_find:", q))])
+    await source.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+async def _show_profile(source, ig_username: str, tg_user_id: int) -> bool:
+    """Показать профиль Instagram. True — карточка показана (в т.ч. устаревшая), False — нет."""
     import html
     ig_username = ig_username.lower().strip("@")
 
@@ -832,28 +879,30 @@ async def _show_profile(source, ig_username: str, tg_user_id: int):
     await anim.start(f"🔍 Ищу профиль @{ig_username}...")
     await asyncio.sleep(0.3)
 
-    info = await get_user_info(ig_username)
+    status, info = await get_user_status(ig_username, allow_stale=True)
 
-    if not info:
+    if status not in ("ok", "stale") or not info:
         await anim.done()
-        await source.answer(
-            f"❌ Пользователь <b>@{html.escape(ig_username)}</b> не найден или недоступен.\n"
-            "<i>Возможно, профиль приватный или имя написано неверно.</i>",
-            parse_mode="HTML"
-        )
-        return
+        await _profile_fail_message(source, ig_username, tg_user_id, status)
+        return False
+
+    stale_ts = info.pop("_stale_ts", None) if status == "stale" else None
 
     await anim.step("📸 Загружаю аватарку...")
 
     avatar_bytes: bytes | None = None
-    try:
-        avatar_bytes = await get_avatar_bytes(ig_username)
-    except Exception:
-        pass
+    if not stale_ts:                     # при сбое IG не гоняем пул ради аватарки — зависнем на ретраях
+        try:
+            avatar_bytes = await get_avatar_bytes(ig_username)
+        except Exception:
+            pass
     if not avatar_bytes:
         avatar_url = info.get("avatar_url", "")
         if avatar_url:
-            avatar_bytes = await _download(avatar_url)
+            try:
+                avatar_bytes = await _download(avatar_url)
+            except Exception:
+                avatar_bytes = None
 
     await anim.step("✨ Формирую карточку...")
     await anim.done()
@@ -861,6 +910,89 @@ async def _show_profile(source, ig_username: str, tg_user_id: int):
     _record_view(ig_username, str(tg_user_id))
     kb = _profile_keyboard(ig_username, tg_user_id)
     await _send_profile_with_counter_animation(source, info, kb, avatar_bytes)
+    if stale_ts:
+        when = datetime.fromtimestamp(stale_ts).strftime("%d.%m %H:%M")
+        await source.answer(
+            f"⚠️ инста сейчас не отвечает — это сохранённая карточка от {when}, цифры могли поменяться",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔄 обновить", callback_data=_cb("ig_retry:", ig_username[:30]))
+            ]]),
+        )
+    return True
+
+
+# ── ПОИСК ПО ИМЕНИ / ПОВТОР ───────────────────────────────────────────────────
+
+_RETRY_TS: dict[int, float] = {}
+
+
+async def callback_ig_retry(callback: types.CallbackQuery):
+    username = callback.data.split(":", 1)[1].lower().strip("@")
+    uid = callback.from_user.id
+    now = time.time()
+    if now - _RETRY_TS.get(uid, 0) < 5:
+        await callback.answer("подожди пару секунд", show_alert=False)
+        return
+    _RETRY_TS[uid] = now
+    await callback.answer("🔄 пробую ещё раз...")
+    reset_notfound_cache(username)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _show_profile(callback.message, username, uid)
+
+
+async def _do_name_search(source, query: str) -> None:
+    import html
+    query = " ".join(query.split())[:60]
+    esc = html.escape(query)
+    wait = await source.answer(f"🔎 ищу «{esc}»...", parse_mode="HTML")
+    res = await search_accounts(query, 8)
+    try:
+        await wait.delete()
+    except Exception:
+        pass
+
+    if res is None:
+        await source.answer(
+            "⚠️ инста сейчас не отдаёт поиск, попробуй через минуту",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔄 повторить", callback_data=_cb("ig_find:", query))
+            ]]),
+        )
+        return
+    if not res:
+        await source.answer(f"😶 по «{esc}» ничего не нашёл. попробуй написать иначе или латиницей",
+                            parse_mode="HTML")
+        return
+
+    lines = [f"🔎 нашёл по «{esc}»:\n"]
+    rows = []
+    for u in res:
+        mark = "✅" if u["is_verified"] else ("🔒" if u["is_private"] else "▫️")
+        name = f" — {html.escape(u['full_name'])}" if u["full_name"] else ""
+        lines.append(f"{mark} <b>@{html.escape(u['username'])}</b>{name}")
+        rows.append([InlineKeyboardButton(text=f"👤 @{u['username']}",
+                                          callback_data=f"ig_profile:{u['username']}")])
+    lines.append("\n<i>✅ верифицирован · 🔒 закрытый</i>")
+    await source.answer("\n".join(lines), parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+async def callback_ig_find(callback: types.CallbackQuery):
+    query = callback.data.split(":", 1)[1]
+    await callback.answer("🔎 ищу...")
+    await _do_name_search(callback.message, query)
+
+
+async def cmd_ig_find(message: types.Message):
+    """/ig_find <имя или ник> — поиск аккаунтов Instagram по имени."""
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("напиши имя или ник: <code>/ig_find leya cakey</code>", parse_mode="HTML")
+        return
+    await _do_name_search(message, parts[1])
 
 
 # ── КОЛБЭК: ПРОФИЛЬ ───────────────────────────────────────────────────────────
@@ -2255,79 +2387,88 @@ async def cmd_igdl(message: types.Message):
 
 # ── HEALTH CHECK TASK ─────────────────────────────────────────────────────────
 
+IG_HEALTH_INTERVAL = int(os.getenv("IG_HEALTH_INTERVAL", str(60 * 60)))   # по умолчанию раз в час
+
+
+async def _run_session_health_check(bot: Bot) -> dict:
+    """
+    Один проход проверки сессий. Проверяет РЕАЛЬНУЮ авторизацию (приватный users/<pk>/info/),
+    помечает мёртвые (с отметкой времени, чтобы пул их реально пропускал), снимает пометку
+    с ожививших и шлёт админам алерт о новых смертях и воскрешениях.
+    Сбой сети/лимит — не повод объявлять сессию мёртвой.
+    Возвращает {"ok": [...], "dead": [...], "new_dead": [...], "revived": [...]}.
+    """
+    from instagram_viewer import _POOL as _ig_pool
+    statuses = get_sessions_status()
+    ok_logins, dead_logins, revived = [], [], []
+
+    for s in statuses:
+        login = s["login"]
+        if not s["alive"]:                      # клиент не загрузился (нет/битый файл сессии)
+            dead_logins.append(login)
+            continue
+        try:
+            ok = await validate_session(login, strict=False)
+        except Exception as e:
+            logger.warning(f"[health] ошибка проверки {login}: {e}")
+            continue                            # неопределённо — состояние не трогаем
+        logger.info(f"[health] {'✅' if ok else '💀'} {login} (запросов: {s['requests']})")
+        if ok:
+            ok_logins.append(login)
+            if _ig_pool.mark_alive(login):
+                revived.append(login)
+        else:
+            dead_logins.append(login)
+        await asyncio.sleep(random.uniform(_IG_HEALTH_DELAY_MIN, _IG_HEALTH_DELAY_MAX))
+
+    new_dead = [l for l in dead_logins if _ig_pool.mark_dead(l)]
+    admin_ids = _get_admin_ids()
+
+    if new_dead:
+        logger.warning(f"[health] новые мёртвые сессии: {new_dead}")
+        dead_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"🔄 Обновить {l}", callback_data=f"ig_refresh_pick:{l}")]
+            for l in new_dead
+        ])
+        dead_list = "\n".join(f"• <code>{l}</code>" for l in new_dead)
+        for uid in admin_ids:
+            try:
+                await bot.send_message(
+                    uid, f"⚠️ <b>Health Check: мёртвые сессии</b>\n\n{dead_list}",
+                    parse_mode="HTML", reply_markup=dead_kb,
+                )
+            except Exception as e:
+                logger.warning(f"[health] алерт {uid}: {e}")
+    if revived:
+        logger.info(f"[health] ожили: {revived}")
+        lst = "\n".join(f"• <code>{l}</code>" for l in revived)
+        for uid in admin_ids:
+            try:
+                await bot.send_message(uid, f"✅ <b>сессии снова живы</b>\n\n{lst}", parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"[health] алерт {uid}: {e}")
+    if not dead_logins:
+        logger.info("[health] все сессии живы ✅")
+    return {"ok": ok_logins, "dead": dead_logins, "new_dead": new_dead, "revived": revived}
+
+
 async def ig_session_health_task(bot: Bot):
     """
-    Каждые 4 часа проверяет все сессии в пуле.
-    Если сессия мертва — шлёт алерт админам.
+    Фоновая проверка всех сессий пула (раз в IG_HEALTH_INTERVAL сек, по умолчанию час):
+    мёртвую сессию замечаем сами, не дожидаясь, пока на неё наткнётся пользователь.
     Запускать из main.py: asyncio.create_task(ig_session_health_task(bot))
     """
     set_background_priority()
-    CHECK_INTERVAL = 4 * 60 * 60  # 4 часа
-    STARTUP_DELAY  = 3 * 60       # первый чек через 3 минуты (пусть бот прогреется)
+    STARTUP_DELAY = 3 * 60       # первый чек через 3 минуты (пусть бот прогреется)
     logger.info("🟡 Instagram session health-check запущен")
     await asyncio.sleep(STARTUP_DELAY)
-
     while True:
         logger.info("🔍 IG session health check...")
         try:
-            from instagram_viewer import _POOL as _ig_pool
-            statuses = get_sessions_status()
-            dead_logins = []
-
-            for s in statuses:
-                login = s["login"]
-                if not s["alive"]:
-                    dead_logins.append(login)
-                    continue
-
-                # Тест только для живых клиентов
-                try:
-                    ok = await validate_session(login)
-                    status_icon = "✅" if ok else "💀"
-                    logger.info(f"[health] {status_icon} {login} (запросов: {s['requests']})")
-                    if not ok:
-                        dead_logins.append(login)
-                except Exception as e:
-                    logger.warning(f"[health] ошибка проверки {login}: {e}")
-                    dead_logins.append(login)
-
-                await asyncio.sleep(random.uniform(_IG_HEALTH_DELAY_MIN, _IG_HEALTH_DELAY_MAX))
-
-            # Алертим только новые смерти — о которых ещё не уведомляли
-            new_dead = [l for l in dead_logins if l not in _ig_pool._known_dead]
-            already_known = [l for l in dead_logins if l in _ig_pool._known_dead]
-
-            if already_known:
-                logger.info(f"[health] уже известны как мёртвые (алерт не повторяем): {already_known}")
-
-            if new_dead:
-                # Помечаем как известных мёртвых
-                _ig_pool._known_dead.update(new_dead)
-                logger.warning(f"[health] новые мёртвые сессии: {new_dead}")
-                admin_ids = _get_admin_ids()
-                dead_kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=f"🔄 Обновить {l}", callback_data=f"ig_refresh_pick:{l}")]
-                    for l in new_dead
-                ])
-                for uid in admin_ids:
-                    try:
-                        dead_list = "\n".join(f"• <code>{l}</code>" for l in new_dead)
-                        await bot.send_message(
-                            uid,
-                            f"⚠️ <b>Health Check: мёртвые сессии</b>\n\n"
-                            f"{dead_list}",
-                            parse_mode="HTML",
-                            reply_markup=dead_kb,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[health] алерт {uid}: {e}")
-            elif not dead_logins:
-                logger.info("[health] все сессии живы ✅")
-
+            await _run_session_health_check(bot)
         except Exception as e:
             logger.error(f"ig_session_health_task error: {e}")
-
-        await asyncio.sleep(CHECK_INTERVAL)
+        await asyncio.sleep(max(300, IG_HEALTH_INTERVAL))
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -3281,7 +3422,8 @@ async def process_ig_cookies(message: types.Message, state: FSMContext):
 # ── /ig_status — статус всех сессий ──────────────────────────────────────────
 
 async def cmd_ig_status(message: types.Message):
-    """/ig_status — текущий статус всех аккаунтов пула."""
+    """/ig_status — статус пула, методов получения профиля и кэша."""
+    import html as _h
     admin_ids = _get_admin_ids()
     if admin_ids and message.from_user.id not in admin_ids:
         await message.answer("⛔ Команда доступна только администратору.")
@@ -3294,11 +3436,14 @@ async def cmd_ig_status(message: types.Message):
 
     lines = ["📊 <b>Статус Instagram аккаунтов:</b>\n"]
     for s in statuses:
-        icon = "✅" if s["alive"] else "💀"
+        broken = (not s["alive"]) or s.get("dead")
+        icon = "💀" if broken else "✅"
         cur  = " 👈 текущий" if s["is_current"] else ""
         lim  = f"  ⏳ в 429 ещё ~{max(1, s['limited_for'] // 60)} мин" if s.get("limited_for") else ""
+        dead = f"  ☠️ мертва уже ~{max(1, s['dead_for'] // 60)} мин" if s.get("dead") else ""
+        px   = "  🌐 прокси" if s.get("proxy") else ""
         lines.append(
-            f"{icon} <code>{s['login']}</code>{cur}{lim}\n"
+            f"{icon} <code>{s['login']}</code>{cur}{lim}{dead}{px}\n"
             f"    запросов: {s['requests']}"
         )
 
@@ -3314,7 +3459,6 @@ async def cmd_ig_status(message: types.Message):
         )
         le = h["last_error"]
         if le:
-            import html as _h
             ago = int((time.time() - le["ts"]) // 60)
             lines.append(
                 f"    последняя ошибка ({ago} мин назад): "
@@ -3323,19 +3467,71 @@ async def cmd_ig_status(message: types.Message):
     except Exception as e:
         logger.warning(f"ig_status health: {e}")
 
+    try:
+        st = get_lookup_stats()
+        meth = "  ".join(f"{k} {v['ok']}✓/{v['fail']}✗" for k, v in st["methods"].items())
+        total = st["hit"] + st["miss"]
+        ratio = f"{st['hit'] * 100 // total}%" if total else "—"
+        lines.append(
+            f"\n🧭 <b>методы получения профиля</b> (с запуска):\n    {meth}\n"
+            f"\n💾 <b>кэш профилей:</b>\n"
+            f"    в памяти: {st['cache_mem']}, на диске: {st['cache_db']}\n"
+            f"    попаданий: {ratio} ({st['hit']} / {total}), «не найден» из кэша: {st['nf_hit']}\n"
+            f"    устаревших карточек показано: {st['stale']}, ников в «не найден»: {st['notfound']}"
+        )
+    except Exception as e:
+        logger.warning(f"ig_status lookup stats: {e}")
+
     buttons = []
     for s in statuses:
-        if not s["alive"]:
+        if (not s["alive"]) or s.get("dead"):
             buttons.append([InlineKeyboardButton(
                 text=f"🔄 Обновить {s['login']}",
                 callback_data=f"ig_refresh_pick:{s['login']}"
             )])
+    buttons.append([
+        InlineKeyboardButton(text="🔍 проверить сессии", callback_data="ig_stat:check"),
+        InlineKeyboardButton(text="🧹 сбросить кэш", callback_data="ig_stat:clear"),
+    ])
 
     await message.answer(
         "\n".join(lines),
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
+
+
+async def callback_ig_stat(callback: types.CallbackQuery):
+    """Кнопки /ig_status: проверка сессий и сброс кэша (только админ)."""
+    admin_ids = _get_admin_ids()
+    if admin_ids and callback.from_user.id not in admin_ids:
+        await callback.answer("только для админа", show_alert=True)
+        return
+    action = callback.data.split(":", 1)[1]
+    if action == "clear":
+        n = clear_profile_caches()
+        await callback.answer(
+            f"стёр: профилей {n['mem']}, «не найден» {n['nf']}, поисков {n['search']} (+ кэш на диске)",
+            show_alert=True,
+        )
+    elif action == "check":
+        await callback.answer("🔍 проверяю сессии, минутку...")
+        try:
+            res = await _run_session_health_check(_BOT_REF or callback.bot)
+        except Exception as e:
+            await callback.message.answer(f"⚠️ проверка упала: <code>{e}</code>", parse_mode="HTML")
+            return
+        parts = []
+        if res["ok"]:
+            parts.append("✅ живы: " + ", ".join(f"<code>{l}</code>" for l in res["ok"]))
+        if res["dead"]:
+            parts.append("💀 мертвы: " + ", ".join(f"<code>{l}</code>" for l in res["dead"]))
+        if res["revived"]:
+            parts.append("🎉 ожили: " + ", ".join(f"<code>{l}</code>" for l in res["revived"]))
+        await callback.message.answer("🔍 <b>проверка сессий</b>\n\n" + ("\n".join(parts) or "нечего проверять"),
+                                      parse_mode="HTML")
+    else:
+        await callback.answer()
 
 
 # ── INLINE: «@бот ig natgeo» → карточка профиля в любом чате ───────────────────
@@ -3667,6 +3863,7 @@ def register_ig_handlers(dp: Dispatcher):
     dp.message.register(cmd_ig_subs,    Command("ig_subs"))
     dp.message.register(cmd_ig_popular, Command("ig_popular"))
     dp.message.register(cmd_ig_status,  Command("ig_status"))
+    dp.message.register(cmd_ig_find,    Command("ig_find"))
 
     # /cancel — регистрируем РАНЬШЕ хендлеров состояний, чтобы команда
     # перехватывалась в любом состоянии, а не улетала в парсер username/кук
@@ -3691,6 +3888,9 @@ def register_ig_handlers(dp: Dispatcher):
     dp.callback_query.register(callback_ig_sub_filter_menu, F.data.startswith("ig_sfm:"))
 
     dp.message.register(cmd_ig_refresh,          Command("ig_refresh"))
+    dp.callback_query.register(callback_ig_retry,          F.data.startswith("ig_retry:"))
+    dp.callback_query.register(callback_ig_find,           F.data.startswith("ig_find:"))
+    dp.callback_query.register(callback_ig_stat,           F.data.startswith("ig_stat:"))
     dp.callback_query.register(callback_ig_refresh_pick,   F.data.startswith("ig_refresh_pick:"))
     dp.callback_query.register(callback_ig_refresh_cancel, F.data == "ig_refresh_cancel")
     dp.message.register(process_ig_cookies,      IGStates.waiting_cookies)

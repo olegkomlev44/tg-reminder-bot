@@ -23,6 +23,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -86,8 +87,119 @@ async def _tool_instagram_profile(ctx: ToolContext, username: str = "") -> str:
     user = _clean_username(_clean(username))
     if not user:
         return "ОШИБКА: не указан username Instagram. Попроси пользователя его назвать."
-    await _show_profile(ctx.message, user, ctx.user_id)
+    ok = await _show_profile(ctx.message, user, ctx.user_id)
+    if ok is False:
+        return (f"ОШИБКА: профиль @{user} не удалось получить (нет такого ника или Instagram временно "
+                "не отвечает). Пользователю уже показано сообщение с кнопками (повторить / поиск по имени), "
+                "не дублируй его.")
     return f"Карточка профиля @{user} отправлена в чат (с кнопками сторис, постов, подписки)."
+
+
+# ── Instagram знаменитости по ИМЕНИ: ник ищем в интернете, потом проверяем в самой инсте ──
+_PERSON_CACHE: dict[str, tuple[float, str]] = {}      # имя → (когда, ник)
+_PERSON_TTL = 24 * 3600
+_IG_RESERVED = {"p", "reel", "reels", "tv", "stories", "explore", "share", "accounts", "none", "hashtag"}
+
+
+def _parse_handles(text: str) -> list[str]:
+    """Достаём до 3 ников из ответа модели: строка «HANDLES: a, b» либо ссылки instagram.com/<ник>."""
+    text = text or ""
+    raw: list[str] = []
+    m = re.search(r"HANDLES:\s*(.+)", text, re.I)
+    if m:
+        raw = re.split(r"[,;\s]+", m.group(1).strip())
+    if not raw:
+        raw = re.findall(r"instagram\.com/([A-Za-z0-9_.]+)", text, re.I)
+    out: list[str] = []
+    for h in raw:
+        h = h.strip().lstrip("@").rstrip("./").lower()
+        h = re.sub(r"^https?://(www\.)?instagram\.com/", "", h).split("/")[0].split("?")[0]
+        if (re.fullmatch(r"[a-z0-9_.]{2,30}", h) and re.search(r"[a-z]", h)
+                and h not in _IG_RESERVED and h not in out):
+            out.append(h)
+    return out[:3]
+
+
+async def _resolve_instagram_handles(name: str) -> list[str]:
+    """Спрашиваем Gemini с поиском Google: какие ники у ПУБЛИЧНОЙ персоны с таким именем."""
+    from ai_handlers import get_gemini
+    from google.genai import types as gt
+    client = get_gemini()
+    if not client:
+        return []
+    prompt = (
+        f"Найди в интернете официальный Instagram-аккаунт публичной персоны: «{name}» "
+        "(актёр, певец, блогер, стример, спортсмен, модель, создатель контента).\n"
+        "Формат ответа — СТРОГО одна строка: HANDLES: ник1, ник2, ник3\n"
+        "Правила: до 3 username через запятую, основной (самый крупный, верифицированный) первым. "
+        "Только username без @ и без ссылок. Не возвращай фан-страницы, пародии, двойников и "
+        "резервные аккаунты, если есть основной. Не ищи несовершеннолетних и частных лиц. "
+        "Если персона непубличная, неоднозначная или аккаунт не найден — верни ровно: HANDLES: NONE"
+    )
+    resp = await client.aio.models.generate_content(
+        model=MODEL, contents=prompt,
+        config=gt.GenerateContentConfig(tools=[{"google_search": {}}]),
+    )
+    return _parse_handles(resp.text or "")
+
+
+async def _tool_instagram_find_person(ctx: ToolContext, name: str = "") -> str:
+    import html
+    from instagram_handlers import _show_profile
+    from instagram_viewer import get_user_status
+    person = _clean(name, 80)
+    if not person:
+        return "ОШИБКА: не указано имя человека. Попроси пользователя его назвать."
+
+    key = person.lower()
+    hit = _PERSON_CACHE.get(key)
+    handles: list[str]
+    if hit and time.time() - hit[0] < _PERSON_TTL:
+        handles = [hit[1]]
+    else:
+        try:
+            handles = await _resolve_instagram_handles(person)
+        except Exception as e:
+            logger.warning(f"find_person {person!r}: поиск не удался: {e}")
+            handles = []
+    if not handles:
+        return (f"ОШИБКА: не нашёл официальный Instagram для «{person}» в интернете (имя неоднозначное "
+                "или это не публичная персона). Попроси пользователя прислать ник или ссылку.")
+
+    # проверяем кандидатов в самой Instagram: берём верифицированный / самый крупный
+    best: tuple[tuple[int, int], str] | None = None
+    any_error = False
+    for h in handles:
+        status, info = await get_user_status(h, allow_stale=True)
+        if status in ("ok", "stale") and info:
+            rank = (1 if info.get("is_verified") else 0, int(info.get("followers") or 0))
+            if best is None or rank > best[0]:
+                best = (rank, h)
+            if rank[0] or rank[1] >= 100_000:      # явный основной аккаунт — остальных не проверяем
+                break
+        elif status == "error":
+            any_error = True
+
+    if best is None:
+        if any_error:
+            h = handles[0]
+            await ctx.message.answer(
+                f"🔎 по имени «{html.escape(person)}» нашёл <a href=\"https://instagram.com/{h}\">@{h}</a>, "
+                "но сама инста сейчас не отвечает, карточку показать не могу",
+                parse_mode="HTML", disable_web_page_preview=True,
+            )
+            return (f"Найден ник @{h} (через интернет), но Instagram не ответил — карточки нет, "
+                    "ссылка отправлена в чат.")
+        return (f"ОШИБКА: по имени «{person}» в интернете нашлись ники {', '.join(handles)}, "
+                "но в Instagram таких аккаунтов нет. Попроси пользователя прислать ник.")
+
+    handle = best[1]
+    _PERSON_CACHE[key] = (time.time(), handle)
+    await ctx.message.answer(
+        f"🔎 «{html.escape(person)}» → <b>@{handle}</b>", parse_mode="HTML")
+    await _show_profile(ctx.message, handle, ctx.user_id)
+    return (f"Instagram «{person}» найден через интернет: @{handle}. "
+            "Карточка профиля отправлена в чат (с кнопками сторис, постов, подписки).")
 
 
 async def _tool_instagram_download(ctx: ToolContext, url: str = "") -> str:
@@ -131,9 +243,7 @@ async def _tool_music_send_track(ctx: ToolContext, query: str = "") -> str:
     if not tracks:
         return f"ОШИБКА: по запросу «{q}» ничего не найдено."
     best = tracks[0]
-    ok = await send_track_to_user(ctx.message, best["id"])
-    if ok is False:
-        return f"ОШИБКА: трек «{best.get('artist', '?')} — {best.get('title', '?')}» не удалось отправить (поток недоступен)."
+    await send_track_to_user(ctx.message, best["id"])
     return f"Трек «{best.get('artist', '?')} — {best.get('title', '?')}» отправлен в чат."
 
 
@@ -472,10 +582,21 @@ async def _tool_music_link(ctx: ToolContext, url: str = "") -> str:
 # Реестр функций. description — это то, по чему ИИ решает, когда вызывать.
 # ══════════════════════════════════════════════════════════════════════════════
 _tool("instagram_profile",
-      "Показать профиль Instagram (карточка: аватар, подписчики, кнопки сторис/постов/подписки). "
-      "Вызывай, когда просят найти/показать/глянуть аккаунт или профиль в Instagram (инста, инсте, инстаграм).",
+      "Показать профиль Instagram ПО ГОТОВОМУ НИКУ или ссылке (карточка: аватар, подписчики, кнопки "
+      "сторис/постов/подписки). Вызывай, когда просят найти/показать/глянуть аккаунт в Instagram "
+      "(инста, инсте, инстаграм) и ник уже известен. Если назвали ИМЯ человека, а не ник — "
+      "вызывай instagram_find_person, ник не выдумывай.",
       _tool_instagram_profile,
       {"username": _s("Username без @, либо ссылка на профиль")}, ["username"])
+
+_tool("instagram_find_person",
+      "Найти Instagram известного человека по ИМЕНИ (актёр, певец, блогер, стример, спортсмен, модель): "
+      "«найди инстаграм Эммы Уотсон», «инста свити фокс», «аккаунт Дженны Ортеги». Сама ищет ник "
+      "в интернете, проверяет его в Instagram и показывает карточку. Только для публичных персон; "
+      "если ник/ссылка уже есть — используй instagram_profile.",
+      _tool_instagram_find_person,
+      {"name": _s("Имя человека как написал пользователь (на любом языке), например «Emma Watson»")},
+      ["name"])
 
 _tool("instagram_download",
       "Скачать пост, рилс, сторис или хайлайт Instagram по ссылке. Вызывай, когда пользователь "
@@ -648,7 +769,8 @@ TOOLS_HINT = (
     "разбор фото/файлов реплаем, поиск в интернете). Если просьба — это действие, которое покрывает "
     "функция, ВЫЗОВИ её, а не отвечай «я не умею» или «воспользуйся командой». Для обычного разговора, "
     "шуток и советов функции не вызывай. Не выдумывай параметры: если не хватает username, названия "
-    "или ссылки — коротко спроси. Функции сами отправляют результат в чат, поэтому не пересказывай его. "
+    "или ссылки — коротко спроси. Если просят Instagram знаменитости/блогера по ИМЕНИ — вызови "
+    "instagram_find_person, а не угадывай ник сам. Функции сами отправляют результат в чат, поэтому не пересказывай его. "
     "Если функция вернула ОШИБКА — объясни пользователю своими словами и предложи вариант. "
     "Ответы после функций — 1 короткая фраза в твоём характере."
 )
