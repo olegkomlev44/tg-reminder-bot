@@ -14,13 +14,16 @@ import asyncio
 import logging
 import os
 import re
+import secrets
+import shutil
 import tempfile
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import BufferedInputFile, FSInputFile
+from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,14 @@ MAX_TOTAL_BYTES = MAX_TOTAL_MB * 1024 * 1024
 MAX_PARTS = int(os.getenv("MEDIA_MAX_PARTS", "25"))                 # максимум частей
 PART_TARGET_BYTES = 42 * 1024 * 1024                                # целевой размер части
 PART_HARD_BYTES = 49 * 1024 * 1024                                  # больше этого Telegram не примет
-MAX_HEIGHT = int(os.getenv("MEDIA_MAX_HEIGHT", "1080"))             # потолок качества YouTube
+MAX_HEIGHT = int(os.getenv("MEDIA_MAX_HEIGHT", "720"))              # потолок качества YouTube
+
+# Очередь и защита хостинга
+QUEUE_SLOTS = int(os.getenv("MEDIA_MAX_CONCURRENT", "2"))           # сколько загрузок одновременно
+PER_USER_LIMIT = int(os.getenv("MEDIA_PER_USER_LIMIT", "2"))        # сколько задач в очереди/работе на человека
+QUEUE_MAX = int(os.getenv("MEDIA_QUEUE_MAX", "15"))                 # максимум ожидающих в очереди
+MIN_FREE_MB = int(os.getenv("MEDIA_MIN_FREE_MB", "500"))            # минимум свободного места на диске
+FRAGMENTS = int(os.getenv("MEDIA_FRAGMENTS", "4"))                  # параллельные фрагменты yt-dlp
 
 # ── ПАТТЕРНЫ ССЫЛОК ───────────────────────────────────────────────────────────
 URL_PATTERNS = {
@@ -110,7 +120,7 @@ def detect_platform(text: str) -> tuple[str | None, str | None]:
 
 # ── YT-DLP ОБЁРТКА ────────────────────────────────────────────────────────────
 
-def _ydl_opts(out_path: str, platform: str) -> dict:
+def _ydl_opts(out_path: str, platform: str, height: int | None = None, audio_only: bool = False) -> dict:
     """Настройки yt-dlp под каждую платформу."""
 
     # Базовые настройки — берём лучшее видео до 720p
@@ -121,15 +131,20 @@ def _ydl_opts(out_path: str, platform: str) -> dict:
         "noprogress": True,
         "noplaylist": True,
         "max_filesize": MAX_TOTAL_BYTES,
+        "concurrent_fragment_downloads": FRAGMENTS,
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
     }
+    h = height or MAX_HEIGHT
 
     if platform == "youtube":
         base.update({
             # Предпочитаем mp4, <=720p, с аудио в одном файле
             "format": (
-                f"bestvideo[ext=mp4][height<={MAX_HEIGHT}]+bestaudio[ext=m4a]"
-                f"/bestvideo[height<={MAX_HEIGHT}]+bestaudio"
-                f"/best[height<={MAX_HEIGHT}]"
+                f"bestvideo[ext=mp4][height<={h}]+bestaudio[ext=m4a]"
+                f"/bestvideo[height<={h}]+bestaudio"
+                f"/best[height<={h}]"
                 "/best"
             ),
             "merge_output_format": "mp4",
@@ -159,17 +174,26 @@ def _ydl_opts(out_path: str, platform: str) -> dict:
 
     elif platform in ("vkvideo", "twitch"):
         base.update({
-            "format": f"best[height<={MAX_HEIGHT}]/bestvideo[height<={MAX_HEIGHT}]+bestaudio/best",
+            "format": f"best[height<={h}]/bestvideo[height<={h}]+bestaudio/best",
             "merge_output_format": "mp4",
         })
 
     elif platform == "pinterest":
         base.update({"format": "best"})
 
+    if audio_only:
+        # только звук: m4a без перекодирования (если источник AAC), Telegram играет его как аудио
+        base.update({
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
+        })
+        base.pop("merge_output_format", None)
+
     return base
 
 
-async def _download_ytdlp(url: str, platform: str) -> tuple[str | None, dict]:
+async def _download_ytdlp(url: str, platform: str, height: int | None = None,
+                          audio_only: bool = False, progress: dict | None = None) -> tuple[str | None, dict]:
     """
     Скачать медиа через yt-dlp в временный файл.
     Возвращает (путь_к_файлу, info_dict) или (None, {}).
@@ -184,7 +208,36 @@ async def _download_ytdlp(url: str, platform: str) -> tuple[str | None, dict]:
     tmp_dir = tempfile.mkdtemp(prefix="tgdl_")
     out_template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
 
-    opts = _ydl_opts(out_template, platform)
+    opts = _ydl_opts(out_template, platform, height=height, audio_only=audio_only)
+    prog = progress if progress is not None else {}
+    prog.setdefault("files", {})
+
+    def _hook(d):
+        if prog.get("cancel"):
+            raise yt_dlp.utils.DownloadCancelled("cancelled by user")
+        st = d.get("status")
+        fn = d.get("filename") or d.get("tmpfilename") or ""
+        if st == "downloading":
+            done = d.get("downloaded_bytes") or 0
+            tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            prog["files"][fn] = (done, tot)
+            prog["speed"] = d.get("speed") or 0
+            if not prog.get("est_total"):
+                rf = (d.get("info_dict") or {}).get("requested_formats") or []
+                sizes = [(f.get("filesize") or f.get("filesize_approx") or 0) for f in rf]
+                if rf and all(sizes):
+                    prog["est_total"] = sum(sizes)
+        elif st == "finished":
+            done, tot = prog["files"].get(fn, (0, 0))
+            size = d.get("total_bytes") or d.get("downloaded_bytes") or tot or done
+            prog["files"][fn] = (size, size)
+
+    def _pp_hook(d):
+        if d.get("status") == "started":
+            prog["phase"] = "post"
+
+    opts["progress_hooks"] = [_hook]
+    opts["postprocessor_hooks"] = [_pp_hook]
 
     info = {}
     try:
@@ -228,6 +281,7 @@ async def _download_ytdlp(url: str, platform: str) -> tuple[str | None, dict]:
             "thumbnail": raw_info.get("thumbnail") or "",
             "ext":       raw_info.get("ext") or "",
             "is_photo":  raw_info.get("ext") in ("jpg", "jpeg", "png", "webp"),
+            "is_audio":  bool(audio_only),
             "_tmp_dir":  tmp_dir,
             "_size":     file_size,
         }
@@ -236,10 +290,13 @@ async def _download_ytdlp(url: str, platform: str) -> tuple[str | None, dict]:
 
     except asyncio.TimeoutError:
         logger.error(f"Таймаут скачивания {url}")
+        prog["cancel"] = True          # останавливаем фоновый поток yt-dlp
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         return None, {"_timeout": True}
     except Exception as e:
         err_str = str(e)
         logger.error(f"yt-dlp error {url}: {e}")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # Разбираем типичные ошибки
         if "private" in err_str.lower() or "login" in err_str.lower():
@@ -441,7 +498,8 @@ async def _download_pinterest_fallback(url: str) -> tuple[str | None, dict]:
     return dest, info
 
 
-async def _download_media(url: str, platform: str) -> tuple[str | None, dict]:
+async def _download_media(url: str, platform: str, height: int | None = None,
+                          audio_only: bool = False, progress: dict | None = None) -> tuple[str | None, dict]:
     """Диспетчер: Threads — свой парсер; Pinterest — yt-dlp, затем og-теги; остальное — yt-dlp."""
     if platform == "threads":
         return await _download_threads(url)
@@ -450,12 +508,12 @@ async def _download_media(url: str, platform: str) -> tuple[str | None, dict]:
             _, final = await _http_text(url)
             if "/pin/" in final:
                 url = final
-        path, info = await _download_ytdlp(url, platform)
+        path, info = await _download_ytdlp(url, platform, height, audio_only, progress)
         if path:
             return path, info
         fb_path, fb_info = await _download_pinterest_fallback(url)
         return (fb_path, fb_info) if fb_path else (None, info or fb_info)
-    return await _download_ytdlp(url, platform)
+    return await _download_ytdlp(url, platform, height, audio_only, progress)
 
 
 
@@ -552,26 +610,30 @@ async def _probe_duration(path: str) -> float:
         return 0.0
 
 
-async def _split_video(path: str, tmp_dir: str, duration: float = 0) -> list[str] | None:
+async def _split_video(path: str, tmp_dir: str, duration: float = 0, audio: bool = False) -> list[str] | None:
     """
     Нарезать видео на части ≤ ~49 МБ БЕЗ пережатия (-c copy): качество то же, что в исходнике.
     Резка идёт по ключевым кадрам, поэтому размеры частей «плавают» — при перелёте уменьшаем шаг и повторяем.
     None — не вышло (нет ffmpeg / слишком много частей).
     """
     import glob
+    ext = "m4a" if audio else "mp4"
+    maps = ["-map", "0:a:0"] if audio else ["-map", "0:v:0", "-map", "0:a:0?"]
     size = os.path.getsize(path)
     duration = duration or await _probe_duration(path)
     if not duration:
+        logger.error(f"split: не удалось определить длительность ({path})")
         return None
     if size / PART_TARGET_BYTES > MAX_PARTS:
+        logger.error(f"split: {size/1024/1024:.0f} МБ → ≥{size/PART_TARGET_BYTES:.0f} частей, лимит {MAX_PARTS}")
         return None
     seg = max(5, int(duration * PART_TARGET_BYTES / size))
-    for _ in range(4):
-        for old in glob.glob(os.path.join(tmp_dir, "part_*.mp4")):
+    for attempt in range(6):
+        for old in glob.glob(os.path.join(tmp_dir, f"part_*.{ext}")):
             os.remove(old)
-        pattern = os.path.join(tmp_dir, "part_%03d.mp4")
+        pattern = os.path.join(tmp_dir, f"part_%03d.{ext}")
         cmd = ["ffmpeg", "-y", "-v", "error", "-i", path,
-               "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+               *maps, "-c", "copy",
                "-f", "segment", "-segment_time", str(seg), "-reset_timestamps", "1",
                "-segment_format", "mp4", "-segment_format_options", "movflags=+faststart", pattern]
         try:
@@ -587,17 +649,25 @@ async def _split_video(path: str, tmp_dir: str, duration: float = 0) -> list[str
         if p.returncode != 0:
             logger.error(f"ffmpeg split rc={p.returncode}: {(err or b'')[:200]!r}")
             return None
-        parts = sorted(glob.glob(os.path.join(tmp_dir, "part_*.mp4")))
+        parts = sorted(glob.glob(os.path.join(tmp_dir, f"part_*.{ext}")))
         if not parts:
+            logger.error("split: ffmpeg не создал ни одной части")
             return None
+        biggest = max(os.path.getsize(x) for x in parts) / 1024 / 1024
+        logger.info(f"split: попытка {attempt+1}, seg={seg}с, частей={len(parts)}, макс. часть={biggest:.1f} МБ")
         if all(os.path.getsize(x) <= PART_HARD_BYTES for x in parts):
-            return parts if len(parts) <= MAX_PARTS else None
-        seg = max(3, int(seg * 0.75))
+            if len(parts) <= MAX_PARTS:
+                return parts
+            logger.error(f"split: частей {len(parts)} > лимита {MAX_PARTS}")
+            return None
+        # уменьшаем шаг пропорционально перелёту, а не слепо на 25%
+        seg = max(3, int(seg * min(0.85, PART_TARGET_BYTES / (biggest * 1024 * 1024))))
+    logger.error("split: не удалось уложить части в лимит Telegram за 6 попыток")
     return None
 
 
 async def _send_video_parts(message: types.Message, parts: list[str], caption: str,
-                            width: int, height: int) -> None:
+                            width: int, height: int, progress_cb=None) -> None:
     """Части — альбомами по 10, по порядку. Подпись с номерами частей."""
     from aiogram.types import InputMediaVideo
     n = len(parts)
@@ -626,6 +696,11 @@ async def _send_video_parts(message: types.Message, parts: list[str], caption: s
                                              parse_mode="Markdown", supports_streaming=True)
             else:
                 await message.bot.send_media_group(message.chat.id, media)
+        if progress_cb:
+            try:
+                await progress_cb(min(g + 10, n), n)
+            except Exception:
+                pass
         await asyncio.sleep(1.0)
 
 
@@ -677,16 +752,354 @@ async def _download_image_bytes(url: str) -> bytes | None:
 
 # ── ХЕНДЛЕР ───────────────────────────────────────────────────────────────────
 
-# Семафор — не грузим yt-dlp параллельно
-_DL_SEMAPHORE = asyncio.Semaphore(3)
+# ── Форматирование ────────────────────────────────────────────────────────────
+def _fmt_size(b: float) -> str:
+    mb = b / 1024 / 1024
+    return f"{mb / 1024:.1f} ГБ" if mb >= 1024 else f"{mb:.0f} МБ"
 
-async def handle_media_link(message: types.Message, custom_url: str | None = None, custom_platform: str | None = None):
+
+def _fmt_wait(sec: float) -> str:
+    sec = max(0, int(sec))
+    if sec < 60:
+        return f"~{max(5, round(sec / 5) * 5)} с"
+    m, s = divmod(round(sec / 10) * 10, 60)
+    if m >= 10:
+        return f"~{m + (1 if s >= 30 else 0)} мин"
+    return f"~{m} мин {s} с" if s else f"~{m} мин"
+
+
+def _bar(pct: int, width: int = 10) -> str:
+    filled = max(0, min(width, pct * width // 100))
+    return "▓" * filled + "░" * (width - filled)
+
+
+# ── Очередь загрузок ──────────────────────────────────────────────────────────
+class _Job:
+    _seq = 0
+
+    def __init__(self, user_id: int, kind: str, est_bytes: int = 0):
+        _Job._seq += 1
+        self.id = _Job._seq
+        self.user_id = user_id
+        self.kind = kind                      # "video" | "audio"
+        self.est_bytes = est_bytes
+        self.event = asyncio.Event()          # выставляется, когда задача получила слот
+        self.cancelled = False
+        self.ok = False
+        self.started = 0.0
+        self.prog: dict = {"files": {}, "speed": 0, "est_total": 0, "phase": "download"}
+
+
+class _DownloadQueue:
+    """FIFO-очередь с N слотами. Считает позицию и примерное ожидание по реальному времени прошлых задач."""
+
+    def __init__(self, slots: int):
+        self.slots = max(1, slots)
+        self.running: list[_Job] = []
+        self.waiting: list[_Job] = []
+        self.avg = {"video": 90.0, "audio": 40.0}      # стартовые оценки, дальше — скользящее среднее
+
+    def active_for(self, uid: int) -> int:
+        return sum(1 for j in self.running + self.waiting if j.user_id == uid)
+
+    def position(self, job: _Job) -> int:
+        return self.waiting.index(job) + 1 if job in self.waiting else 0
+
+    def eta(self, job: _Job) -> float:
+        """Сколько секунд до старта job: прогоняем простую симуляцию по слотам."""
+        now = time.monotonic()
+        free = sorted(max(5.0, self.avg[j.kind] - (now - j.started)) for j in self.running)
+        free += [0.0] * (self.slots - len(free))
+        free.sort()
+        for j in self.waiting:
+            t = free.pop(0)
+            if j is job:
+                return t
+            free.append(t + self.avg[j.kind])
+            free.sort()
+        return 0.0
+
+    def submit(self, job: _Job) -> bool:
+        """True — слот свободен, стартуем сразу; False — встали в очередь."""
+        if len(self.running) < self.slots and not self.waiting:
+            self._start(job)
+            return True
+        self.waiting.append(job)
+        return False
+
+    def _start(self, job: _Job) -> None:
+        job.started = time.monotonic()
+        self.running.append(job)
+        job.event.set()
+
+    def _dispatch(self) -> None:
+        while self.waiting and len(self.running) < self.slots:
+            self._start(self.waiting.pop(0))
+
+    def cancel_waiting(self, job: _Job) -> bool:
+        if job in self.waiting:
+            self.waiting.remove(job)
+            job.event.set()
+            return True
+        return False
+
+    def release(self, job: _Job) -> None:
+        if job in self.running:
+            self.running.remove(job)
+            if job.ok:
+                el = time.monotonic() - job.started
+                self.avg[job.kind] = 0.7 * self.avg[job.kind] + 0.3 * el
+        self._dispatch()
+
+
+_QUEUE = _DownloadQueue(QUEUE_SLOTS)
+_JOBS: dict[int, _Job] = {}
+_PENDING: "OrderedDict[str, dict]" = OrderedDict()        # ожидают выбора качества
+QUALITY_TIERS = [h for h in (1080, 720, 480, 360) if h <= MAX_HEIGHT] or [MAX_HEIGHT]
+
+
+async def _edit(status: types.Message, text: str, kb: InlineKeyboardMarkup | None = None, **kw) -> None:
+    try:
+        await status.edit_text(text, reply_markup=kb, **kw)
+    except Exception as e:
+        if "not modified" not in str(e):
+            logger.debug(f"status edit: {e}")
+
+
+def _cancel_kb(job: _Job) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✖️ Отмена", callback_data=f"dlx:{job.id}")]])
+
+
+def _job_header(emoji: str, label: str, quality, title: str = "") -> str:
+    q = " · 🎧 аудио" if quality == "audio" else (f" · {quality}p" if isinstance(quality, int) else "")
+    head = f"{emoji} {label}{q}"
+    return f"{head}\n🎬 {title[:60]}" if title else head
+
+
+def _render_progress(header: str, job: _Job) -> str:
+    pr = job.prog
+    if pr.get("phase") == "post":
+        return f"{header}\n🔧 Обрабатываю (склейка видео и звука)…"
+    done = sum(d for d, _ in pr["files"].values())
+    total = pr.get("est_total") or sum(t for _, t in pr["files"].values())
+    if not done:
+        el = int(time.monotonic() - job.started) if job.started else 0
+        return f"{header}\n⬇️ Скачиваю… {el} с"
+    lines = [header]
+    if total and total >= done:
+        pct = min(99, int(done * 100 / total))
+        lines.append(f"⬇️ {_bar(pct)} {pct}%  ({_fmt_size(done)} из {_fmt_size(total)})")
+    else:
+        lines.append(f"⬇️ Скачано {_fmt_size(done)}")
+    speed = pr.get("speed") or 0
+    if speed:
+        tail = f"🚀 {speed / 1024 / 1024:.1f} МБ/с"
+        if total and total > done:
+            tail += f" · осталось {_fmt_wait((total - done) / speed)}"
+        lines.append(tail)
+    return "\n".join(lines)
+
+
+async def _progress_ticker(status: types.Message, job: _Job, header: str, interval: float = 3.5) -> None:
+    last = ""
+    kb = _cancel_kb(job)
+    while True:
+        await asyncio.sleep(interval)
+        text = _render_progress(header, job)
+        if text != last:
+            await _edit(status, text, kb)
+            last = text
+
+
+async def _wait_in_queue(job: _Job, status: types.Message, header: str) -> bool:
+    """Ждём слот, показывая позицию и ожидание. False — отменили, пока ждали."""
+    if _QUEUE.submit(job):
+        return True
+    last = ""
+    kb = _cancel_kb(job)
+    while not job.event.is_set():
+        pos = _QUEUE.position(job)
+        if pos:
+            ahead = pos - 1
+            text = (f"⏳ Ты в очереди: {pos}-й\n"
+                    f"👥 Впереди тебя: {ahead} · сейчас в работе: {len(_QUEUE.running)}\n"
+                    f"⌛ Примерное ожидание: {_fmt_wait(_QUEUE.eta(job))}\n\n{header}")
+            if text != last:
+                await _edit(status, text, kb)
+                last = text
+        try:
+            await asyncio.wait_for(job.event.wait(), timeout=6)
+        except asyncio.TimeoutError:
+            pass
+    return not job.cancelled
+
+
+# ── Выбор качества (YouTube) ──────────────────────────────────────────────────
+async def _probe_youtube(url: str) -> dict | None:
+    try:
+        import yt_dlp
+    except ImportError:
+        return None
+
+    def _run():
+        opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True,
+                "socket_timeout": 20}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        return await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, _run), timeout=30)
+    except Exception as e:
+        logger.info(f"probe youtube {url[:60]}: {str(e)[:150]}")
+        return None
+
+
+def _quality_options(info: dict | None) -> list[dict]:
+    """[{tier, label, size}] — только варианты, которые реально влезут в лимиты. Последний — аудио."""
+    if not info:
+        return ([{"tier": h, "label": f"{h}p", "size": 0} for h in QUALITY_TIERS]
+                + [{"tier": "audio", "label": "🎧 Аудио", "size": 0}])
+    dur = info.get("duration") or 0
+    fmts = info.get("formats") or []
+
+    def fsz(f: dict) -> int:
+        sz = f.get("filesize") or f.get("filesize_approx")
+        if sz:
+            return int(sz)
+        tbr = f.get("tbr") or 0
+        return int(tbr * 1000 / 8 * dur) if tbr and dur else 0
+
+    audio = [f for f in fmts if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")]
+    a_pool = [f for f in audio if f.get("ext") == "m4a"] or audio
+    a_best = max(a_pool, key=lambda f: f.get("abr") or f.get("tbr") or 0, default=None)
+    a_size = fsz(a_best) if a_best else (int(128 * 1000 / 8 * dur) if dur else 0)
+
+    out, seen = [], set()
+    for tier in QUALITY_TIERS:
+        vids = [f for f in fmts if f.get("vcodec") not in (None, "none") and f.get("acodec") in (None, "none")
+                and (f.get("height") or 0) and f["height"] <= tier]
+        if not vids:
+            continue
+        pool = [f for f in vids if f.get("ext") == "mp4"] or vids
+        best = max(pool, key=lambda f: ((f.get("height") or 0), f.get("tbr") or 0))
+        actual = best["height"]
+        if actual in seen:
+            continue
+        seen.add(actual)
+        v = fsz(best)
+        size = v + a_size if v else 0
+        parts = -(-size // PART_TARGET_BYTES) if size else 0
+        if size and (size > MAX_TOTAL_BYTES or parts > MAX_PARTS):
+            continue                                   # не влезет — не предлагаем
+        out.append({"tier": tier, "label": f"{actual}p", "size": size})
+    if not out and not fmts:                           # нет данных о форматах — даём стандартный набор
+        out = [{"tier": h, "label": f"{h}p", "size": 0} for h in QUALITY_TIERS]
+    out.append({"tier": "audio", "label": "🎧 Аудио", "size": a_size})
+    return out
+
+
+def _quality_kb(tok: str, options: list[dict]) -> InlineKeyboardMarkup:
+    btns = []
+    for o in options:
+        txt = o["label"] + (f" · ~{_fmt_size(o['size'])}" if o["size"] else "")
+        btns.append(InlineKeyboardButton(text=txt, callback_data=f"dlq:{tok}:{o['tier']}"))
+    rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data=f"dlq:{tok}:x")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _expire_pending(tok: str, status: types.Message, delay: int = 300) -> None:
+    await asyncio.sleep(delay)
+    if _PENDING.pop(tok, None) is not None:
+        await _edit(status, "⌛ Время выбора качества вышло — кинь ссылку ещё раз.")
+
+
+async def _ask_youtube_quality(message: types.Message, url: str) -> None:
+    status = await message.answer("🔎 Смотрю видео…")
+    info = await _probe_youtube(url)
+    if info and info.get("is_live"):
+        await _edit(status, "📡 Это прямой эфир — скачать его нельзя.")
+        return
+    options = _quality_options(info)
+    tok = secrets.token_hex(4)
+    title = ((info or {}).get("title") or "")[:80]
+    _PENDING[tok] = {"message": message, "url": url, "user_id": message.from_user.id if message.from_user else 0,
+                     "options": options, "title": title}
+    while len(_PENDING) > 200:
+        _PENDING.popitem(last=False)
+    lines = ["▶️ YouTube"]
+    if title:
+        lines.append(f"🎬 {title}")
+    meta = []
+    dur = _fmt_duration((info or {}).get("duration") or 0)
+    if dur:
+        meta.append(f"⏱ {dur}")
+    up = (info or {}).get("uploader") or (info or {}).get("channel")
+    if up:
+        meta.append(str(up)[:40])
+    if meta:
+        lines.append(" · ".join(meta))
+    lines.append("\nВыбери качество" + (" (размеры примерные):" if any(o["size"] for o in options) else ":"))
+    await _edit(status, "\n".join(lines), _quality_kb(tok, options))
+    asyncio.create_task(_expire_pending(tok, status))
+
+
+async def callback_dl_quality(callback: types.CallbackQuery):
+    try:
+        _, tok, q = (callback.data or "").split(":", 2)
+    except ValueError:
+        await callback.answer()
+        return
+    p = _PENDING.get(tok)
+    if not p:
+        await callback.answer("Выбор устарел — кинь ссылку заново", show_alert=True)
+        return
+    if callback.from_user.id != p["user_id"]:
+        await callback.answer("Это не твоя ссылка 🙂", show_alert=True)
+        return
+    _PENDING.pop(tok, None)
+    if q == "x":
+        await _edit(callback.message, "❌ Отменено.")
+        await callback.answer()
+        return
+    await callback.answer()
+    quality = "audio" if q == "audio" else int(q)
+    opt = next((o for o in p["options"] if str(o["tier"]) == q), None)
+    await _start_job(p["message"], "youtube", p["url"], quality=quality, status=callback.message,
+                     est_bytes=(opt or {}).get("size", 0), title=p["title"], user_id=callback.from_user.id)
+
+
+async def callback_dl_cancel(callback: types.CallbackQuery):
+    try:
+        jid = int((callback.data or "").split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+    job = _JOBS.get(jid)
+    if not job:
+        await callback.answer("Уже не активно", show_alert=False)
+        return
+    if callback.from_user.id != job.user_id:
+        await callback.answer("Это не твоя загрузка 🙂", show_alert=True)
+        return
+    job.cancelled = True
+    job.prog["cancel"] = True
+    _QUEUE.cancel_waiting(job)
+    await callback.answer("Отменяю…")
+
+
+# ── Запуск задачи ─────────────────────────────────────────────────────────────
+async def handle_media_link(message: types.Message, custom_url: str | None = None,
+                            custom_platform: str | None = None, ask_quality: bool | None = None,
+                            quality=None):
     """
     Основной хендлер: пользователь кинул ссылку →
-    определяем платформу → скачиваем → отправляем.
+    определяем платформу → (YouTube: выбор качества) → очередь → скачиваем → отправляем.
+    Вызовы из других модулей (custom_url) качество не спрашивают — берут MAX_HEIGHT.
     """
     text = custom_url or message.text or message.caption or ""
-    
+
     if custom_platform and custom_url:
         platform, url = custom_platform, custom_url
     else:
@@ -695,21 +1108,126 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
     if not platform or not url:
         return  # не наша ссылка — пропускаем
 
+    if ask_quality is None:
+        ask_quality = custom_url is None
+    if platform == "youtube" and ask_quality and quality is None:
+        await _ask_youtube_quality(message, url)
+        return
+    await _start_job(message, platform, url, quality=quality)
+
+
+async def _start_job(message: types.Message, platform: str, url: str, quality=None,
+                     status: types.Message | None = None, est_bytes: int = 0,
+                     title: str = "", user_id: int | None = None):
+    emoji = PLATFORM_EMOJIS[platform]
+    label = PLATFORM_LABELS[platform]
+    uid = user_id if user_id is not None else (message.from_user.id if message.from_user else 0)
+    is_bot = bool(message.from_user and message.from_user.is_bot)
+    header = _job_header(emoji, label, quality, title)
+
+    async def _say(text: str):
+        nonlocal status
+        if status is None:
+            status = await message.answer(text)
+        else:
+            await _edit(status, text)
+
+    if not is_bot and uid and _QUEUE.active_for(uid) >= PER_USER_LIMIT:
+        await _say(f"⏳ У тебя уже {_QUEUE.active_for(uid)} загрузк(и) в очереди — дождись, пока они закончатся.")
+        return
+    if len(_QUEUE.waiting) >= QUEUE_MAX:
+        await _say(f"🚧 Очередь переполнена ({len(_QUEUE.waiting)} ожидают). Попробуй чуть позже.")
+        return
+
+    job = _Job(uid, "audio" if quality == "audio" else "video", est_bytes)
+    _JOBS[job.id] = job
+    if status is None:
+        status = await message.answer(f"{header}\n⏳ Принял, ставлю в очередь…", reply_markup=_cancel_kb(job))
+    else:
+        await _edit(status, f"{header}\n⏳ Принял, ставлю в очередь…", _cancel_kb(job))
+
+    try:
+        if not await _wait_in_queue(job, status, header):
+            await _edit(status, "❌ Загрузка отменена.")
+            return
+        await _process(message, platform, url, quality, status, job, header, title)
+    except Exception as e:
+        logger.exception(f"media job error: {e}")
+        await _edit(status, f"❌ Что-то пошло не так.\n{str(e)[:200]}")
+    finally:
+        _JOBS.pop(job.id, None)
+        _QUEUE.release(job)
+
+
+async def _send_audio_result(message: types.Message, status: types.Message, filepath: str,
+                             info: dict, header: str) -> None:
+    title = (info.get("title") or "audio")[:60]
+    performer = (info.get("uploader") or "")[:60]
+    duration = int(info.get("duration") or 0)
+    safe = re.sub(r'[\\/:*?"<>|]+', "_", title).strip() or "audio"
+
+    async def _send(path: str, fname: str, caption: str | None, dur: int | None):
+        kw = dict(caption=caption, title=title, performer=performer or None, duration=dur)
+        f = FSInputFile(path, filename=fname)
+        try:
+            await message.bot.send_audio(message.chat.id, f, request_timeout=600, **kw)
+        except TypeError:       # старый aiogram без request_timeout
+            await message.bot.send_audio(message.chat.id, f, **kw)
+
+    if os.path.getsize(filepath) <= MAX_VIDEO_BYTES:
+        await _edit(status, f"{header}\n📤 Загружаю в Telegram…")
+        await _send(filepath, f"{safe}.m4a", f"🎧 {title}"[:1000], duration or None)
+    else:
+        await _edit(status, f"{header}\n✂️ Файл {_fmt_size(os.path.getsize(filepath))} — режу на части…")
+        parts = await _split_video(filepath, info.get("_tmp_dir") or os.path.dirname(filepath), duration, audio=True)
+        if not parts:
+            raise RuntimeError("не удалось нарезать аудио на части")
+        n = len(parts)
+        for i, fp in enumerate(parts, 1):
+            await _edit(status, f"{header}\n📤 Загружаю в Telegram: {i}/{n} частей")
+            await _send(fp, f"{safe}_part{i:02d}.m4a", f"🎧 {title}\n✂️ Часть {i}/{n}"[:1000], None)
+            await asyncio.sleep(0.5)
+    try:
+        await status.delete()
+    except Exception:
+        pass
+
+
+async def _process(message: types.Message, platform: str, url: str, quality, status: types.Message,
+                   job: _Job, header: str, title_hint: str = ""):
+    """Скачивание → отправка. Выполняется, пока задача держит слот очереди."""
     emoji = PLATFORM_EMOJIS[platform]
     label = PLATFORM_LABELS[platform]
 
-    # Статусное сообщение
-    status = await message.answer(
-        f"{emoji} Скачиваю с {label}...\n"
-        f"`{url[:60]}{'...' if len(url) > 60 else ''}`",
-        parse_mode="Markdown"
-    )
+    # защита диска хостинга
+    try:
+        free = shutil.disk_usage(tempfile.gettempdir()).free
+    except Exception:
+        free = None
+    need = max(MIN_FREE_MB * 1024 * 1024, int(job.est_bytes * 2.3))
+    if free is not None and free < need:
+        logger.warning(f"мало места на диске: свободно {free/1024/1024:.0f} МБ, нужно {need/1024/1024:.0f} МБ")
+        await _edit(status, f"💾 На сервере сейчас мало места (свободно {_fmt_size(free)}). Попробуй чуть позже.")
+        return
 
-    async with _DL_SEMAPHORE:
-        filepath, info = await _download_media(url, platform)
+    height = quality if isinstance(quality, int) else None
+    audio_only = quality == "audio"
+    await _edit(status, f"{header}\n⬇️ Начинаю скачивание…", _cancel_kb(job))
+    ticker = asyncio.create_task(_progress_ticker(status, job, header))
+    try:
+        filepath, info = await _download_media(url, platform, height=height, audio_only=audio_only,
+                                               progress=job.prog)
+    finally:
+        ticker.cancel()
+
+    if job.cancelled:
+        _cleanup(filepath, info)
+        await _edit(status, "❌ Загрузка отменена.")
+        return
 
     # ── Threads: пост только с текстом ────────────────────────────
     if info.get("_text_only"):
+        job.ok = True
         who = f"*{_md_escape(info.get('uploader', ''))}*\n" if info.get("uploader") else ""
         body = _md_escape(info.get("title", ""))[:3500]
         try:
@@ -752,6 +1270,17 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
     except Exception:
         pass
 
+    if info.get("is_audio"):
+        try:
+            await _send_audio_result(message, status, filepath, info, header)
+            job.ok = True
+        except Exception as e:
+            logger.error(f"audio send error: {e}")
+            await _edit(status, f"❌ Не удалось отправить аудио.\n{str(e)[:200]}")
+        finally:
+            _cleanup(filepath, info)
+        return
+
     # Карусель (Threads): отправляем альбомом
     if info.get("_album"):
         from aiogram.types import InputMediaPhoto, InputMediaVideo
@@ -773,6 +1302,7 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
                     await message.answer_photo(m0.media, caption=caption, parse_mode="Markdown")
             else:
                 raise ValueError("все файлы больше лимита")
+            job.ok = True
             try:
                 await status.delete()
             except Exception:
@@ -809,7 +1339,10 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
         except Exception:
             pass
         try:
-            await _send_video_parts(message, parts, caption, width, height)
+            async def _pcb(done, total):
+                await _edit(status, f"{header}\n📤 Загружаю в Telegram: {done}/{total} частей")
+            await _send_video_parts(message, parts, caption, width, height, progress_cb=_pcb)
+            job.ok = True
             try:
                 await status.delete()
             except Exception:
@@ -846,6 +1379,7 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
                 supports_streaming=True,
             )
 
+        job.ok = True
         try:
             await status.delete()
         except Exception:
@@ -910,15 +1444,30 @@ async def cmd_dl(message: types.Message):
         matched_url = url
 
     # Вызываем функцию напрямую без модификации объекта message
-    await handle_media_link(message, custom_url=matched_url, custom_platform=platform)
+    await handle_media_link(message, custom_url=matched_url, custom_platform=platform, ask_quality=True)
 
 # ── РЕГИСТРАЦИЯ ───────────────────────────────────────────────────────────────
+
+def cleanup_stale_tmp(max_age_s: int = 7200) -> None:
+    """Удаляем «осиротевшие» папки tgdl_* (после падений/рестартов), чтобы не забивать диск хостинга."""
+    import glob
+    now = time.time()
+    for d in glob.glob(os.path.join(tempfile.gettempdir(), "tgdl_*")):
+        try:
+            if os.path.isdir(d) and now - os.path.getmtime(d) > max_age_s:
+                shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+
 
 def register_media_handlers(dp: Dispatcher):
     """Зарегистрировать хендлеры скачивания медиа."""
     from aiogram.filters import Command
 
     dp.message.register(cmd_dl, Command("dl"))
+    dp.callback_query.register(callback_dl_quality, F.data.startswith("dlq:"))
+    dp.callback_query.register(callback_dl_cancel, F.data.startswith("dlx:"))
+    cleanup_stale_tmp()
 
     # Перехватываем текстовые сообщения со ссылками
     # Регистрируем ДО общего handle_ai_chat, чтобы ссылки не уходили в AI
