@@ -4,6 +4,12 @@ main.py — точка входа бота. Только импорты, рег�
   config.py          — константы, CHAT_HISTORY (per-chat), расписание
   duty_handlers.py   — наряды, расписание, планировщик
   ai_handlers.py     — Gemini: чат, /meme, /tldr, /poll, /imagen, фото, документы, ГС/кружочки
+  vision_handlers.py — вопросы реплаем по фото/PDF/видео, мемы «сделай мем про…», /tr, /explain
+  fun_handlers.py    — /pick, /who (жребий с анимацией), /roll, /coin
+  places_handlers.py — /nearby и геопозиция: кафе, аптеки, магазины
+  film_handler.py    — /film через TMDB
+  freebies.py        — /free: раздачи Epic/Steam и уведомления
+  music_links.py     — ссылки Spotify / Яндекс.Музыка / VK → поиск трека
   music_handlers.py  — музыка, плейлисты, DJ, inline
   anixart_handler.py — аниме поиск + inline
   ozon_handler.py    — поиск товаров
@@ -14,6 +20,7 @@ import asyncio
 import logging
 import sys
 import traceback
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -72,6 +79,12 @@ from anixart_handler import (
     anixart_startup_selftest, close_anixart_session,
 )
 from ozon_handler import cmd_ozon
+from fun_handlers import register_fun_handlers
+from places_handlers import register_places_handlers
+from film_handler import register_film_handlers
+from freebies import register_freebies_handlers, check_freebies
+from music_links import register_music_link_handlers
+from vision_handlers import register_vision_handlers
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -116,7 +129,17 @@ async def cmd_help(message: types.Message) -> None:
         "(инста, музыка, аниме, товары, видео, наряды, погода)\n"
         "/ai — ask, roast, debate, story, memory, forget\n"
         "/persona — сменить персону\n"
-        "/meme, /tldr, /poll, /imagen — мемы, выжимка, картинки\n\n"
+        "/meme, /tldr, /poll, /imagen — мемы, выжимка, картинки\n"
+        "ответь на картинку: «сделай мем про …»\n"
+        "ответь на фото/PDF/видео/ГС: «переведи», «что написано», «объясни мем», «о чём документ»\n\n"
+        "🎲 <b>выбор и жребий</b>\n"
+        "/pick кофе или чай, /who кто моет посуду, /roll, /coin\n\n"
+        "📍 <b>рядом</b>\n"
+        "/nearby — кафе, аптеки, магазины (скинь геопозицию или адрес)\n\n"
+        "🍿 <b>фильмы и сериалы</b>\n"
+        "/film &lt;название&gt; (trending, random, ai &lt;вайб&gt;)\n\n"
+        "🎁 <b>бесплатные игры</b>\n"
+        "/free — что раздают сейчас, /free sale — скидки, /free on|off — уведомления\n\n"
         "📋 <b>наряды и дембель</b>\n"
         "/svodki — напомнить сейчас\n"
         "/dembel — дембельский таймер\n\n"
@@ -125,7 +148,8 @@ async def cmd_help(message: types.Message) -> None:
         "📸 <b>instagram</b>\n"
         "/ig &lt;username&gt;, /igdl &lt;ссылка&gt;, /ig_subs, /ig_popular\n\n"
         "📥 <b>медиа</b>\n"
-        "ссылка YouTube/TikTok/X/Reddit/Instagram или /dl &lt;ссылка&gt;\n\n"
+        "ссылка YouTube/TikTok/X/Reddit/Instagram/Pinterest/VK Видео/Twitch-клип/Threads или /dl &lt;ссылка&gt;\n"
+        "ссылка Spotify/Яндекс.Музыки/VK Музыки → найду трек\n\n"
         "🎬 <b>аниме</b>\n"
         "/anime &lt;название&gt; (random, ai, top, schedule, profile)\n\n"
         "🔥 <b>лента</b>\n"
@@ -257,6 +281,14 @@ async def main():
     dp.callback_query.register(callback_dj_vote,         F.data.startswith("dj_vote:"))
     dp.callback_query.register(callback_dj_finish,       F.data == "dj_finish")
 
+    # ── Новые модули (ДО handle_photo/handle_document/handle_ai_chat — порядок важен) ──
+    register_fun_handlers(dp)
+    register_places_handlers(dp)
+    register_film_handlers(dp)
+    register_freebies_handlers(dp)
+    register_music_link_handlers(dp)
+    register_vision_handlers(dp)
+
     # ── Медиа, документы, ГС/кружочки и текстовый ИИ-чат ──────────────────────
     dp.message.register(handle_photo,    F.photo)
     dp.message.register(handle_document, F.document)
@@ -274,6 +306,9 @@ async def main():
     scheduler.add_job(send_retry_reminder,     "interval", minutes=15, args=[bot, "svodki"])
     scheduler.add_job(send_retry_reminder,     "interval", minutes=15, args=[bot, "proc"])
     scheduler.add_job(check_anime_episodes,    "interval", hours=4, args=[bot])
+    scheduler.add_job(check_freebies,          "interval", hours=2, args=[bot], id="freebies",
+                      max_instances=1, coalesce=True,
+                      next_run_time=datetime.now(TIMEZONE) + timedelta(seconds=45))
     scheduler.start()
 
     asyncio.create_task(ig_checker_task(bot))

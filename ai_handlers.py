@@ -545,7 +545,9 @@ async def _show_ai_help(message: types.Message):
         f"🛠 <b>Просто попроси ИИ</b> (ответом боту или с упоминанием): «найди профиль natgeo в инсте», "
         f"«скинь Du Hast», «посоветуй аниме», «найди наушники до 3000», «скачай видео по ссылке», "
         f"«кто сегодня на сводках», «какая погода в Москве»\n"
-        f"<code>/meme</code> (или <code>/meme top</code>) — сделать мем из фото"
+        f"<code>/meme</code> (или <code>/meme top</code>) — сделать мем из фото; "
+        f"или ответь на картинку: «сделай мем про …»\n"
+        f"👀 Ответь на фото/PDF/видео/ГС: «переведи», «что тут написано», «объясни мем» (<code>/tr</code>, <code>/explain</code>)"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -924,6 +926,63 @@ def _render_impact_meme(img: Image.Image, top: str, bottom: str, font_b: str) ->
     return out.getvalue()
 
 
+def _meme_fonts() -> tuple[str, str]:
+    """Пути к жирному/обычному шрифту: сначала fonts/ из репозитория, потом системный DejaVu."""
+    cands = [
+        (os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf"), os.path.join(BASE_DIR, "fonts", "DejaVuSans.ttf")),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ]
+    for b, r in cands:
+        if os.path.exists(b):
+            return b, (r if os.path.exists(r) else b)
+    return cands[0]
+
+
+async def build_meme_bytes(chat_id: int, img: Image.Image, hint: str = "",
+                           impact: bool = False, fresh: bool = False) -> bytes | None:
+    """
+    Общая «фабрика» мемов: Gemini придумывает подпись к картинке, Pillow накладывает.
+    Используется /meme, ответом «сделай мем про …» и кнопками «ещё вариант».
+    fresh=True — повышенная «температура», чтобы вариант отличался от прошлого.
+    Возвращает JPEG-байты или None, если Gemini недоступен.
+    """
+    client = get_gemini()
+    if not client:
+        return None
+    from google.genai import types as gt
+
+    img = img.convert("RGB")
+    persona = PERSONAS.get(get_persona(chat_id), PERSONAS["advisor"])
+    recent_chat = "\n".join(list(CHAT_HISTORY[chat_id])[-8:])
+
+    prompt = (
+        f"Ты — мастер локальных мемов (характер: {persona['label']}). "
+        "Придумай смешную, жизненную и ироничную подпись к этой картинке. "
+        "Тематика по умолчанию: служба, наряды по сводкам и процедурке, дембель, гейминг (CS2, Dota 2), айтишники.\n"
+    )
+    if recent_chat and not hint:
+        prompt += f"Недавний контекст чата (можешь обыграть, если подходит к фото):\n{recent_chat}\n"
+    if hint:
+        prompt += f"ТЕМА МЕМА от автора (обязательно обыграй её): {hint}\n"
+    prompt += (
+        "Выдай СТРОГО две строки через символ |. "
+        "Первая строка — короткий ударный заголовок (1-4 слова). "
+        "Вторая строка — добивающий панчлайн (3-9 слов). Без кавычек и лишних пояснений."
+    )
+    cfg = gt.GenerateContentConfig(temperature=1.2) if fresh else None
+    response = await client.aio.models.generate_content(
+        model="gemini-2.5-flash", contents=[img, prompt], config=cfg
+    )
+    text = (response.text or "").replace('"', "").replace("\n", " ").strip()
+    top, bottom = (text.split("|", 1) if "|" in text else (text, ""))
+    top, bottom = top.strip().upper(), bottom.strip()
+
+    font_b, font_r = _meme_fonts()
+    if impact:
+        return await asyncio.to_thread(_render_impact_meme, img, top, bottom, font_b)
+    return await asyncio.to_thread(_render_demotivator, img, top, bottom, font_b, font_r)
+
+
 async def cmd_meme(message: types.Message):
     from duty_handlers import auto_delete_later
     client = get_gemini()
@@ -938,7 +997,8 @@ async def cmd_meme(message: types.Message):
     if not photo:
         sent = await message.answer(
             "🖼 Отправь фотку с подписью <code>/meme</code> (или ответь на фото).\n"
-            "Для классического мема с верхним/нижним текстом: <code>/meme top</code>",
+            "Для классического мема с верхним/нижним текстом: <code>/meme top</code>\n"
+            "Можно и словами: ответь на картинку «сделай мем про дембель»",
             parse_mode="HTML",
         )
         auto_delete_later(message.bot, message.chat.id, sent.message_id, 10)
@@ -952,43 +1012,10 @@ async def cmd_meme(message: types.Message):
     try:
         file_info  = await message.bot.get_file(photo[-1].file_id)
         downloaded = await message.bot.download_file(file_info.file_path)
-        img = Image.open(downloaded).convert("RGB")
-
-        persona_key = get_persona(message.chat.id)
-        persona = PERSONAS.get(persona_key, PERSONAS["advisor"])
-        recent_chat = "\n".join(list(CHAT_HISTORY[message.chat.id])[-8:])
-
-        prompt = (
-            f"Ты — мастер локальных мемов (характер: {persona['label']}). "
-            "Придумай смешную, жизненную и ироничную подпись к этой картинке. "
-            "Тематика: служба, наряды по сводкам и процедурке, дембель, гейминг (CS2, Dota 2), айтишники.\n"
-        )
-        if recent_chat:
-            prompt += f"Недавний контекст чата (можешь обыграть, если подходит к фото):\n{recent_chat}\n"
-        if custom_hint:
-            prompt += f"Пожелание от автора к теме мема: {custom_hint}\n"
-        prompt += (
-            "Выдай СТРОГО две строки через символ |. "
-            "Первая строка — короткий ударный заголовок (1-4 слова). "
-            "Вторая строка — добивающий панчлайн (3-9 слов). Без кавычек и лишних пояснений."
-        )
-
-        response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=[img, prompt]
-        )
-        text = (response.text or "").replace('"', "").replace("\n", " ").strip()
-        top, bottom = (text.split("|", 1) if "|" in text else (text, ""))
-        top, bottom = top.strip().upper(), bottom.strip()
-
-        font_b = os.path.join(BASE_DIR, "fonts", "DejaVuSans-Bold.ttf")
-        font_r = os.path.join(BASE_DIR, "fonts", "DejaVuSans.ttf")
-
-        if is_impact:
-            jpg_bytes = await asyncio.to_thread(_render_impact_meme, img, top, bottom, font_b)
-        else:
-            jpg_bytes = await asyncio.to_thread(_render_demotivator, img, top, bottom, font_b, font_r)
-
-        await message.answer_photo(BufferedInputFile(jpg_bytes, filename="meme.jpg"))
+        img = Image.open(downloaded)
+        jpg_bytes = await build_meme_bytes(message.chat.id, img, custom_hint, is_impact)
+        if jpg_bytes:
+            await message.answer_photo(BufferedInputFile(jpg_bytes, filename="meme.jpg"))
     except Exception as e:
         logger.error(f"Ошибка meme: {e}")
         await message.reply(f"❌ Нейроны перегрелись: {e}")

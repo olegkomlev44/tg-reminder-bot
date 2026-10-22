@@ -1,5 +1,6 @@
 """
-media_downloader.py — скачивание медиа из YouTube, TikTok, Twitter/X, Reddit.
+media_downloader.py — скачивание медиа из YouTube, TikTok, Twitter/X, Reddit,
+Pinterest, VK Видео/Клипы, Twitch-клипов и Threads.
 
 Подключение в main.py:
     from media_downloader import register_media_handlers
@@ -54,6 +55,22 @@ URL_PATTERNS = {
         r"https?://(?:www\.|old\.|new\.)?reddit\.com/r/\S+|https?://redd\.it/\S+",
         re.IGNORECASE
     ),
+    "pinterest": re.compile(
+        r"https?://(?:[a-z]{2,3}\.|www\.)?pinterest\.[a-z.]{2,6}/pin/\S+|https?://pin\.it/\S+",
+        re.IGNORECASE
+    ),
+    "vkvideo": re.compile(
+        r"https?://(?:www\.|m\.)?(?:vk\.com|vk\.ru|vkvideo\.ru)/(?:video|clip)-?\d+_\d+\S*",
+        re.IGNORECASE
+    ),
+    "twitch": re.compile(
+        r"https?://(?:clips\.twitch\.tv/[\w-]+|(?:www\.|m\.)?twitch\.tv/\w+/clip/[\w-]+)\S*",
+        re.IGNORECASE
+    ),
+    "threads": re.compile(
+        r"https?://(?:www\.)?threads\.(?:net|com)/(?:@[\w.]+/post/|t/)[\w-]+\S*",
+        re.IGNORECASE
+    ),
 }
 
 PLATFORM_LABELS = {
@@ -61,6 +78,10 @@ PLATFORM_LABELS = {
     "tiktok":  "TikTok",
     "twitter": "𝕏 (Twitter)",
     "reddit":  "Reddit",
+    "pinterest": "Pinterest",
+    "vkvideo": "VK Видео",
+    "twitch":  "Twitch",
+    "threads": "Threads",
 }
 
 PLATFORM_EMOJIS = {
@@ -68,6 +89,10 @@ PLATFORM_EMOJIS = {
     "tiktok":  "🎵",
     "twitter": "🐦",
     "reddit":  "🤖",
+    "pinterest": "📌",
+    "vkvideo": "🟦",
+    "twitch":  "🟣",
+    "threads": "🧵",
 }
 
 
@@ -132,10 +157,19 @@ def _ydl_opts(out_path: str, platform: str) -> dict:
             "merge_output_format": "mp4",
         })
 
+    elif platform in ("vkvideo", "twitch"):
+        base.update({
+            "format": f"best[height<={MAX_HEIGHT}]/bestvideo[height<={MAX_HEIGHT}]+bestaudio/best",
+            "merge_output_format": "mp4",
+        })
+
+    elif platform == "pinterest":
+        base.update({"format": "best"})
+
     return base
 
 
-async def _download_media(url: str, platform: str) -> tuple[str | None, dict]:
+async def _download_ytdlp(url: str, platform: str) -> tuple[str | None, dict]:
     """
     Скачать медиа через yt-dlp в временный файл.
     Возвращает (путь_к_файлу, info_dict) или (None, {}).
@@ -216,6 +250,213 @@ async def _download_media(url: str, platform: str) -> tuple[str | None, dict]:
             return None, {"_no_video": True}
 
         return None, {"_error": err_str[:200]}
+
+
+# ── ОСОБЫЕ ПЛАТФОРМЫ: Threads, Pinterest (запасной путь без yt-dlp) ────────────
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/124.0.0.0 Safari/537.36")
+_CRAWLER_UA = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
+
+
+def _md_escape(s: str) -> str:
+    """Экранирование для parse_mode=Markdown (legacy): иначе «_» в названии ломает отправку."""
+    return re.sub(r"([_*`\[])", r"\\\1", s or "")
+
+
+async def _http_text(url: str, ua: str = _BROWSER_UA) -> tuple[str, str]:
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers={"User-Agent": ua, "Accept-Language": "en-US,en;q=0.8"},
+                             timeout=aiohttp.ClientTimeout(total=20), allow_redirects=True) as r:
+                if r.status == 200:
+                    return await r.text(errors="ignore"), str(r.url)
+    except Exception as e:
+        logger.info(f"http_text {url[:60]}: {e}")
+    return "", url
+
+
+def _meta(page: str, prop: str) -> str:
+    import html as _h
+    m = re.search(rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']*)["\']', page, re.I) \
+        or re.search(rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']{re.escape(prop)}["\']', page, re.I)
+    return _h.unescape(m.group(1)).strip() if m else ""
+
+
+def _json_unescape(s: str) -> str:
+    import json as _j
+    try:
+        return _j.loads('"' + s + '"')
+    except Exception:
+        return s.replace("\\/", "/").replace("\\u0026", "&")
+
+
+async def _fetch_to_file(url: str, dest: str, max_bytes: int = MAX_TOTAL_BYTES) -> bool:
+    """Скачать файл потоком (с лимитом размера). True при успехе."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers={"User-Agent": _BROWSER_UA, "Referer": url},
+                             timeout=aiohttp.ClientTimeout(total=300)) as r:
+                if r.status != 200:
+                    return False
+                size = 0
+                with open(dest, "wb") as f:
+                    async for chunk in r.content.iter_chunked(1 << 20):
+                        size += len(chunk)
+                        if size > max_bytes:
+                            return False
+                        f.write(chunk)
+        return size > 1000
+    except Exception as e:
+        logger.error(f"fetch_to_file {url[:70]}: {e}")
+        return False
+
+
+def _threads_items(page: str, code: str) -> tuple[list[dict], str, str]:
+    """Достаёт из HTML поста Threads: [{type,url}], текст, автора. Пусто — если медиа нет."""
+    import json as _j
+    items: list[dict] = []
+    text = _meta(page, "og:description")
+    user = ""
+
+    def from_node(node: dict):
+        nonlocal text, user
+        if isinstance(node.get("user"), dict) and node["user"].get("username"):
+            user = user or node["user"]["username"]
+        if isinstance(node.get("caption"), dict) and node["caption"].get("text"):
+            text = node["caption"]["text"]
+        nodes = node.get("carousel_media") or [node]
+        for n in nodes:
+            vv = n.get("video_versions") or []
+            if vv and vv[0].get("url"):
+                items.append({"type": "video", "url": vv[0]["url"]})
+                continue
+            cands = (n.get("image_versions2") or {}).get("candidates") or []
+            if cands and cands[0].get("url"):
+                items.append({"type": "photo", "url": cands[0]["url"]})
+
+    def walk(o):
+        if isinstance(o, dict):
+            if o.get("code") == code and (o.get("video_versions") or o.get("image_versions2") or o.get("carousel_media")):
+                from_node(o)
+                return True
+            return any(walk(v) for v in o.values())
+        if isinstance(o, list):
+            return any(walk(v) for v in o)
+        return False
+
+    for blob in re.findall(r'<script[^>]*type="application/json"[^>]*>(.*?)</script>', page, re.S):
+        if "video_versions" not in blob and "image_versions2" not in blob:
+            continue
+        try:
+            if walk(_j.loads(blob)):
+                break
+        except Exception:
+            continue
+
+    if not items:   # запасной путь: регулярки по сырому HTML и og-теги
+        m = re.search(r'"video_versions":\[\{"type":\d+,"url":"(.*?)"', page)
+        if m:
+            items.append({"type": "video", "url": _json_unescape(m.group(1))})
+        ogv = _meta(page, "og:video")
+        if not items and ogv:
+            items.append({"type": "video", "url": ogv})
+        ogi = _meta(page, "og:image")
+        if not items and ogi:
+            items.append({"type": "photo", "url": ogi})
+    return items[:10], text, user
+
+
+async def _download_threads(url: str) -> tuple[str | None, dict]:
+    m = re.search(r"threads\.(?:net|com)/(?:@([\w.]+)/post|t)/([\w-]+)", url)
+    if not m:
+        return None, {"_error": "не разобрал ссылку Threads"}
+    user, code = m.group(1) or "", m.group(2)
+    pages = []
+    for dom in ("threads.net", "threads.com"):
+        base = f"https://www.{dom}/@{user}/post/{code}" if user else f"https://www.{dom}/t/{code}"
+        pages += [(base, _BROWSER_UA), (base + "/embed", _BROWSER_UA), (base, _CRAWLER_UA)]
+    items, text, author = [], "", user
+    for page_url, ua in pages:
+        page, _ = await _http_text(page_url, ua)
+        if not page:
+            continue
+        items, text, a = _threads_items(page, code)
+        author = a or author
+        if items:
+            break
+        if text and not items:      # хотя бы текст поста — запомним, но попробуем другие варианты
+            continue
+    if not items and not text:
+        return None, {"_unavailable": True}
+    if not items:
+        return None, {"_text_only": True, "uploader": author, "title": text}
+
+    tmp_dir = tempfile.mkdtemp(prefix="tgdl_")
+    paths = []
+    for i, it in enumerate(items):
+        ext = "mp4" if it["type"] == "video" else "jpg"
+        dest = os.path.join(tmp_dir, f"th_{i}.{ext}")
+        if await _fetch_to_file(it["url"], dest):
+            paths.append((dest, it["type"]))
+    if not paths:
+        shutil_rm(tmp_dir)
+        return None, {"_error": "Threads не отдал файл (ссылка протухла или пост закрыт)"}
+    info = {
+        "title": text[:100], "uploader": author, "duration": 0, "width": 0, "height": 0,
+        "is_photo": paths[0][1] == "photo", "_tmp_dir": tmp_dir, "_size": os.path.getsize(paths[0][0]),
+    }
+    if len(paths) > 1:
+        info["_album"] = paths
+    return paths[0][0], info
+
+
+def shutil_rm(path: str):
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
+async def _download_pinterest_fallback(url: str) -> tuple[str | None, dict]:
+    """Если yt-dlp не справился (чаще всего — пин-картинка): берём og:video / og:image со страницы."""
+    page, final = await _http_text(url)
+    if not page:
+        return None, {"_unavailable": True}
+    vid = _meta(page, "og:video") or _meta(page, "og:video:url")
+    img = _meta(page, "og:image")
+    if not vid and not img:
+        return None, {"_no_video": True}
+    if not vid and img:
+        img = re.sub(r"/\d+x(?:\d+)?/", "/originals/", img)
+    tmp_dir = tempfile.mkdtemp(prefix="tgdl_")
+    is_video = bool(vid) and vid.split("?")[0].endswith((".mp4", ".mov", ".webm"))
+    ext = "mp4" if is_video else (img.split("?")[0].rsplit(".", 1)[-1][:4] or "jpg")
+    dest = os.path.join(tmp_dir, f"pin.{ext}")
+    ok = await _fetch_to_file(vid if is_video else img, dest)
+    if not ok and not is_video and "/originals/" in img:      # originals бывают недоступны — берём как есть
+        ok = await _fetch_to_file(_meta(page, "og:image"), dest)
+    if not ok:
+        shutil_rm(tmp_dir)
+        return None, {"_error": "Pinterest не отдал файл"}
+    info = {"title": _meta(page, "og:title")[:100], "uploader": "", "duration": 0, "width": 0, "height": 0,
+            "is_photo": not is_video, "_tmp_dir": tmp_dir, "_size": os.path.getsize(dest)}
+    return dest, info
+
+
+async def _download_media(url: str, platform: str) -> tuple[str | None, dict]:
+    """Диспетчер: Threads — свой парсер; Pinterest — yt-dlp, затем og-теги; остальное — yt-dlp."""
+    if platform == "threads":
+        return await _download_threads(url)
+    if platform == "pinterest":
+        if "pin.it/" in url:                                   # короткая ссылка → реальный адрес пина
+            _, final = await _http_text(url)
+            if "/pin/" in final:
+                url = final
+        path, info = await _download_ytdlp(url, platform)
+        if path:
+            return path, info
+        fb_path, fb_info = await _download_pinterest_fallback(url)
+        return (fb_path, fb_info) if fb_path else (None, info or fb_info)
+    return await _download_ytdlp(url, platform)
+
 
 
 async def ytdlp_instagram_post(url: str) -> dict | None:
@@ -467,6 +708,17 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
     async with _DL_SEMAPHORE:
         filepath, info = await _download_media(url, platform)
 
+    # ── Threads: пост только с текстом ────────────────────────────
+    if info.get("_text_only"):
+        who = f"*{_md_escape(info.get('uploader', ''))}*\n" if info.get("uploader") else ""
+        body = _md_escape(info.get("title", ""))[:3500]
+        try:
+            await status.edit_text(f"{emoji} {who}{body}\n\n_В посте нет фото/видео — прислал текст_",
+                                   parse_mode="Markdown", disable_web_page_preview=True)
+        except Exception:
+            await status.edit_text(f"{emoji} {info.get('uploader', '')}\n{info.get('title', '')}")
+        return
+
     # ── Ошибки ────────────────────────────────────────────────────
     if not filepath:
         err_msg = _make_error_message(info, label, url)
@@ -486,9 +738,9 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
 
     caption_parts = []
     if uploader:
-        caption_parts.append(f"{emoji} *{uploader}*")
+        caption_parts.append(f"{emoji} *{_md_escape(uploader)}*")
     if title:
-        caption_parts.append(f"_{title}_")
+        caption_parts.append(f"_{_md_escape(title)}_")
     dur_str = _fmt_duration(duration)
     if dur_str:
         caption_parts.append(f"⏱ {dur_str}")
@@ -499,6 +751,41 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
         await status.edit_text(f"{emoji} Загружаю в Telegram...", parse_mode="Markdown")
     except Exception:
         pass
+
+    # Карусель (Threads): отправляем альбомом
+    if info.get("_album"):
+        from aiogram.types import InputMediaPhoto, InputMediaVideo
+        media = []
+        for i, (pth, typ) in enumerate(info["_album"][:10]):
+            if os.path.getsize(pth) > MAX_VIDEO_BYTES:
+                continue
+            cls = InputMediaVideo if typ == "video" else InputMediaPhoto
+            media.append(cls(media=FSInputFile(pth), caption=caption if i == 0 else None,
+                             parse_mode="Markdown" if i == 0 else None))
+        try:
+            if len(media) > 1:
+                await message.bot.send_media_group(message.chat.id, media)
+            elif media:
+                m0 = media[0]
+                if isinstance(m0, InputMediaVideo):
+                    await message.answer_video(m0.media, caption=caption, parse_mode="Markdown")
+                else:
+                    await message.answer_photo(m0.media, caption=caption, parse_mode="Markdown")
+            else:
+                raise ValueError("все файлы больше лимита")
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"album send error: {e}")
+            try:
+                await status.edit_text(f"❌ Не удалось отправить альбом.\n`{str(e)[:200]}`", parse_mode="Markdown")
+            except Exception:
+                pass
+        finally:
+            _cleanup(filepath, info)
+        return
 
     # Большое видео: режем на части ≤ лимита Telegram без потери качества
     if not is_photo and os.path.getsize(filepath) > MAX_VIDEO_BYTES:
@@ -602,7 +889,11 @@ async def cmd_dl(message: types.Message):
             "▶️ YouTube (видео и Shorts)\n"
             "🎵 TikTok (без водяного знака)\n"
             "🐦 X / Twitter (видео и фото)\n"
-            "🤖 Reddit (видео и гиф)\n\n"
+            "🤖 Reddit (видео и гиф)\n"
+            "📌 Pinterest (пины-картинки и видео)\n"
+            "🟦 VK Видео и Клипы\n"
+            "🟣 Twitch-клипы\n"
+            "🧵 Threads (фото, видео, карусели)\n\n"
             "Просто скинь ссылку в чат — бот сам скачает!\n"
             "Или: `/dl <ссылка>`\n\n"
             f"⚠️ Лимит файла в Telegram — {MAX_VIDEO_MB} МБ: большие видео (до {MAX_TOTAL_MB} МБ) "
@@ -639,7 +930,11 @@ def register_media_handlers(dp: Dispatcher):
             r"(?:www\.|vm\.|vt\.)?tiktok\.com|"
             r"(?:www\.)?(?:twitter\.com|x\.com)/\S+/status/|"
             r"(?:www\.|old\.|new\.)?reddit\.com/r/|"
-            r"redd\.it/"
+            r"redd\.it/|"
+            r"(?:[a-z]{2,3}\.|www\.)?pinterest\.[a-z.]{2,6}/pin/|pin\.it/|"
+            r"(?:www\.|m\.)?(?:vk\.com|vk\.ru|vkvideo\.ru)/(?:video|clip)-?\d+_\d+|"
+            r"clips\.twitch\.tv/|(?:www\.|m\.)?twitch\.tv/\w+/clip/|"
+            r"(?:www\.)?threads\.(?:net|com)/"
             r")"
         )
     )

@@ -100,12 +100,13 @@ async def _tool_instagram_download(ctx: ToolContext, url: str = "") -> str:
             else "ОШИБКА: не удалось достать (приватный аккаунт, удалено или Instagram капризничает).")
 
 
-# ── Скачивание видео (YouTube / TikTok / X / Reddit) ─────────────────────────
+# ── Скачивание видео (YouTube / TikTok / X / Reddit / Pinterest / VK Видео / Twitch / Threads) ──
 async def _tool_download_video(ctx: ToolContext, url: str = "") -> str:
     from media_downloader import detect_platform, handle_media_link
     platform, link = detect_platform(_clean(url, 500))
     if not platform:
-        return "ОШИБКА: поддерживаются только ссылки YouTube, TikTok, X/Twitter и Reddit."
+        return ("ОШИБКА: поддерживаются ссылки YouTube, TikTok, X/Twitter, Reddit, Pinterest, "
+                "VK Видео/Клипы, Twitch-клипы и Threads.")
     await handle_media_link(ctx.message, custom_url=link, custom_platform=platform)
     return f"Запрос на скачивание с {platform} обработан, результат (или ошибка) показан в чате."
 
@@ -360,6 +361,112 @@ async def _tool_remember_fact(ctx: ToolContext, fact: str = "") -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Новые модули: мемы, рулетки, места рядом, разбор файлов, фильмы, раздачи, музыкальные ссылки
+# ══════════════════════════════════════════════════════════════════════════════
+async def _tool_make_meme(ctx: ToolContext, topic: str = "", style: str = "demotivator") -> str:
+    from vision_handlers import extract_media, make_meme_for
+    src = ctx.message.reply_to_message
+    media = extract_media(src) or extract_media(ctx.message)
+    if not media or not (media.is_image or media.kind in ("photo", "sticker")):
+        return "ОШИБКА: мем делается из картинки — пусть пользователь ответит на фото (или пришлёт его) с этой просьбой."
+    ok = await make_meme_for(ctx.message, media, _clean(topic, 150), _clean(style, 12).lower() == "impact",
+                             reply_to=ctx.message)
+    return "Мем отправлен в чат." if ok else "ОШИБКА: мем не получился."
+
+
+async def _tool_analyze_media(ctx: ToolContext, task: str = "") -> str:
+    from vision_handlers import answer_about_media, detect_intent, extract_media
+    src = ctx.message.reply_to_message
+    media = extract_media(src, allow_text=True) or extract_media(ctx.message)
+    if not media:
+        return "ОШИБКА: нет файла — пусть пользователь ответит на фото/PDF/видео/голосовое с вопросом."
+    text = _clean(task, 500) or (ctx.message.text or "")
+    ok = await answer_about_media(ctx.message, media, detect_intent(text) or "other", text, reply_to=ctx.message)
+    return "Разбор файла отправлен в чат." if ok else "ОШИБКА: не удалось разобрать файл (подробности уже показаны в чате)."
+
+
+async def _tool_random_choice(ctx: ToolContext, options: str = "", question: str = "") -> str:
+    from fun_handlers import parse_options, run_pick
+    opts = parse_options(options)
+    if len(opts) < 2:
+        return "ОШИБКА: нужно минимум 2 варианта через запятую."
+    ok = await run_pick(ctx.message, opts, _clean(question, 80))
+    return "Жребий брошен, результат с анимацией показан в чате." if ok else "ОШИБКА: жребий не удался."
+
+
+async def _tool_who_picks(ctx: ToolContext, question: str = "", candidates: str = "") -> str:
+    from fun_handlers import open_lobby, parse_options, run_pick
+    q = _clean(question, 100) or "Кого выбираем?"
+    names = parse_options(candidates)
+    if len(names) >= 2:
+        await run_pick(ctx.message, names, q if q.endswith("?") else q + "?")
+        return "Жребий среди названных людей проведён и показан в чате."
+    await open_lobby(ctx.message, q)
+    return "Открыл лобби с кнопкой «Участвую» — участники нажмут её, потом будет жребий."
+
+
+async def _tool_nearby_places(ctx: ToolContext, category: str = "", address: str = "") -> str:
+    from places_handlers import detect_category, geocode, recall_location, request_location, show_nearby
+    cat = detect_category(_clean(category, 30))
+    addr = _clean(address, 150)
+    if addr:
+        geo = await geocode(addr)
+        if not geo:
+            return f"ОШИБКА: не нашёл адрес «{addr}». Попроси точнее или геопозицию."
+        ok = await show_nearby(ctx.message, geo[0], geo[1], cat, label=geo[2], user_id=ctx.user_id)
+        return "Места рядом (со ссылками на карту) отправлены в чат." if ok else "ОШИБКА: карты не ответили."
+    last = recall_location(ctx.user_id)
+    if last:
+        ok = await show_nearby(ctx.message, last[0], last[1], cat, user_id=ctx.user_id)
+        return "Места рядом с последней геопозицией отправлены в чат." if ok else "ОШИБКА: карты не ответили."
+    await request_location(ctx.message)
+    return "Геопозиции нет — попросил пользователя прислать её (кнопка/ответ); после этого места покажутся."
+
+
+async def _tool_film_search(ctx: ToolContext, query: str = "") -> str:
+    from film_handler import film_search_flow, tmdb_configured
+    if not tmdb_configured():
+        return "ОШИБКА: TMDB не настроен (нет TMDB_API_KEY). Скажи об этом администратору бота."
+    q = _clean(query, 120)
+    if not q:
+        return "ОШИБКА: не указано название фильма или сериала."
+    ok = await film_search_flow(ctx.message, q)
+    return f"Карточка «{q}» (рейтинг, где смотреть, трейлер) отправлена в чат." if ok else f"ОШИБКА: «{q}» не найден."
+
+
+async def _tool_film_trending(ctx: ToolContext) -> str:
+    from film_handler import show_trending
+    ok = await show_trending(ctx.message)
+    return "Тренды фильмов и сериалов отправлены в чат." if ok else "ОШИБКА: тренды недоступны."
+
+
+async def _tool_film_recommend(ctx: ToolContext, vibe: str = "") -> str:
+    from film_handler import ai_recommend
+    v = _clean(vibe, 300)
+    if not v:
+        return "ОШИБКА: не описано, какой фильм/сериал хочется."
+    ok = await ai_recommend(ctx.message, v)
+    return "ИИ-подборка фильмов/сериалов отправлена в чат." if ok else "ОШИБКА: подборка не получилась."
+
+
+async def _tool_free_games(ctx: ToolContext, store: str = "all") -> str:
+    from freebies import show_free
+    store = _clean(store, 10).lower()
+    ok = await show_free(ctx.message, store if store in ("epic", "steam", "other") else "all")
+    return "Список бесплатных раздач отправлен в чат." if ok else "ОШИБКА: источники раздач не отвечают."
+
+
+async def _tool_music_link(ctx: ToolContext, url: str = "") -> str:
+    from music_links import find_music_url, process_music_link
+    service, link = find_music_url(_clean(url, 500))
+    if not link:
+        return "ОШИБКА: это не ссылка Spotify, Яндекс.Музыки или VK Музыки."
+    ok = await process_music_link(ctx.message, service, link)
+    return "Трек по ссылке определён, результаты поиска отправлены в чат." if ok else \
+        "ОШИБКА: не удалось определить трек по ссылке (пользователю уже объяснили, что делать)."
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Реестр функций. description — это то, по чему ИИ решает, когда вызывать.
 # ══════════════════════════════════════════════════════════════════════════════
 _tool("instagram_profile",
@@ -375,7 +482,8 @@ _tool("instagram_download",
       {"url": _s("Полная ссылка instagram.com")}, ["url"])
 
 _tool("download_video",
-      "Скачать видео/медиа по ссылке с YouTube, TikTok, X (Twitter) или Reddit.",
+      "Скачать видео/медиа по ссылке с YouTube, TikTok, X (Twitter), Reddit, Pinterest, VK Видео/Клипов, "
+      "Twitch-клипов или Threads.",
       _tool_download_video,
       {"url": _s("Ссылка на видео")}, ["url"])
 
@@ -472,9 +580,70 @@ _tool("remember_fact",
       {"fact": _s("Короткая формулировка факта")}, ["fact"], terminal=False)
 
 
+_tool("make_meme",
+      "Сделать мем (демотиватор) из картинки, на которую пользователь ответил, или прикрепил. Вызывай на "
+      "«сделай мем про …» / «сделай мем из этого».",
+      _tool_make_meme,
+      {"topic": _s("Тема/идея мема, если названа; иначе пусто"),
+       "style": {"type": "STRING", "description": "demotivator (по умолчанию) или impact (верх/низ белым шрифтом)",
+                 "enum": ["demotivator", "impact"]}})
+
+_tool("analyze_media",
+      "Разобрать файл, на который пользователь ответил (фото, скриншот, стикер, PDF, DOCX, видео, голосовое) "
+      "или текст-реплай: перевести, прочитать текст, объяснить мем, пересказать документ, ответить на вопрос по нему.",
+      _tool_analyze_media,
+      {"task": _s("Что именно сделать: «переведи», «что написано», «объясни мем», вопрос пользователя")})
+
+_tool("random_choice",
+      "Выбрать случайный вариант из названных с анимацией-жребием. «Кофе или чай?», «что заказать: пиццу, суши».",
+      _tool_random_choice,
+      {"options": _s("Варианты через запятую"), "question": _s("Заголовок жребия (необязательно)")}, ["options"])
+
+_tool("who_picks",
+      "Честный жребий «кто …?»: кто моет посуду, кто идёт за едой. Если имена названы — выберет из них; "
+      "если нет — откроет лобби, где люди жмут «Участвую».",
+      _tool_who_picks,
+      {"question": _s("Вопрос, например «Кто сегодня моет посуду»"),
+       "candidates": _s("Имена через запятую, если пользователь их назвал; иначе пусто")}, ["question"])
+
+_tool("nearby_places",
+      "Найти ближайшие кафе, аптеки и магазины со ссылками на карту. Вызывай на «где ближайшая аптека», "
+      "«что поесть рядом», «магазин рядом». Если геопозиции нет — сам попросит её у пользователя.",
+      _tool_nearby_places,
+      {"category": {"type": "STRING", "description": "cafe (кафе/еда), pharmacy (аптека), shop (магазин) или пусто — всё"},
+       "address": _s("Адрес/место, если назван вместо геопозиции")})
+
+_tool("film_search",
+      "Найти фильм или сериал и показать карточку: постер, рейтинг, жанры, где смотреть, трейлер. "
+      "Вызывай на «найди фильм …», «что за сериал …», «где посмотреть …».",
+      _tool_film_search,
+      {"query": _s("Название фильма или сериала (можно с годом)")}, ["query"])
+
+_tool("film_trending", "Показать фильмы и сериалы, которые сейчас в тренде.", _tool_film_trending)
+
+_tool("film_recommend",
+      "Подобрать фильмы/сериалы под настроение или описание (ИИ-подборка с карточками). "
+      "Вызывай на «посоветуй фильм/сериал».",
+      _tool_film_recommend,
+      {"vibe": _s("Пожелания: жанр, настроение, что нравилось")}, ["vibe"])
+
+_tool("free_games",
+      "Показать, какие игры сейчас раздают бесплатно (Epic, Steam, GOG и др.) и когда закончится раздача. "
+      "Вызывай на «что раздают бесплатно», «есть бесплатные игры в эпике».",
+      _tool_free_games,
+      {"store": {"type": "STRING", "description": "all, epic, steam или other", "enum": ["all", "epic", "steam", "other"]}})
+
+_tool("music_link",
+      "Открыть трек/альбом/плейлист по ссылке Spotify, Яндекс.Музыки или VK Музыки: определит название и "
+      "покажет поиск для скачивания.",
+      _tool_music_link,
+      {"url": _s("Ссылка на музыку")}, ["url"])
+
+
 TOOLS_HINT = (
-    "\n\nИНСТРУМЕНТЫ: у тебя есть функции бота (Instagram, музыка, аниме, товары, скачивание видео, "
-    "наряды, дембель, картинки, поиск в интернете). Если просьба — это действие, которое покрывает "
+    "\n\nИНСТРУМЕНТЫ: у тебя есть функции бота (Instagram, музыка и музыкальные ссылки, аниме, фильмы и сериалы, "
+    "товары, скачивание видео, наряды, дембель, картинки, мемы, жребий и выбор, места рядом, бесплатные игры, "
+    "разбор фото/файлов реплаем, поиск в интернете). Если просьба — это действие, которое покрывает "
     "функция, ВЫЗОВИ её, а не отвечай «я не умею» или «воспользуйся командой». Для обычного разговора, "
     "шуток и советов функции не вызывай. Не выдумывай параметры: если не хватает username, названия "
     "или ссылки — коротко спроси. Функции сами отправляют результат в чат, поэтому не пересказывай его. "
