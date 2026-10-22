@@ -36,8 +36,8 @@ DOWNLOAD_TIMEOUT = int(os.getenv("MEDIA_DOWNLOAD_TIMEOUT", "900"))   # секу�
 MAX_TOTAL_MB = int(os.getenv("MEDIA_MAX_TOTAL_MB", "1000"))          # максимум исходного файла
 MAX_TOTAL_BYTES = MAX_TOTAL_MB * 1024 * 1024
 MAX_PARTS = int(os.getenv("MEDIA_MAX_PARTS", "25"))                 # максимум частей
-PART_TARGET_BYTES = 42 * 1024 * 1024                                # целевой размер части
-PART_HARD_BYTES = 49 * 1024 * 1024                                  # больше этого Telegram не примет
+PART_TARGET_BYTES = int(os.getenv("MEDIA_PART_MB", "32")) * 1024 * 1024                                # целевой размер части
+PART_HARD_BYTES = int(PART_TARGET_BYTES * 1.25)                                  # больше этого Telegram не примет
 MAX_HEIGHT = int(os.getenv("MEDIA_MAX_HEIGHT", "720"))              # потолок качества YouTube
 
 # Очередь и защита хостинга
@@ -668,37 +668,35 @@ async def _split_video(path: str, tmp_dir: str, duration: float = 0, audio: bool
 
 async def _send_video_parts(message: types.Message, parts: list[str], caption: str,
                             width: int, height: int, progress_cb=None) -> None:
-    """Части — альбомами по 10, по порядку. Подпись с номерами частей."""
-    from aiogram.types import InputMediaVideo
+    """
+    Части — по одной, по порядку. Альбомом нельзя: Telegram считает размер всего запроса,
+    и 8 частей по 42 МБ в одном запросе дают «Request Entity Too Large».
+    """
     n = len(parts)
-    for g in range(0, n, 10):
-        chunk = parts[g:g + 10]
-        media = []
-        for i, fp in enumerate(chunk):
-            num = g + i + 1
-            cap = (f"{caption}\n\n✂️ Часть {num}/{n}" if g == 0 and i == 0 else f"✂️ Часть {num}/{n}")
-            media.append(InputMediaVideo(
-                media=FSInputFile(fp, filename=f"part_{num:02d}_of_{n:02d}.mp4"),
-                caption=cap[:1000], parse_mode="Markdown", supports_streaming=True,
-                width=width or None, height=height or None))
-        try:
-            if len(media) == 1:
-                m0 = media[0]
-                await message.bot.send_video(
-                    message.chat.id, m0.media, caption=m0.caption, parse_mode="Markdown",
-                    supports_streaming=True, width=m0.width, height=m0.height, request_timeout=900)
-            else:
-                await message.bot.send_media_group(message.chat.id, media, request_timeout=900)
-        except TypeError:       # старый aiogram без request_timeout
-            if len(media) == 1:
-                m0 = media[0]
-                await message.bot.send_video(message.chat.id, m0.media, caption=m0.caption,
-                                             parse_mode="Markdown", supports_streaming=True)
-            else:
-                await message.bot.send_media_group(message.chat.id, media)
+    for i, fp in enumerate(parts):
+        num = i + 1
+        cap = (f"{caption}\n\n✂️ Часть {num}/{n}" if i == 0 else f"✂️ Часть {num}/{n}")[:1000]
+        kw = dict(caption=cap, parse_mode="Markdown", supports_streaming=True,
+                  width=width or None, height=height or None)
+        logger.info(f"send part {num}/{n}: {os.path.getsize(fp)/1024/1024:.1f} МБ (по одной, send_video)")
+        for attempt in range(3):
+            f = FSInputFile(fp, filename=f"part_{num:02d}_of_{n:02d}.mp4")
+            try:
+                try:
+                    await message.bot.send_video(message.chat.id, f, request_timeout=900, **kw)
+                except TypeError:       # старый aiogram без request_timeout
+                    await message.bot.send_video(message.chat.id, f, **kw)
+                break
+            except Exception as e:
+                logger.error(f"send part {num}/{n} failed: {type(e).__name__}: {e}")
+                retry = getattr(e, "retry_after", None)
+                if retry and attempt < 2:
+                    await asyncio.sleep(int(retry) + 1)
+                    continue
+                raise
         if progress_cb:
             try:
-                await progress_cb(min(g + 10, n), n)
+                await progress_cb(num, n)
             except Exception:
                 pass
         await asyncio.sleep(1.0)
