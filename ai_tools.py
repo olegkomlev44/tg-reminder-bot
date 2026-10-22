@@ -131,7 +131,9 @@ async def _tool_music_send_track(ctx: ToolContext, query: str = "") -> str:
     if not tracks:
         return f"ОШИБКА: по запросу «{q}» ничего не найдено."
     best = tracks[0]
-    await send_track_to_user(ctx.message, best["id"])
+    ok = await send_track_to_user(ctx.message, best["id"])
+    if ok is False:
+        return f"ОШИБКА: трек «{best.get('artist', '?')} — {best.get('title', '?')}» не удалось отправить (поток недоступен)."
     return f"Трек «{best.get('artist', '?')} — {best.get('title', '?')}» отправлен в чат."
 
 

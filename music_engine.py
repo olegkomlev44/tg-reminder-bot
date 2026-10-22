@@ -9,6 +9,7 @@ import asyncio
 import importlib
 import os
 import tempfile
+import shutil
 try:
     import yt_dlp
 except ImportError:
@@ -649,26 +650,42 @@ class MusicEngine:
             if status != 200 or not data:
                 return None
             try:
-                trans = data.get("media", {}).get("transcodings", [])
-                stream_url = None
-                for tr in trans:
-                    if tr.get("format", {}).get("protocol") == "progressive":
-                        stream_url = tr.get("url")
-                        break
-                if not stream_url:
-                    for tr in trans:
-                        if tr.get("format", {}).get("mime_type") == "audio/mpeg":
-                            stream_url = tr.get("url")
-                            break
+                trans = (data.get("media") or {}).get("transcodings") or []
+
+                def _fmt(t):
+                    return t.get("format") or {}
+
+                # порядок: progressive → hls mp3 → любой hls (SC постепенно убирает progressive)
+                candidates = (
+                    [t for t in trans if _fmt(t).get("protocol") == "progressive"]
+                    + [t for t in trans if _fmt(t).get("protocol") == "hls"
+                       and str(_fmt(t).get("mime_type", "")).startswith("audio/mpeg")]
+                    + [t for t in trans if _fmt(t).get("protocol") == "hls"
+                       and not str(_fmt(t).get("mime_type", "")).startswith("audio/mpeg")]
+                )
 
                 real_url = None
-                if stream_url:
-                    extra = {}
-                    if data.get("track_authorization"):
-                        extra["track_authorization"] = data["track_authorization"]
-                    st2, js2 = await self._sc_get(stream_url, extra, session=session)
-                    if st2 == 200 and js2:
-                        real_url = js2.get("url")
+                extra = {}
+                if data.get("track_authorization"):
+                    extra["track_authorization"] = data["track_authorization"]
+                for tr in candidates:
+                    tr_url = tr.get("url")
+                    if not tr_url:
+                        continue
+                    st2, js2 = await self._sc_get(tr_url, extra, session=session)
+                    if st2 == 200 and js2 and js2.get("url"):
+                        real_url = js2["url"]
+                        break
+                    logger.warning(f"SC {track_id}: transcoding {_fmt(tr).get('protocol')}/"
+                                   f"{_fmt(tr).get('mime_type')} -> HTTP {st2}")
+
+                if not real_url:
+                    logger.warning(f"SC {track_id}: API не дал поток (transcodings={len(trans)}, "
+                                   f"policy={data.get('policy')}, streamable={data.get('streamable')}), пробую yt-dlp")
+                    real_url = await self._sc_ytdlp_url(
+                        data.get("permalink_url") or f"https://api.soundcloud.com/tracks/{track_id}")
+                    if not real_url:
+                        logger.error(f"SC {track_id}: поток не получен ни через API, ни через yt-dlp")
 
                 user = data.get("user", {})
                 dur = data.get("duration", 0)
@@ -688,6 +705,25 @@ class MusicEngine:
             except Exception as e:
                 logger.error(f"get_sc_details error: {e}")
         return None
+
+
+    async def _sc_ytdlp_url(self, page_url: str) -> str | None:
+        """Запасной путь: yt-dlp сам достаёт прямую ссылку на поток SoundCloud."""
+        if not yt_dlp:
+            return None
+
+        def _run():
+            opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+                    "socket_timeout": 20, "format": "bestaudio[ext=mp3]/bestaudio/best"}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(page_url, download=False)
+                return info.get("url") if info else None
+
+        try:
+            return await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, _run), timeout=45)
+        except Exception as e:
+            logger.warning(f"SC yt-dlp fallback: {type(e).__name__}: {str(e)[:200]}")
+            return None
 
 
     async def _get_yt_details(self, track_id: str) -> dict | None:
@@ -760,6 +796,8 @@ class MusicEngine:
             return None
         if url.startswith("yt_"):
             return await self._download_yt(url.replace("yt_", ""))
+        if ".m3u8" in url:
+            return await self._download_hls(url)
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as r:
@@ -767,6 +805,37 @@ class MusicEngine:
             except Exception as e:
                 logger.error(f"download_file HTTP error: {e}")
         return None
+
+
+    async def _download_hls(self, url: str) -> bytes | None:
+        """HLS (m3u8) → mp3 через ffmpeg. SoundCloud всё чаще отдаёт только HLS."""
+        if not shutil.which("ffmpeg"):
+            logger.error("HLS: ffmpeg не найден")
+            return None
+        out = os.path.join(tempfile.gettempdir(), f"hls_{int(time.time() * 1000)}.mp3")
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", url, "-vn",
+               "-c:a", "libmp3lame", "-b:a", "128k", out]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            try:
+                _, err = await asyncio.wait_for(proc.communicate(), timeout=120)
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.error("HLS: ffmpeg завис, убит по таймауту")
+                return None
+            if proc.returncode != 0 or not os.path.exists(out):
+                logger.error(f"HLS ffmpeg rc={proc.returncode}: {(err or b'')[:200]!r}")
+                return None
+            with open(out, "rb") as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"HLS download error: {type(e).__name__}: {e}")
+            return None
+        finally:
+            if os.path.exists(out):
+                try: os.remove(out)
+                except OSError: pass
 
 
     async def _download_yt(self, real_id: str) -> bytes | None:

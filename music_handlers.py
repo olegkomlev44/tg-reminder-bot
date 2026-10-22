@@ -225,7 +225,7 @@ async def send_track_to_user(target_obj, track_id: str):
     track = await music_engine.get_track_details(track_id)
     if not track or not track.get("stream_url"):
         await message.answer("❌ Не удалось получить поток трека (удалён или залочен).")
-        return
+        return False
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️ Избранное", callback_data=f"fav_sc:{track_id}"),
@@ -273,7 +273,7 @@ async def send_track_to_user(target_obj, track_id: str):
 
         if not audio_bytes:
             await status_msg.edit_text("❌ Ошибка при скачивании файла.")
-            return
+            return False
 
         mb_size   = round(len(audio_bytes)/(1024*1024), 2)
         geek_data = f"\n|| 💽 ID: {track_id} | 📦 {mb_size} MB | ⚙️ ~128 kbps ||"
@@ -305,9 +305,11 @@ async def send_track_to_user(target_obj, track_id: str):
                 "artist": track["artist"], "source": track.get("source","SoundCloud")
             })
             await status_msg.delete()
+            return True
         except Exception as e:
             logger.error(f"Ошибка отправки аудио: {e}")
             await status_msg.edit_text(f"❌ Телеграм отказался: {e}")
+            return False
 
 
 # ── Команды ───────────────────────────────────────────────────────────────────
