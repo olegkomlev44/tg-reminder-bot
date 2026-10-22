@@ -129,6 +129,11 @@ class MusicEngine:
     def __init__(self):
         self.dynamic_cid = None
         self.current_cid_idx = 0
+        self._cid_ts = 0.0                    # когда получили текущий client_id
+        self._cid_source = None               # откуда он: env / scrape / yt-dlp / fallback
+        self._cid_lock = asyncio.Lock()
+        self._bad_cids: dict = {}             # client_id → когда отвергнут (401/403); забываем через 30 мин
+        self._cid_fail_until = 0.0            # пауза между попытками, если рабочий client_id не нашли
         self.search_cache = _TTLCache(ttl=300, maxsize=300)   # 5 минут
         self.charts_cache = _TTLCache(ttl=600, maxsize=20)    # 10 минут
         self.yt_status = {"available": True, "consecutive_failures": 0, "disabled_until": 0.0, "last_error": None}
@@ -148,26 +153,176 @@ class MusicEngine:
     # ─────────────────────────────────────────────
 
 
-    async def get_valid_cid(self, session):
-        if not self.dynamic_cid:
-            try:
+    SC_CID_TTL = 6 * 3600                       # раз в 6 часов обновляем client_id заранее
+
+    _CID_PATTERNS = (
+        r'client_id\s*:\s*"([a-zA-Z0-9]{32})"',
+        r'client_id\s*[:=]\s*\\?["\']([a-zA-Z0-9]{32})',
+        r'[?&]client_id=([a-zA-Z0-9]{32})',
+    )
+
+    async def _scrape_cid(self) -> str | None:
+        """Достаёт client_id из JS-бандлов soundcloud.com."""
+        timeout = aiohttp.ClientTimeout(total=15)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get("https://soundcloud.com", headers=SC_HEADERS) as resp:
                     text = await resp.text()
-                    urls = re.findall(r'<script[^>]+src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', text)
-                    for js_url in reversed(urls):
+                urls = re.findall(r'<script[^>]+src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', text)
+                if not urls:
+                    urls = re.findall(r'<script[^>]+src="([^"]*sndcdn[^"]+\.js)"', text)
+                for js_url in list(reversed(urls))[:15]:
+                    try:
                         async with session.get(js_url, headers=SC_HEADERS) as js_resp:
                             js_text = await js_resp.text()
-                            m = re.search(r'client_id\s*:\s*"([a-zA-Z0-9]{32})"', js_text)
-                            if m:
-                                self.dynamic_cid = m.group(1)
-                                return self.dynamic_cid
-            except Exception as e:
-                logger.debug(f"Не удалось получить динамический client_id SoundCloud: {e}")
-        return self.dynamic_cid or SC_CLIENT_IDS[self.current_cid_idx]
+                    except Exception:
+                        continue
+                    for pat in self._CID_PATTERNS:
+                        m = re.search(pat, js_text)
+                        if m:
+                            return m.group(1)
+        except Exception as e:
+            logger.warning(f"SC: не удалось скачать client_id со страницы: {type(e).__name__}: {e}")
+        return None
 
+    async def _cid_from_ytdlp(self) -> str | None:
+        """Запасной путь: yt-dlp сам умеет добывать client_id (и его правят при каждой поломке SC)."""
+        if yt_dlp is None:
+            return None
 
-    def invalidate_cid(self):
+        def _run():
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True,
+                                   "socket_timeout": 15}) as ydl:
+                ie = ydl.get_info_extractor("Soundcloud")
+                upd = getattr(ie, "_update_client_id", None)
+                if upd:
+                    upd()
+                return getattr(ie, "_CLIENT_ID", None)
+
+        try:
+            cid = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, _run), timeout=40)
+            return cid if cid and re.fullmatch(r"[a-zA-Z0-9]{32}", str(cid)) else None
+        except Exception as e:
+            logger.info(f"SC: client_id через yt-dlp не вышел: {type(e).__name__}: {str(e)[:120]}")
+            return None
+
+    async def _cid_works(self, cid: str) -> bool | None:
+        """True — SC принимает, False — отверг (401/403), None — не удалось проверить (сеть/лимиты)."""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
+                async with session.get(f"{SC_API}/search/tracks",
+                                       params={"q": "a", "limit": 1, "client_id": cid},
+                                       headers=SC_HEADERS) as r:
+                    if r.status == 200:
+                        return True
+                    if r.status in (401, 403):
+                        return False
+                    return None
+        except Exception:
+            return None
+
+    def _is_bad(self, cid: str) -> bool:
+        ts = self._bad_cids.get(cid)
+        if ts is None:
+            return False
+        if time.time() - ts > 1800:          # 403 мог быть временной блокировкой IP — даём второй шанс
+            self._bad_cids.pop(cid, None)
+            return False
+        return True
+
+    async def _resolve_cid(self) -> tuple[str | None, str]:
+        """Перебирает источники client_id и берёт первый реально рабочий."""
+        candidates: list[tuple[str, str]] = []
+        env_cid = os.getenv("SC_CLIENT_ID", "").strip()
+        if env_cid:
+            candidates.append((env_cid, "env"))
+        scraped = await self._scrape_cid()
+        if scraped:
+            candidates.append((scraped, "scrape"))
+        yd = await self._cid_from_ytdlp()
+        if yd:
+            candidates.append((yd, "yt-dlp"))
+        candidates += [(c, "fallback") for c in SC_CLIENT_IDS]
+
+        unsure = None
+        seen = set()
+        for cid, src in candidates:
+            if cid in seen or self._is_bad(cid):
+                continue
+            seen.add(cid)
+            ok = await self._cid_works(cid)
+            if ok:
+                return cid, src
+            if ok is None and unsure is None and src != "fallback":
+                unsure = (cid, src)          # проверить не смогли, но он свежий — запасной вариант
+            elif ok is False:
+                self._bad_cids[cid] = time.time()
+        return unsure if unsure else (None, "none")
+
+    async def get_valid_cid(self, session=None, force: bool = False):
+        fresh = self.dynamic_cid and (time.time() - self._cid_ts) < self.SC_CID_TTL
+        if fresh and not force:
+            return self.dynamic_cid
+        if not self.dynamic_cid and time.time() < self._cid_fail_until:
+            return SC_CLIENT_IDS[self.current_cid_idx % len(SC_CLIENT_IDS)]   # недавно не нашли — не долбим SC
+        async with self._cid_lock:
+            if self.dynamic_cid and (time.time() - self._cid_ts) < self.SC_CID_TTL and not force:
+                return self.dynamic_cid                 # пока ждали лок, другой запрос уже обновил
+            cid, src = await self._resolve_cid()
+            if cid:
+                if cid != self.dynamic_cid:
+                    logger.info(f"SC: client_id обновлён (источник: {src})")
+                self.dynamic_cid, self._cid_ts, self._cid_source = cid, time.time(), src
+            else:
+                logger.error("SC: не нашли ни одного рабочего client_id")
+                self._cid_fail_until = time.time() + 60            # повторная попытка через минуту
+        return self.dynamic_cid or SC_CLIENT_IDS[self.current_cid_idx % len(SC_CLIENT_IDS)]
+
+    def invalidate_cid(self, bad: str | None = None):
+        """SC отверг client_id — запоминаем его как плохой и сбрасываем кеш."""
+        bad = bad or self.dynamic_cid
+        if bad:
+            self._bad_cids[bad] = time.time()
         self.dynamic_cid = None
+        self._cid_ts = 0.0
+
+    async def _sc_get(self, url: str, params: dict | None = None, session=None):
+        """
+        GET к SoundCloud с client_id. На 401/403 меняет client_id и повторяет один раз.
+        Возвращает (status, json|None).
+        """
+        own = session is None
+        if own:
+            session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+        try:
+            status, data = 0, None
+            prev_cid = None
+            for attempt in (0, 1):
+                cid = await self.get_valid_cid(force=(attempt == 1))
+                if cid == prev_cid:
+                    break                    # новый client_id достать не удалось — повторять бессмысленно
+                prev_cid = cid
+                q = dict(params or {})
+                q["client_id"] = cid
+                try:
+                    async with session.get(url, params=q, headers=SC_HEADERS) as r:
+                        status = r.status
+                        if status in (401, 403) and attempt == 0:
+                            logger.warning(f"SC: HTTP {status} с client_id={cid[:6]}…, пробуем обновить")
+                            self.invalidate_cid(cid)
+                            continue
+                        if status == 200:
+                            data = await r.json(content_type=None)
+                        break
+                except Exception as e:
+                    logger.error(f"SC request error: {type(e).__name__}: {e}")
+                    self._record_sc(False, f"{type(e).__name__}: {e}")
+                    return 0, None
+            self._record_sc(status == 200, f"HTTP {status}")
+            return status, data
+        finally:
+            if own:
+                await session.close()
 
 
     # ─────────────────────────────────────────────
@@ -177,40 +332,30 @@ class MusicEngine:
 
     async def search_sc(self, query: str, limit: int = 5, offset: int = 0):
         """Поиск в SoundCloud."""
-        async with aiohttp.ClientSession() as session:
-            cid = await self.get_valid_cid(session)
-            params = {
-                "q": query, "limit": limit, "offset": offset,
-                "client_id": cid, "app_version": "1735820463"
-            }
-            try:
-                async with session.get(f"{SC_API}/search/tracks", params=params, headers=SC_HEADERS) as resp:
-                    self._record_sc(resp.status == 200, f"HTTP {resp.status}")
-                    if resp.status == 200:
-                        data = await resp.json()
-                        results = []
-                        for t in data.get("collection", []):
-                            if not t.get("streamable"):
-                                continue
-                            dur = t.get("duration", 0)
-                            user_obj = t.get("user", {})
-                            artwork = t.get("artwork_url") or user_obj.get("avatar_url") or ""
-                            artwork = artwork.replace("large", "t500x500") if artwork else ""
-                            avatar = user_obj.get("avatar_url", "").replace("large", "t500x500")
-                            results.append({
-                                "id": str(t.get("id")),
-                                "title": t.get("title", "Unknown"),
-                                "artist": user_obj.get("username", "Unknown"),
-                                "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
-                                "artwork_url": artwork,
-                                "artist_avatar": avatar,
-                                "source": "SoundCloud"
-                            })
-                        return results
-            except Exception as e:
-                logger.error(f"SC Search error: {e}")
-                self._record_sc(False, str(e))
-        return []
+        status, data = await self._sc_get(
+            f"{SC_API}/search/tracks",
+            {"q": query, "limit": limit, "offset": offset, "app_version": "1735820463"})
+        if status != 200 or not data:
+            return []
+        results = []
+        for t in data.get("collection", []):
+            if not t.get("streamable"):
+                continue
+            dur = t.get("duration", 0)
+            user_obj = t.get("user", {})
+            artwork = t.get("artwork_url") or user_obj.get("avatar_url") or ""
+            artwork = artwork.replace("large", "t500x500") if artwork else ""
+            avatar = (user_obj.get("avatar_url") or "").replace("large", "t500x500")
+            results.append({
+                "id": str(t.get("id")),
+                "title": t.get("title", "Unknown"),
+                "artist": user_obj.get("username", "Unknown"),
+                "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
+                "artwork_url": artwork,
+                "artist_avatar": avatar,
+                "source": "SoundCloud"
+            })
+        return results
 
 
     def _record_sc(self, ok: bool, error: str = ""):
@@ -422,45 +567,37 @@ class MusicEngine:
             return cached
 
 
-        async with aiohttp.ClientSession() as session:
-            cid = await self.get_valid_cid(session)
-            params = {
-                "kind": "top",
-                "genre": "soundcloud:genres:all-music",
-                "high_tier_only": "false",
-                "limit": limit,
-                "offset": offset,
-                "client_id": cid
-            }
-            try:
-                async with session.get(f"{SC_API}/charts", params=params, headers=SC_HEADERS) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        results = []
-                        for item in data.get("collection", []):
-                            t = item.get("track", {})
-                            if not t.get("streamable"):
-                                continue
-                            dur = t.get("duration", 0)
-                            user_obj = t.get("user", {})
-                            artwork = t.get("artwork_url") or user_obj.get("avatar_url") or ""
-                            artwork = artwork.replace("large", "t500x500") if artwork else ""
-                            avatar = user_obj.get("avatar_url", "").replace("large", "t500x500")
-                            results.append({
-                                "id": str(t.get("id")),
-                                "title": t.get("title", "Unknown"),
-                                "artist": user_obj.get("username", "Unknown"),
-                                "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
-                                "artwork_url": artwork,
-                                "artist_avatar": avatar,
-                                "source": "SoundCloud"
-                            })
-                        if results:
-                            self.charts_cache.set(cache_key, results)
-                        return results
-            except Exception as e:
-                logger.error(f"Chart SC error: {e}")
-        return []
+        status, data = await self._sc_get(f"{SC_API}/charts", {
+            "kind": "top",
+            "genre": "soundcloud:genres:all-music",
+            "high_tier_only": "false",
+            "limit": limit,
+            "offset": offset,
+        })
+        if status != 200 or not data:
+            return []
+        results = []
+        for item in data.get("collection", []):
+            t = item.get("track", {})
+            if not t.get("streamable"):
+                continue
+            dur = t.get("duration", 0)
+            user_obj = t.get("user", {})
+            artwork = t.get("artwork_url") or user_obj.get("avatar_url") or ""
+            artwork = artwork.replace("large", "t500x500") if artwork else ""
+            avatar = (user_obj.get("avatar_url") or "").replace("large", "t500x500")
+            results.append({
+                "id": str(t.get("id")),
+                "title": t.get("title", "Unknown"),
+                "artist": user_obj.get("username", "Unknown"),
+                "duration": f"{dur//60000}:{(dur%60000)//1000:02d}",
+                "artwork_url": artwork,
+                "artist_avatar": avatar,
+                "source": "SoundCloud"
+            })
+        if results:
+            self.charts_cache.set(cache_key, results)
+        return results
 
 
     # ─────────────────────────────────────────────
@@ -507,50 +644,47 @@ class MusicEngine:
 
 
     async def _get_sc_details(self, track_id: str) -> dict | None:
-        async with aiohttp.ClientSession() as session:
-            cid = await self.get_valid_cid(session)
-            url = f"https://api-v2.soundcloud.com/tracks/{track_id}?client_id={cid}"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            status, data = await self._sc_get(f"{SC_API}/tracks/{track_id}", session=session)
+            if status != 200 or not data:
+                return None
             try:
-                async with session.get(url, headers=SC_HEADERS) as r:
-                    if r.status != 200:
-                        return None
-                    data = await r.json()
-
-
-                    stream_url = None
-                    for tr in data.get("media", {}).get("transcodings", []):
-                        if tr.get("format", {}).get("protocol") == "progressive":
+                trans = data.get("media", {}).get("transcodings", [])
+                stream_url = None
+                for tr in trans:
+                    if tr.get("format", {}).get("protocol") == "progressive":
+                        stream_url = tr.get("url")
+                        break
+                if not stream_url:
+                    for tr in trans:
+                        if tr.get("format", {}).get("mime_type") == "audio/mpeg":
                             stream_url = tr.get("url")
                             break
-                    if not stream_url:
-                        for tr in data.get("media", {}).get("transcodings", []):
-                            if tr.get("format", {}).get("mime_type") == "audio/mpeg":
-                                stream_url = tr.get("url")
-                                break
 
+                real_url = None
+                if stream_url:
+                    extra = {}
+                    if data.get("track_authorization"):
+                        extra["track_authorization"] = data["track_authorization"]
+                    st2, js2 = await self._sc_get(stream_url, extra, session=session)
+                    if st2 == 200 and js2:
+                        real_url = js2.get("url")
 
-                    real_url = None
-                    if stream_url:
-                        async with session.get(f"{stream_url}?client_id={cid}", headers=SC_HEADERS) as sr:
-                            if sr.status == 200:
-                                real_url = (await sr.json()).get("url")
-
-
-                    user = data.get("user", {})
-                    dur = data.get("duration", 0)
-                    artwork = (data.get("artwork_url") or user.get("avatar_url") or "").replace("large", "t500x500")
-                    avatar = (user.get("avatar_url") or "").replace("large", "t500x500")
-                    return {
-                        "id": str(data.get("id", "")),
-                        "title": data.get("title", "Unknown"),
-                        "artist": user.get("username", "Unknown"),
-                        "duration": f"{dur//60000}:{(dur%60000)//1000:02d}" if dur else "",
-                        "stream_url": real_url,
-                        "artwork_url": artwork,
-                        "artist_avatar": avatar,
-                        "genre": data.get("genre") or "Неизвестен",
-                        "source": "SoundCloud"
-                    }
+                user = data.get("user", {})
+                dur = data.get("duration", 0)
+                artwork = (data.get("artwork_url") or user.get("avatar_url") or "").replace("large", "t500x500")
+                avatar = (user.get("avatar_url") or "").replace("large", "t500x500")
+                return {
+                    "id": str(data.get("id", "")),
+                    "title": data.get("title", "Unknown"),
+                    "artist": user.get("username", "Unknown"),
+                    "duration": f"{dur//60000}:{(dur%60000)//1000:02d}" if dur else "",
+                    "stream_url": real_url,
+                    "artwork_url": artwork,
+                    "artist_avatar": avatar,
+                    "genre": data.get("genre") or "Неизвестен",
+                    "source": "SoundCloud"
+                }
             except Exception as e:
                 logger.error(f"get_sc_details error: {e}")
         return None
@@ -928,7 +1062,9 @@ class MusicEngine:
             "youtube": {"state": yt_state, "failures": yt["consecutive_failures"],
                         "retry_in_sec": retry, "last_error": yt.get("last_error")},
             "soundcloud": {"state": "ok" if self.sc_status["ok"] else "degraded",
-                           "last_error": self.sc_status["last_error"]},
+                           "last_error": self.sc_status["last_error"],
+                           "client_id_source": self._cid_source,
+                           "client_id_age_sec": int(time.time() - self._cid_ts) if self._cid_ts else None},
             "yt_dlp": {"version": st["version"], "latest": st["latest"],
                        "last_update_ts": st["last_update_ts"], "updating": st["updating"],
                        "last_error": st["last_error"],
