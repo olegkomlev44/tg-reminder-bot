@@ -4,7 +4,11 @@ fun_handlers.py — рулетки и выбор.
   /pick кофе или чай, пицца      — выбрать из вариантов (случайный стиль анимации из 11)
   /pick Что заказать: пицца, суши — то же, с заголовком
   /pick -слот кофе или чай       — стиль вручную; список: /pick -стили
-  (слот, рулетка, взлом, вылет, прожектор, скачки, карты, лото, бомба, турнир, оракул)
+  (слот, рулетка, взлом, вылет, прожектор, скачки, карты, лото, бомба, турнир, оракул, колесо-GIF)
+  /pick -3 а, б, в, г, д         — несколько победителей (подиум 🥇🥈🥉); то же: «3 из: а, б, в»
+  /pick -диплом …                — сразу прислать картинку-диплом (кнопка «🖼 Диплом» есть всегда)
+  Каждый жребий «фиксируется» хешем до анимации; кнопка «🔐 Проверка» раскрывает seed и формулу.
+  Inline: «@бот p: кофе, чай» (префикс p:/pick:/п:/жребий: или суффикс « /p») — анимация прямо в чате
   /who кто моет посуду           — лобби: люди жмут «🙋 Участвую», потом честный жребий
   /who кто моет посуду: Глеб, Дима, Олег — жребий сразу среди названных
   /roll [N | NdM]                — кубик (по умолчанию d6)
@@ -16,7 +20,9 @@ fun_handlers.py — рулетки и выбор.
 """
 
 import asyncio
+import hashlib
 import html
+import json
 import logging
 import re
 import secrets
@@ -26,7 +32,16 @@ from dataclasses import dataclass, field
 
 from aiogram import F, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
+    InlineQueryResultArticle, InputTextMessageContent,
+)
+
+try:                     # картинки (диплом, GIF-колесо) — нужен Pillow и card_generator.py
+    from pick_cards import make_pick_card, make_wheel_gif
+    _CARDS_OK = True
+except Exception:        # без Pillow /pick работает как раньше, просто без диплома и колеса
+    _CARDS_OK = False
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +84,7 @@ _PICKS: "OrderedDict[str, dict]" = OrderedDict()      # token → {options, titl
 def _remember_pick(options: list[str], title: str, forced: str | None = None, last: str | None = None) -> str:
     tok = secrets.token_hex(4)
     _PICKS[tok] = {"options": options, "title": title, "forced": forced, "last": last}
-    while len(_PICKS) > 200:
+    while len(_PICKS) > 400:
         _PICKS.popitem(last=False)
     return tok
 
@@ -131,6 +146,8 @@ def _intro_text(title: str) -> str:
 
 def _hop_seq(n: int, idx: int, hops: int) -> list[int]:
     """Хаотичные прыжки курсора: соседние кадры различаются, последний — победитель."""
+    if n == 1:
+        return [idx] * hops
     seq: list[int] = []
     prev_ = -1
     for k in range(hops):
@@ -479,6 +496,40 @@ async def _anim_oracle(msg, options, title, idx):
         await asyncio.sleep(0.6 + 0.08 * k)
 
 
+# 12) 🏅 Подиум: несколько победителей — места разыгрываются по очереди (с последнего к первому)
+_MEDALS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+MAX_WINNERS = len(_MEDALS)
+
+
+async def _anim_podium(msg, options, title, order):
+    n, k = len(options), len(order)
+    per = 4 if k <= 3 else 3 if k <= 5 else 2
+    awarded: dict[int, int] = {}
+    step = 0
+    for place in range(k - 1, -1, -1):
+        target = order[place]
+        cand = [i for i in range(n) if i not in awarded]
+        seq = [cand[j] for j in _hop_seq(len(cand), cand.index(target), per)]
+        for h, cur in enumerate(seq):
+            step += 1
+            landed = h == len(seq) - 1
+            lines = []
+            for i, o in enumerate(options):
+                if i in awarded:
+                    lines.append(f"{_MEDALS[awarded[i]]} <b>{_esc(_cut(o))}</b>")
+                elif i == cur and landed:
+                    lines.append(f"{_MEDALS[place]} <b>{_esc(_cut(o))}</b>")
+                elif i == cur:
+                    lines.append(f"💡 <b>{_esc(_cut(o))}</b>")
+                else:
+                    lines.append(f"▫️ {_esc(_cut(o))}")
+            note = f"{_MEDALS[place]} место {place + 1} из {k}" + (" — есть!" if landed else "…")
+            text = _head("🏅", "ПОДИУМ", title) + "\n".join(lines) + f"\n\n<i>{note} {'▸' * (step % 9 + 1)}</i>"
+            await _safe_edit(msg, text)
+            await asyncio.sleep(0.95 if landed else 0.5 + 0.05 * h)
+        awarded[target] = place
+
+
 STYLES = {
     "slot":     ("🎰", "слот-машина",       _anim_slot),
     "roulette": ("🎡", "рулетка",           _anim_roulette),
@@ -492,6 +543,9 @@ STYLES = {
     "cup":      ("🏟", "турнир",            _anim_cup),
     "oracle":   ("🔮", "оракул",            _anim_oracle),
 }
+if _CARDS_OK:     # колесо — это GIF-картинка (Pillow), а не правка текста; fn=None
+    STYLES["wheel"] = ("🎠", "колесо (GIF)", None)
+
 _STYLE_ALIASES = {
     "slot": "slot", "слот": "slot", "slots": "slot", "слоты": "slot", "автомат": "slot",
     "roulette": "roulette", "casino": "roulette", "рулетка": "roulette", "казино": "roulette",
@@ -504,37 +558,74 @@ _STYLE_ALIASES = {
     "bomb": "bomb", "бомба": "bomb", "картошка": "bomb", "бум": "bomb",
     "cup": "cup", "турнир": "cup", "tournament": "cup", "bracket": "cup", "плейофф": "cup",
     "oracle": "oracle", "оракул": "oracle", "шар": "oracle", "магия": "oracle", "ball": "oracle",
+    "wheel": "wheel", "колесо": "wheel", "фортуна": "wheel", "gif": "wheel", "гиф": "wheel",
     "random": "random", "рандом": "random", "любой": "random",
     "list": "list", "стили": "list", "styles": "list", "help": "list",
 }
+_DIPLOMA_WORDS = {"диплом", "diploma", "карточка", "картинка", "грамота"}
+_COUNT_RE = re.compile(r"^(?:top|топ)?(\d{1,2})$", re.IGNORECASE)
 _LAST_STYLE: list[str] = []          # последние стили — чтобы подряд не повторялись
 
 
 def _styles_help() -> str:
     lines = [f"{ic} <code>-{key}</code> — {label}" for key, (ic, label, _) in STYLES.items()]
     return ("🎨 <b>Стили анимации /pick</b>\n" + "\n".join(lines)
-            + "\n\nПример: <code>/pick -слот кофе или чай</code>\nБез флага стиль случайный.")
+            + "\n\n🏅 <code>-3</code> (или <code>-топ3</code>, <code>3 из: …</code>) — несколько победителей, подиум"
+            + "\n🖼 <code>-диплом</code> — сразу прислать картинку-диплом"
+            + "\n\nПример: <code>/pick -слот кофе или чай</code>"
+            + "\n<code>/pick -3 -диплом Кто идёт: Глеб, Дима, Олег, Маша</code>"
+            + "\nБез флага стиль случайный. Inline: <code>@бот p: кофе, чай</code>")
 
 
-def _pick_style(requested: str | None = None, avoid: str | None = None) -> str:
-    if requested in STYLES:
+def _pick_style(requested: str | None = None, avoid: str | None = None, media: bool = True) -> str:
+    """Выбор стиля. media=False — без GIF-стилей (inline-сообщения и лобби не умеют менять текст на анимацию)."""
+    usable = [k for k, v in STYLES.items() if media or v[2] is not None]
+    if requested in usable:
         return requested
     bad = set(_LAST_STYLE[-2:])
     if avoid:
         bad.add(avoid)
-    pool = [k for k in STYLES if k not in bad] or list(STYLES)
+    pool = [k for k in usable if k not in bad] or usable
     key = _RNG.choice(pool)
     _LAST_STYLE.append(key)
     del _LAST_STYLE[:-3]
     return key
 
 
+def _extract_flags(text: str) -> tuple[str | None, int, bool, str]:
+    """
+    «-слот -3 -диплом Кто идёт: а, б, в» → ('slot', 3, True, 'Кто идёт: а, б, в').
+    Флаги — только в начале; «3 из: а, б, в» тоже задаёт число победителей.
+    """
+    style, count, diploma, rest = None, 1, False, text or ""
+    for _ in range(4):
+        m = re.match(r"^\s*[-–—]{1,2}\s*([\w]+)\s*(.*)$", rest, re.DOTALL)
+        if not m:
+            break
+        tok = m.group(1).lower()
+        if tok in _STYLE_ALIASES:
+            style = _STYLE_ALIASES[tok]
+            if style == "list":
+                return "list", 1, False, ""
+        elif _COUNT_RE.match(tok):
+            count = int(_COUNT_RE.match(tok).group(1))
+        elif tok in _DIPLOMA_WORDS:
+            diploma = True
+        else:
+            break
+        rest = m.group(2)
+    m = re.match(r"^\s*(\d{1,2})\s+из\s*:\s*(.*)$", rest, re.IGNORECASE | re.DOTALL)
+    if m:
+        count, rest = int(m.group(1)), m.group(2)
+    if style == "random":
+        style = None
+    return style, max(1, count), diploma, rest
+
+
 def _extract_style_flag(text: str) -> tuple[str | None, str]:
-    """«-слот кофе или чай» / «--roulette a, b» → ('slot', 'кофе или чай'). Без флага — (None, text)."""
-    m = re.match(r"^\s*[-–—]{1,2}\s*([\w]+)\s*(.*)$", text or "", re.DOTALL)
-    if m and m.group(1).lower() in _STYLE_ALIASES:
-        return _STYLE_ALIASES[m.group(1).lower()], m.group(2)
-    return None, text or ""
+    """Совместимость со старым API: (style, rest)."""
+    style, _c, _d, rest = _extract_flags(text)
+    return style, rest
 
 
 async def _finale(msg, title: str, winner: str):
@@ -563,7 +654,7 @@ async def spin(msg: types.Message, options: list[str], title: str,
     idx = _RNG.randrange(n) if winner_idx is None else winner_idx
     if n < 2:
         return idx
-    key = style if style in STYLES else _pick_style()
+    key = style if style in STYLES and STYLES[style][2] is not None else _pick_style(media=False)
     try:
         await STYLES[key][2](msg, options, title, idx)
         await _finale(msg, title, options[idx])
@@ -572,46 +663,188 @@ async def spin(msg: types.Message, options: list[str], title: str,
     return idx
 
 
-def _again_kb(tok: str, current: str = "") -> InlineKeyboardMarkup:
-    """«Ещё раз» + кнопки выбора стиля (текущий отмечен ✔️)."""
-    rows = [[InlineKeyboardButton(text="🔁 Ещё раз (новый стиль)", callback_data=f"fun:again:{tok}")]]
-    btns = [InlineKeyboardButton(text=("✔️" if k == current else ic), callback_data=f"fun:st:{tok}:{k}")
-            for k, (ic, _l, _f) in STYLES.items()]
-    for i in range(0, len(btns), 6):
-        rows.append(btns[i:i + 6])
+# ── Честный жребий: commit → анимация → reveal ────────────────────────────────
+# До анимации бот показывает commit = sha256(seed). Победитель однозначно следует из seed и списка
+# вариантов, так что после розыгрыша seed можно раскрыть и перепроверить (кнопка «🔐 Проверка»).
+# Это доказывает, что результат зафиксирован ДО анимации и не «докручивался» под желаемый.
+
+def _new_seed() -> tuple[str, str]:
+    seed = secrets.token_hex(16)
+    return seed, hashlib.sha256(seed.encode()).hexdigest()
+
+
+def _draw(seed: str, options: list[str], k: int = 1) -> list[int]:
+    """k победителей по местам: варианты сортируются по sha256(«seed|i|вариант»), берутся первые k."""
+    order = sorted(range(len(options)),
+                   key=lambda i: hashlib.sha256(f"{seed}|{i}|{options[i]}".encode()).digest())
+    return order[:k]
+
+
+def _commit_text(title: str, commit: str) -> str:
+    t = f"\n<b>{_esc(_cut(title, 70))}</b>" if title else ""
+    return (f"🔐 <b>Жребий зафиксирован</b>{t}\n\n"
+            f"commit: <code>{commit[:24]}…</code>\n"
+            f"<i>результат уже решён — seed раскрою после розыгрыша, можно проверить</i>")
+
+
+def _check_text(data: dict) -> str:
+    opts = data["options"]
+    k = data.get("count", 1)
+    snippet = (
+        "import hashlib\n"
+        f"seed = {data['seed']!r}\n"
+        f"opts = {opts!r}\n"
+        f"k = {k}\n"
+        "print(hashlib.sha256(seed.encode()).hexdigest())   # = commit\n"
+        "order = sorted(range(len(opts)), key=lambda i: hashlib.sha256(\n"
+        "    f\"{seed}|{i}|{opts[i]}\".encode()).digest())\n"
+        "print([opts[i] for i in order[:k]])"
+    )
+    if len(snippet) > 3200:
+        snippet = f"seed = {data['seed']!r}  # список слишком длинный для кода — формула ниже"
+    names = ", ".join(opts[i] for i in data["order"])
+    return (
+        "🔐 <b>Проверка жребия</b>\n\n"
+        f"commit (показан до розыгрыша):\n<code>{data['commit']}</code>\n\n"
+        f"seed (раскрыт):\n<code>{data['seed']}</code>\n\n"
+        "Правило: для каждого варианта <code>sha256(«seed|номер|вариант»)</code>; "
+        f"побеждают {k} с наименьшим хешем. sha256(seed) должен совпасть с commit.\n\n"
+        f"<pre>{_esc(snippet)}</pre>\n"
+        f"Итог: <b>{_esc(names)}</b>\n\n"
+        "<i>Это доказывает, что итог зафиксирован до анимации и не менялся после.</i>"
+    )
+
+
+class _InlineMsg:
+    """Адаптер: чтобы анимации (msg.edit_text) работали и для inline-сообщений (по inline_message_id)."""
+
+    def __init__(self, bot, inline_id: str):
+        self._bot, self._id = bot, inline_id
+
+    async def edit_text(self, text, parse_mode=None, reply_markup=None):
+        return await self._bot.edit_message_text(text=text, inline_message_id=self._id,
+                                                 parse_mode=parse_mode, reply_markup=reply_markup)
+
+
+def _again_kb(tok: str, current: str = "", k: int = 1, inline: bool = False) -> InlineKeyboardMarkup:
+    """«Ещё раз» + диплом/проверка + выбор стиля (текущий отмечен ✔️)."""
+    rows = [[InlineKeyboardButton(text="🔁 Ещё раз (новый стиль)" if k == 1 else "🔁 Ещё раз",
+                                  callback_data=f"fun:again:{tok}")]]
+    extra = []
+    if _CARDS_OK:
+        extra.append(InlineKeyboardButton(text="🖼 Диплом", callback_data=f"fun:card:{tok}"))
+    extra.append(InlineKeyboardButton(text="🔐 Проверка", callback_data=f"fun:chk:{tok}"))
+    rows.append(extra)
+    if k == 1:
+        btns = [InlineKeyboardButton(text=("✔️" if key == current else ic), callback_data=f"fun:st:{tok}:{key}")
+                for key, (ic, _l, fn) in STYLES.items() if not (inline and fn is None)]
+        for i in range(0, len(btns), 6):
+            rows.append(btns[i:i + 6])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _result_text(title: str, winner: str, mention: str | None = None,
-                 style_label: str = "", n: int = 0) -> str:
-    who = mention or f"<b>{_esc(winner)}</b>"
+def _result_text(title: str, winner: str, mention: str | None = None, style_label: str = "",
+                 n: int = 0, winners: list[str] | None = None, commit: str = "") -> str:
     head = f"🏆 <b>{_esc(title)}</b>\n\n" if title else "🏆 <b>Выпало:</b>\n\n"
     line = "━━━━━━━━━━━━━━"
-    odds = f"🎯 шанс каждого: 1 из {n} ({100 / n:.0f}%)\n" if n >= 2 else ""
-    tail = "🎲 жребий криптостойким ГСЧ — подтасовать нельзя"
+    if winners and len(winners) > 1:
+        body = "\n".join(f"{_MEDALS[i]} <b>{_esc(w)}</b>" if i == 0 else f"{_MEDALS[i]} {_esc(w)}"
+                         for i, w in enumerate(winners))
+        odds = f"🎯 {len(winners)} из {n} · шанс попасть в топ: {100 * len(winners) / n:.0f}%\n" if n else ""
+    else:
+        body = f"👑 {mention or f'<b>{_esc(winner)}</b>'}"
+        odds = f"🎯 шанс каждого: 1 из {n} ({100 / n:.0f}%)\n" if n >= 2 else ""
+    tail = "🎲 жребий криптостойким ГСЧ"
+    if commit:
+        tail += f" · 🔐 <code>{commit[:10]}</code>"
     if style_label:
         tail = f"{style_label} · {tail}"
-    return f"{head}{line}\n👑 {who}\n{line}\n\n{odds}<i>{tail}</i>"
+    return f"{head}{line}\n{body}\n{line}\n\n{odds}<i>{tail}</i>"
+
+
+def _new_run(options, title, forced=None, count=1) -> str:
+    tok = secrets.token_hex(4)
+    _PICKS[tok] = {"options": options, "title": title, "forced": forced, "count": count, "last": None}
+    while len(_PICKS) > 400:
+        _PICKS.popitem(last=False)
+    return tok
+
+
+async def _run_round(msg, src: dict, key: str, reply_to: "types.Message | None", delete_after_wheel: bool) -> str:
+    """
+    Один розыгрыш: commit → анимация → итог. msg — редактируемое сообщение (обычное или _InlineMsg).
+    reply_to нужен только для колеса (GIF отправляется отдельным сообщением). Возвращает id запуска.
+    """
+    options, title, k = src["options"], src["title"], src.get("count", 1)
+    n = len(options)
+    seed, commit = _new_seed()
+    order = _draw(seed, options, k)
+    names = [options[i] for i in order]
+    rid = _new_run(options, title, src.get("forced"), k)
+    _PICKS[rid].update(seed=seed, commit=commit, order=order, last=key)
+
+    await _safe_edit(msg, _commit_text(title, commit))
+    await asyncio.sleep(0.9)
+
+    if k > 1:
+        key, label = "podium", "🏅 подиум"
+        try:
+            await _anim_podium(msg, options, title, order)
+            await _finale(msg, title, names[0])
+        except Exception:
+            logger.exception("подиум упал — показываю результат без анимации")
+    else:
+        if key == "wheel" and (reply_to is None or not _CARDS_OK):
+            key = "roulette"
+        if key == "wheel":
+            label = "🎠 колесо"
+            await _safe_edit(msg, "🎠 <b>Раскручиваем колесо…</b>")
+            try:
+                gif = await asyncio.to_thread(make_wheel_gif, options, order[0], title, commit)
+                await reply_to.reply_animation(
+                    BufferedInputFile(gif, filename="wheel.gif"),
+                    caption=_result_text(title, names[0], style_label=label, n=n, commit=commit),
+                    parse_mode="HTML", reply_markup=_again_kb(rid, "wheel", 1))
+                _PICKS[rid]["label"] = label
+                if delete_after_wheel:
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                return rid
+            except Exception:
+                logger.exception("колесо не отправилось — запасная рулетка")
+                key = "roulette"
+        icon, lab, _ = STYLES[key]
+        label = f"{icon} {lab}"
+        await spin(msg, options, title, winner_idx=order[0], style=key)
+
+    _PICKS[rid]["label"] = label
+    await _safe_edit(
+        msg, _result_text(title, names[0], style_label=label, n=n,
+                          winners=names if k > 1 else None, commit=commit),
+        _again_kb(rid, key, k, inline=isinstance(msg, _InlineMsg)))
+    return rid
 
 
 async def run_pick(message: types.Message, options: list[str], title: str = "",
-                   style: str | None = None) -> bool:
+                   style: str | None = None, count: int = 1, diploma: bool = False) -> bool:
     """Выбор из вариантов с анимацией. Используется /pick и ИИ-инструментом."""
     options = [o for o in options if o][:MAX_OPTIONS]
     if len(options) < 2:
         await message.reply(
             "🎲 Нужно минимум 2 варианта.\nПример: <code>/pick кофе или чай, пицца</code>\n"
-            "Список стилей: <code>/pick -стили</code>",
+            "Несколько победителей: <code>/pick -3 а, б, в, г</code> · стили: <code>/pick -стили</code>",
             parse_mode="HTML")
         return False
+    count = max(1, min(count, len(options), MAX_WINNERS))
     msg = await message.reply(_intro_text(title), parse_mode="HTML")
-    await asyncio.sleep(0.6)
-    key = _pick_style(style)
-    idx = await spin(msg, options, title, style=key)
-    tok = _remember_pick(options, title, forced=style, last=key)
-    icon, label, _ = STYLES[key]
-    await _safe_edit(msg, _result_text(title, options[idx], style_label=f"{icon} {label}", n=len(options)),
-                     _again_kb(tok, key))
+    await asyncio.sleep(0.5)
+    src = {"options": options, "title": title, "forced": style, "count": count}
+    key = "podium" if count > 1 else _pick_style(style, media=_CARDS_OK)
+    rid = await _run_round(msg, src, key, message, True)
+    if diploma:
+        await _send_card(message, rid)
     return True
 
 
@@ -620,42 +853,70 @@ async def cmd_pick(message: types.Message):
     arg = text[1] if len(text) > 1 else ""
     if not arg and message.reply_to_message:
         arg = message.reply_to_message.text or message.reply_to_message.caption or ""
-    style, arg = _extract_style_flag(arg)
+    style, count, diploma, arg = _extract_flags(arg)
     if style == "list":
         await message.reply(_styles_help(), parse_mode="HTML")
         return
-    if style == "random":
-        style = None
     title, options = split_title_and_options(arg)
-    await run_pick(message, options, title, style=style)
+    await run_pick(message, options, title, style=style, count=count, diploma=diploma)
 
 
-async def _rerun(callback: types.CallbackQuery, tok: str, requested: str | None):
-    data = _PICKS.get(tok)
-    if not data:
+# ── повторы, смена стиля, диплом, проверка ────────────────────────────────────
+_BUSY: set[str] = set()
+
+
+def _busy_key(cb: types.CallbackQuery) -> str:
+    if cb.message is None:
+        return f"i:{cb.inline_message_id}"
+    return f"{cb.message.chat.id}:{cb.message.message_id}"
+
+
+async def _rerun(callback: types.CallbackQuery, src_tok: str, requested: str | None):
+    src = _PICKS.get(src_tok)
+    if not src:
         await callback.answer("Это уже устарело — запусти заново", show_alert=True)
         return
-    if data.get("busy"):
+    inline = callback.message is None
+    if inline and not callback.inline_message_id:
+        await callback.answer("Не могу изменить это сообщение", show_alert=True)
+        return
+    bkey = _busy_key(callback)
+    if bkey in _BUSY:
         await callback.answer("Уже крутится 🎰")
         return
-    await callback.answer()
-    data["busy"] = True
+    k = src.get("count", 1)
+    key = "podium" if k > 1 else _pick_style(requested or src.get("forced"), avoid=src.get("last"),
+                                              media=_CARDS_OK and not inline)
+    if inline and requested == "wheel":
+        await callback.answer("Колесо-GIF недоступно в inline-сообщениях — взял другой стиль")
+    else:
+        await callback.answer()
+    _BUSY.add(bkey)
     try:
-        msg = callback.message
-        key = _pick_style(requested or data.get("forced"), avoid=data.get("last"))
-        data["last"] = key
-        idx = await spin(msg, data["options"], data["title"], style=key)
-        icon, label, _ = STYLES[key]
-        await _safe_edit(msg, _result_text(data["title"], data["options"][idx],
-                                           style_label=f"{icon} {label}", n=len(data["options"])),
-                         _again_kb(tok, key))
+        if inline:
+            msg, reply_to, delete = _InlineMsg(callback.bot, callback.inline_message_id), None, False
+        else:
+            cm = callback.message
+            media = bool(cm.animation or cm.photo or cm.document)    # медиа в текст не превратить
+            if key == "wheel" or media:
+                msg, delete = await cm.reply(_intro_text(src["title"]), parse_mode="HTML"), True
+            else:
+                msg, delete = cm, False
+            reply_to = cm
+        await _run_round(msg, src, key, reply_to, delete)
+    except Exception:
+        logger.exception("повтор жребия упал")
     finally:
-        data["busy"] = False
+        _BUSY.discard(bkey)
 
 
 async def callback_again(callback: types.CallbackQuery):
-    tok = (callback.data or "").split(":", 2)[-1]
-    await _rerun(callback, tok, None)
+    await _rerun(callback, (callback.data or "").split(":", 2)[-1], None)
+
+
+async def callback_go(callback: types.CallbackQuery):
+    """Кнопка «🎰 Крутить!» под inline-сообщением."""
+    await _rerun(callback, (callback.data or "").split(":", 2)[-1], None)
 
 
 async def callback_style(callback: types.CallbackQuery):
@@ -664,6 +925,150 @@ async def callback_style(callback: types.CallbackQuery):
         await callback.answer("Неизвестный стиль", show_alert=True)
         return
     await _rerun(callback, parts[2], parts[3])
+
+
+async def _deliver(callback: types.CallbackQuery, *, text: str | None = None,
+                   photo: "BufferedInputFile | None" = None, caption: str | None = None) -> bool:
+    """Ответ в чат; у inline-сообщений нет чата → шлём в личку нажавшему."""
+    try:
+        if callback.message is not None:
+            if photo is not None:
+                await callback.message.reply_photo(photo, caption=caption, parse_mode="HTML")
+            else:
+                await callback.message.reply(text, parse_mode="HTML")
+        else:
+            uid = callback.from_user.id
+            if photo is not None:
+                await callback.bot.send_photo(uid, photo, caption=caption, parse_mode="HTML")
+            else:
+                await callback.bot.send_message(uid, text, parse_mode="HTML")
+        return True
+    except Exception:
+        logger.exception("не получилось отправить ответ")
+        return False
+
+
+async def _card_bytes(data: dict) -> bytes:
+    winners = [data["options"][i] for i in data["order"]]
+    return await asyncio.to_thread(make_pick_card, data["title"], winners, len(data["options"]),
+                                   data["commit"], data.get("label", ""))
+
+
+async def _send_card(message: types.Message, rid: str):
+    data = _PICKS.get(rid)
+    if not data or "order" not in data or not _CARDS_OK:
+        return
+    try:
+        png = await _card_bytes(data)
+        await message.reply_photo(BufferedInputFile(png, filename="pick.png"), caption="🏆 Диплом победителя")
+    except Exception:
+        logger.exception("диплом не создался")
+
+
+async def callback_card(callback: types.CallbackQuery):
+    data = _PICKS.get((callback.data or "").split(":", 2)[-1])
+    if not data or "order" not in data or not _CARDS_OK:
+        await callback.answer("Это уже устарело — запусти заново", show_alert=True)
+        return
+    if data.get("card_busy"):
+        await callback.answer("Уже рисую 🎨")
+        return
+    data["card_busy"] = True
+    await callback.answer("Рисую диплом… 🎨")
+    try:
+        png = await _card_bytes(data)
+        ok = await _deliver(callback, photo=BufferedInputFile(png, filename="pick.png"),
+                            caption="🏆 Диплом победителя" + ("" if callback.message else " (из inline)"))
+        if not ok and callback.message is None:
+            logger.info("inline-диплом: пользователь не запускал бота — личка недоступна")
+    except Exception:
+        logger.exception("диплом не создался")
+    finally:
+        data["card_busy"] = False
+
+
+async def callback_check(callback: types.CallbackQuery):
+    data = _PICKS.get((callback.data or "").split(":", 2)[-1])
+    if not data or "seed" not in data:
+        await callback.answer("Это уже устарело — запусти заново", show_alert=True)
+        return
+    ok = await _deliver(callback, text=_check_text(data))
+    await callback.answer("Проверка отправлена" if ok else "Нажми /start у бота — тогда пришлю в личку",
+                          show_alert=not ok)
+
+
+# ── Inline: «p: кофе, чай» (отдельный префикс — a: у аниме, ig у instagram, остальное — музыка) ──
+_PICK_PREFIX_RE = re.compile(r"^\s*(?:p|pick|п|жребий)\s*:\s*", re.IGNORECASE)
+_PICK_SUFFIX_RE = re.compile(r"\s+/p\s*$", re.IGNORECASE)          # «кофе, чай /p»
+
+
+def is_pick_inline(raw: str) -> bool:
+    return bool(_PICK_PREFIX_RE.match(raw or "") or _PICK_SUFFIX_RE.search(raw or ""))
+
+
+def _strip_pick_inline(raw: str) -> str:
+    return _PICK_SUFFIX_RE.sub("", _PICK_PREFIX_RE.sub("", raw or "", 1)).strip()
+
+
+def _template_tok(options: list[str], title: str, count: int, forced: str | None) -> str:
+    """Детерминированный токен шаблона: одинаковый запрос не плодит записи на каждое нажатие клавиши."""
+    raw = json.dumps([options, title, count, forced], ensure_ascii=False)
+    return hashlib.sha1(raw.encode()).hexdigest()[:10]
+
+
+async def inline_pick(iq: types.InlineQuery):
+    raw = _strip_pick_inline(iq.query)
+    style, count, _diploma, rest = _extract_flags(raw)
+    help_txt = ("🎲 <b>Жребий из inline</b>\nПример: <code>@бот p: кофе, чай, пицца</code>\n"
+                "Несколько победителей: <code>p: -3 а, б, в, г</code>")
+    if style == "list" or not rest.strip():
+        await iq.answer([InlineQueryResultArticle(
+            id="pick-help", title="🎲 Жребий: введи варианты через запятую",
+            description="p: кофе, чай, пицца   ·   p: -3 а, б, в, г",
+            input_message_content=InputTextMessageContent(message_text=help_txt, parse_mode="HTML"))],
+            cache_time=0, is_personal=True)
+        return
+    title, options = split_title_and_options(rest)
+    if len(options) < 2:
+        await iq.answer([InlineQueryResultArticle(
+            id="pick-need2", title="Нужно минимум 2 варианта", description="через запятую, «или» или /",
+            input_message_content=InputTextMessageContent(message_text=help_txt, parse_mode="HTML"))],
+            cache_time=0, is_personal=True)
+        return
+    count = max(1, min(count, len(options), MAX_WINNERS))
+    tok = _template_tok(options, title, count, style)
+    if tok not in _PICKS:
+        _PICKS[tok] = {"options": options, "title": title, "forced": style, "count": count, "last": None}
+        while len(_PICKS) > 400:
+            _PICKS.popitem(last=False)
+    else:
+        _PICKS.move_to_end(tok)
+
+    shown = " · ".join(_esc(_cut(o, 20)) for o in options[:12]) + (" …" if len(options) > 12 else "")
+    goal = "выберем одного" if count == 1 else f"выберем {count} победителей"
+    t = f"<b>{_esc(title)}</b>\n" if title else ""
+    go_text = f"🎲 {t}Варианты ({len(options)}): {shown}\n\n{goal} — жми 👇"
+
+    # мгновенный вариант: результат сразу (без анимации)
+    seed, commit = _new_seed()
+    order = _draw(seed, options, count)
+    names = [options[i] for i in order]
+    rid = _new_run(options, title, style, count)
+    _PICKS[rid].update(seed=seed, commit=commit, order=order, label="⚡ мгновенно")
+    fast_text = _result_text(title, names[0], style_label="⚡ мгновенно", n=len(options),
+                             winners=names if count > 1 else None, commit=commit)
+
+    await iq.answer([
+        InlineQueryResultArticle(
+            id=f"go{tok}", title="🎰 Крутить с анимацией", description=f"{len(options)} вариантов · {goal}",
+            input_message_content=InputTextMessageContent(message_text=go_text, parse_mode="HTML"),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🎰 Крутить!", callback_data=f"fun:go:{tok}")]])),
+        InlineQueryResultArticle(
+            id=f"fast{rid}", title="⚡ Сразу результат", description="без анимации, итог — в сообщении",
+            input_message_content=InputTextMessageContent(message_text=fast_text, parse_mode="HTML"),
+            reply_markup=_again_kb(rid, "", count, inline=True)),
+    ], cache_time=0, is_personal=True)
 
 
 # ── /who — лобби ──────────────────────────────────────────────────────────────
@@ -908,6 +1313,9 @@ def register_fun_handlers(dp):
     dp.message.register(cmd_coin, Command("coin", "flip"))
     dp.callback_query.register(callback_again, F.data.startswith("fun:again:"))
     dp.callback_query.register(callback_style, F.data.startswith("fun:st:"))
+    dp.callback_query.register(callback_go, F.data.startswith("fun:go:"))
+    dp.callback_query.register(callback_card, F.data.startswith("fun:card:"))
+    dp.callback_query.register(callback_check, F.data.startswith("fun:chk:"))
     dp.callback_query.register(callback_who_join, F.data.startswith("who:join:"))
     dp.callback_query.register(callback_who_leave, F.data.startswith("who:leave:"))
     dp.callback_query.register(callback_who_duty, F.data.startswith("who:duty:"))

@@ -5,7 +5,9 @@ main.py — точка входа бота. Только импорты, рег�
   duty_handlers.py   — наряды, расписание, планировщик
   ai_handlers.py     — Gemini: чат, /meme, /tldr, /poll, /imagen, фото, документы, ГС/кружочки
   vision_handlers.py — вопросы реплаем по фото/PDF/видео, мемы «сделай мем про…», /tr, /explain
-  fun_handlers.py    — /pick, /who (жребий с анимацией), /roll, /coin
+  fun_handlers.py    — /pick, /who (жребий с анимацией, подиум, inline «p:»), /roll, /coin
+  pick_cards.py      — картинки для /pick: диплом (PNG) и колесо фортуны (GIF)
+  cases_game.py      — кейс-клуб: /case, /daily, /inv, /ctop (монеты, кейсы, батлы)
   places_handlers.py — /nearby и геопозиция: кафе, аптеки, магазины
   film_handler.py    — /film через TMDB
   freebies.py        — /free: раздачи Epic/Steam и уведомления
@@ -79,7 +81,8 @@ from anixart_handler import (
     anixart_startup_selftest, close_anixart_session,
 )
 from ozon_handler import cmd_ozon
-from fun_handlers import register_fun_handlers
+from fun_handlers import register_fun_handlers, inline_pick, is_pick_inline
+from cases_game import register_cases_handlers
 from places_handlers import register_places_handlers
 from film_handler import register_film_handlers
 from freebies import register_freebies_handlers, check_freebies
@@ -133,7 +136,11 @@ async def cmd_help(message: types.Message) -> None:
         "ответь на картинку: «сделай мем про …»\n"
         "ответь на фото/PDF/видео/ГС: «переведи», «что написано», «объясни мем», «о чём документ»\n\n"
         "🎲 <b>выбор и жребий</b>\n"
-        "/pick кофе или чай, /who кто моет посуду, /roll, /coin\n\n"
+        "/pick кофе или чай, /who кто моет посуду, /roll, /coin\n"
+        "/pick -3 а, б, в, г — несколько победителей · /pick -стили — стили анимации\n"
+        "inline: <code>@бот p: кофе, чай</code>\n\n"
+        "🎰 <b>кейс-клуб</b>\n"
+        "/case — кейсы, инвентарь, батлы · /daily — бонус · /inv · /ctop — топ\n\n"
         "📍 <b>рядом</b>\n"
         "/nearby — кафе, аптеки, магазины (скинь геопозицию или адрес)\n\n"
         "🍿 <b>фильмы и сериалы</b>\n"
@@ -184,6 +191,9 @@ async def main():
         if parse_ig_inline(raw) is not None:      # «ig natgeo» / «ig:natgeo» / ссылка на профиль
             logger.info(f"📸 inline → instagram: {raw!r}")
             await inline_instagram(iq)
+        elif is_pick_inline(raw):                 # «p: кофе, чай» / «pick: …» / «п: …» / «… /p» → жребий
+            logger.info(f"🎲 inline → pick: {raw!r}")
+            await inline_pick(iq)
         elif raw.strip().startswith("a:"):
             logger.info(f"🎬 inline → anime: {raw!r}")
             await inline_anime(iq)
@@ -283,6 +293,7 @@ async def main():
 
     # ── Новые модули (ДО handle_photo/handle_document/handle_ai_chat — порядок важен) ──
     register_fun_handlers(dp)
+    register_cases_handlers(dp)
     register_places_handlers(dp)
     register_film_handlers(dp)
     register_freebies_handlers(dp)
