@@ -3,8 +3,9 @@ cases_game.py — 🎰 КЕЙС-КЛУБ: игра с кейсами, монет
 
 Игровой цикл:
   • У каждого игрока монеты 🪙 (старт 1000) и инвентарь предметов (скины CS, машины, ценные вещи, хлам).
-  • Кейсы платные: Стартовый 100 · Оружейный CS 400 · Гараж 1500 · Люкс 5000 · Мифик 20 000.
-    Шансы посчитаны так, чтобы в среднем кейс возвращал ~90% цены (RTP) — монеты медленно утекают,
+  • Кейсы платные: Стартовый 100 · Геймерский 250 · Оружейный CS 400 · Стрит-хайп 800 · Гараж 1500 · Люкс 5000 · Мифик 20 000.
+    В каталоге 270 предметов в 5 категориях: скины CS, машины и транспорт, ценности, стрит-хайп, геймерское.
+    Шансы посчитаны так, чтобы в среднем кейс возвращал ~95% цены (RTP) — монеты медленно утекают,
     а удача и умение вовремя продавать решают, кто в топе.
   • Выпавший предмет можно продать за его цену (кнопка под дропом или в инвентаре) либо копить.
   • 🎁 Раз в день — бонус монет (серия дней даёт больше). 🆘 Если игрок «на нуле» (монет и стоимости
@@ -13,8 +14,8 @@ cases_game.py — 🎰 КЕЙС-КЛУБ: игра с кейсами, монет
     забирает оба предмета.
 
 Дополнительно:
-  • 🚀 АПГРЕЙД: рискнуть предметом ради более дорогого (шанс = 90% × цена/цена_цели — честный).
-  • 🧾 КОНТРАКТ: 3–10 предметов → один (в среднем ~90% суммарной стоимости, с шансом на большой куш).
+  • 🚀 АПГРЕЙД: рискнуть предметом ради более дорогого (шанс = 95% × цена/цена_цели — честный).
+  • 🧾 КОНТРАКТ: 3–10 предметов → один (возврат всегда ниже 100%, обычно 88–96% суммы, с шансом на большой куш).
   • 🎟 Бесплатный кейс раз в день и 💥 «предложение дня» (−15% на один кейс, 1 раз в день).
   • 🎁 /give — подарки монет (комиссия 5%) и предметов, 🤝 /trade — обмен предмет на предмет.
   • 📅 Сезоны по 14 дней: топ-3 по ПРИРОСТУ капитала получают кубки (прогресс не сбрасывается),
@@ -55,17 +56,17 @@ DAILY_STEP = 100            # +100 за каждый день серии под�
 DAILY_STREAK_MAX = 6        # максимум +600 (итого 1100 на 7-й день серии)
 BAILOUT = 300               # пособие «на нуле»
 BAILOUT_COOLDOWN = 2 * 3600
-RTP = 0.90                  # какую долю цены кейс возвращает в среднем
+RTP = 0.95                  # какую долю цены кейс возвращает в среднем (было 0.90 — шансы подняты)
 CONFIRM_SELL_AT = 5000      # дороже этого — продажа с подтверждением
 BATTLE_TTL = 20 * 60        # открытый батл «живёт» 20 минут, потом возврат ставки
 INV_PER_PAGE = 6
 SEASON_DAYS = 14            # длина сезона
-DEAL_DISCOUNT = 0.15        # скидка «предложения дня» (1 раз в день на игрока)
+DEAL_DISCOUNT = 0.10        # скидка «предложения дня» (1 раз в день); при RTP 95% −10% даёт то же +5% выгоды, что раньше −15%
 UPGRADE_MULTS = (1.5, 2, 3, 5, 10, 25)
 UPGRADE_MIN_CHANCE, UPGRADE_MAX_CHANCE = 0.01, 0.75
 CONTRACT_MIN, CONTRACT_MAX = 3, 10
-# (множитель к сумме, вероятность): матожидание ≈ 0.9 — контракт не «печатает деньги»
-CONTRACT_OUTCOMES = [(0.4, 0.42), (0.8, 0.31), (1.2, 0.17), (2.0, 0.07), (4.0, 0.025), (8.0, 0.005)]
+# (множитель к сумме, вероятность): сумма m·p ≈ 0.995 < 1, а предмет выдаётся не дороже цели — возврат всегда <100%
+CONTRACT_OUTCOMES = [(0.4, 0.368), (0.8, 0.30), (1.2, 0.20), (2.0, 0.09), (4.0, 0.037), (8.0, 0.005)]
 GIVE_MIN, GIVE_FEE, GIVE_DAILY_CAP = 10, 0.05, 20000     # подарки: минимум, комиссия, лимит в сутки (в 🪙-стоимости)
 TRADE_TTL = 30 * 60
 COMMANDS = {"menu": ("case", "cases"), "daily": ("daily",), "inv": ("inv", "inventory"), "top": ("ctop",),
@@ -104,31 +105,75 @@ _ITEMS_RAW = [
  ("lux","epic","lux_mac","MacBook Pro",3500),("lux","epic","lux_gold100","Золотой слиток 100 г",5500),("lux","epic","lux_rolex","Rolex Submariner",7000),
  ("lux","legend","lux_diamond","Бриллиант 5 карат",26000),("lux","legend","lux_flat","Квартира-студия",38000),("lux","legend","lux_bar","Золотой слиток 1 кг",42000),
  ("lux","mythic","lux_penthouse","Пентхаус в Москва-Сити",300000),("lux","mythic","lux_yacht","Яхта",420000),("lux","mythic","lux_island","Частный остров",600000),
+
+ # ═══ расширение каталога (v3). Ключи/цены старых предметов не менялись ═══
+ # ── CS: скины ──
+ ("cs","junk","cs_mac10_silver","MAC-10 | Silver",18),("cs","junk","cs_p90_sand","P90 | Sand Spray",15),("cs","junk","cs_galil_sage","Galil AR | Sage Spray",20),("cs","junk","cs_ump_carbon","UMP-45 | Carbon Fiber",28),("cs","junk","cs_tec9_urban","Tec-9 | Urban DDPAT",34),
+ ("cs","common","cs_mp7_army","MP7 | Army Recon",70),("cs","common","cs_aug_storm","AUG | Storm",85),("cs","common","cs_ssg_blood","SSG 08 | Blood in the Water",105),("cs","common","cs_p250_mehndi","P250 | Mehndi",130),("cs","common","cs_fiveseven_candy","Five-SeveN | Candy Apple",140),("cs","common","cs_xm_tranq","XM1014 | Tranquility",165),("cs","common","cs_mag7_bull","MAG-7 | Bulldozer",175),("cs","common","cs_cz75_dart","CZ75-Auto | Poison Dart",210),
+ ("cs","rare","cs_ak_elite","AK-47 | Elite Build",410),("cs","rare","cs_m4s_decimator","M4A1-S | Decimator",510),("cs","rare","cs_awp_hive","AWP | Electric Hive",560),("cs","rare","cs_usp_caiman","USP-S | Caiman",590),("cs","rare","cs_p250_seeya","P250 | See Ya Later",700),("cs","rare","cs_glock_twilight","Glock-18 | Twilight Galaxy",760),("cs","rare","cs_dual_cobra","Dual Berettas | Cobra Strike",970),("cs","rare","cs_deagle_cobalt","Desert Eagle | Cobalt Disruption",1050),
+ ("cs","epic","cs_awp_hyper","AWP | Hyper Beast",1800),("cs","epic","cs_m4s_cyrex","M4A1-S | Cyrex",1850),("cs","epic","cs_ak_neon","AK-47 | Neon Revolution",2250),("cs","epic","cs_deagle_print","Desert Eagle | Printstream",2750),("cs","epic","cs_awp_contain","AWP | Containment Breach",4100),("cs","epic","cs_usp_kill","USP-S | Kill Confirmed",4850),
+ ("cs","legend","cs_m4s_knight","M4A1-S | Knight",9000),("cs","legend","cs_ak_arabesque","AK-47 | Gold Arabesque",13000),("cs","legend","cs_bayonet_fade","★ Bayonet | Fade",16000),("cs","legend","cs_awp_gungnir","AWP | Gungnir",29000),
+ ("cs","mythic","cs_kara_sapphire","★ Karambit | Sapphire",105000),("cs","mythic","cs_m9_ruby","★ M9 Bayonet | Ruby",145000),
+ # ── Машины и транспорт ──
+ ("car","junk","car_wipers","Дворник (одна штука)",10),("car","junk","car_mat","Резиновый коврик",16),("car","junk","car_scraper","Скребок для льда",14),("car","junk","car_fuses","Набор предохранителей",24),("car","junk","car_fine","Штраф ГИБДД (оплаченный)",28),
+ ("car","common","car_battery","Аккумулятор 60 Ач",110),("car","common","car_oil","Набор моторных масел",125),("car","common","car_navi","Автомобильный навигатор",140),("car","common","car_seat","Детское автокресло",160),("car","common","car_roofbox","Багажник на крышу",175),("car","common","car_compressor","Автокомпрессор",190),("car","common","car_fridge","Автохолодильник",240),("car","common","car_helmet","Мотошлем",280),
+ ("car","rare","car_vespa","Скутер Vespa",520),("car","rare","car_atv","Квадроцикл",700),("car","rare","car_kopeyka","ВАЗ-2101 «Копейка»",480),("car","rare","car_logan","Renault Logan",780),("car","rare","car_solaris","Hyundai Solaris",1000),("car","rare","car_polo","Volkswagen Polo",1100),("car","rare","car_ebike","Электровелосипед",560),("car","rare","car_ninja","Мотоцикл Kawasaki Ninja",1450),
+ ("car","epic","car_mazda3","Mazda 3",3200),("car","epic","car_audi_a4","Audi A4",4800),("car","epic","car_octavia_rs","Skoda Octavia RS",5200),("car","epic","car_mustang","Ford Mustang GT",7200),("car","epic","car_harley","Harley-Davidson Fat Boy",6500),("car","epic","car_jetski","Гидроцикл Sea-Doo",3900),("car","epic","car_defender","Land Rover Defender",8800),
+ ("car","legend","car_cayenne","Porsche Cayenne Turbo",27000),("car","legend","car_m5","BMW M5 Competition",31000),("car","legend","car_rangerover","Range Rover Autobiography",33000),("car","legend","car_boat","Катер Sea Ray",48000),
+ ("car","mythic","car_phantom","Rolls-Royce Phantom",200000),("car","mythic","car_heli","Вертолёт Robinson R44",365000),
+ # ── Ценности: техника, часы, золото, недвижимость ──
+ ("lux","junk","lux_stickers","Набор наклеек",10),("lux","junk","lux_pen","Гостиничная ручка",14),("lux","junk","lux_bag","Пакет из «Пятёрочки»",8),("lux","junk","lux_candle","Свеча «Морской бриз»",22),("lux","junk","lux_cable","Сломанная зарядка",16),
+ ("lux","common","lux_speaker","Bluetooth-колонка",130),("lux","common","lux_mouse","Игровая мышь",165),("lux","common","lux_tablet","Планшет",270),("lux","common","lux_ereader","Электронная книга",210),("lux","common","lux_actioncam","Экшн-камера",290),("lux","common","lux_ssd","Внешний SSD 1 ТБ",180),("lux","common","lux_monitor","Монитор 27 дюймов",280),("lux","common","lux_headset","Игровая гарнитура",170),
+ ("lux","rare","lux_airpods","AirPods Pro",480),("lux","rare","lux_drone","Дрон DJI Mini",710),("lux","rare","lux_galaxy","Samsung Galaxy S24",820),("lux","rare","lux_ipad","iPad Pro",1100),("lux","rare","lux_tv","OLED-телевизор 55 дюймов",1200),("lux","rare","lux_steamdeck","Steam Deck",550),("lux","rare","lux_dyson","Пылесос Dyson",440),("lux","rare","lux_awatch","Apple Watch Ultra",870),
+ ("lux","epic","lux_macstudio","Mac Studio",3800),("lux","epic","lux_omega","Omega Speedmaster",5600),("lux","epic","lux_leica","Камера Leica M11",7400),("lux","epic","lux_tag","TAG Heuer Carrera",3450),("lux","epic","lux_gold500","Золотой слиток 500 г",7800),("lux","epic","lux_xdr","Apple Pro Display XDR",5250),("lux","epic","lux_vision","Apple Vision Pro",3250),
+ ("lux","legend","lux_patek","Patek Philippe Nautilus",36000),("lux","legend","lux_ap","Audemars Piguet Royal Oak",31000),("lux","legend","lux_emerald","Изумруд 20 карат",22000),("lux","legend","lux_cottage","Дом в Подмосковье",47000),
+ ("lux","mythic","lux_villa","Вилла на Лазурном берегу",355000),("lux","mythic","lux_pink","Розовый бриллиант",495000),
+ # ── Стрит-хайп: одежда, кроссовки, сумки ──
+ ("fash","junk","fash_socks","Носки с дыркой",8),("fash","junk","fash_laces","Шнурки (одна пара)",12),("fash","junk","fash_cap_market","Кепка с рынка",20),("fash","junk","fash_tee_sochi","Футболка «Я ♥ Сочи»",26),("fash","junk","fash_tote","Эко-сумка",18),("fash","junk","fash_flipflops","Шлёпанцы",30),("fash","junk","fash_plastic_glasses","Пластиковые очки",22),("fash","junk","fash_fan_scarf","Шарф болельщика",35),
+ ("fash","common","fash_hoodie","Худи no-name",90),("fash","common","fash_levis","Джинсы Levi's",130),("fash","common","fash_vans","Vans Old Skool",160),("fash","common","fash_converse","Converse Chuck Taylor",150),("fash","common","fash_uniqlo","Футболка Uniqlo",80),("fash","common","fash_herschel","Рюкзак Herschel",140),("fash","common","fash_nb530","New Balance 530",260),("fash","common","fash_samba","Adidas Samba",240),("fash","common","fash_puma","Puma Suede",170),("fash","common","fash_yankees","Кепка New York Yankees",120),("fash","common","fash_belt","Кожаный ремень",100),("fash","common","fash_carhartt","Шапка Carhartt",110),
+ ("fash","rare","fash_dunk_panda","Nike Dunk Low Panda",450),("fash","rare","fash_stone","Куртка Stone Island",700),("fash","rare","fash_cdg","Футболка Comme des Garçons",520),("fash","rare","fash_nuptse","The North Face Nuptse",900),("fash","rare","fash_yeezy350","Yeezy Boost 350",1000),("fash","rare","fash_supreme_box","Supreme Box Logo Hoodie",1300),("fash","rare","fash_rayban","Ray-Ban Aviator",420),("fash","rare","fash_gucci_belt","Ремень Gucci",1100),("fash","rare","fash_offwhite","Футболка Off-White",650),("fash","rare","fash_bape","BAPE Shark Hoodie",1200),("fash","rare","fash_aj4","Air Jordan 4 Military Black",1400),("fash","rare","fash_martens","Dr. Martens 1460",480),
+ ("fash","epic","fash_aj1_chicago","Air Jordan 1 Chicago",2200),("fash","epic","fash_lv_neverfull","Сумка Louis Vuitton Neverfull",3500),("fash","epic","fash_yeezy700","Yeezy Boost 700",1900),("fash","epic","fash_moncler","Пуховик Moncler",3200),("fash","epic","fash_dior_b23","Dior B23",2800),("fash","epic","fash_balenciaga","Balenciaga Triple S",2400),("fash","epic","fash_hermes_scarf","Платок Hermès",4200),("fash","epic","fash_goose","Canada Goose Expedition",2000),("fash","epic","fash_travis_aj","Travis Scott × Jordan 1 Low",6800),("fash","epic","fash_prada_nylon","Рюкзак Prada Re-Nylon",3000),
+ ("fash","legend","fash_birkin30","Hermès Birkin 30",14000),("fash","legend","fash_chanel_flap","Chanel Classic Flap",11000),("fash","legend","fash_air_mag","Nike Air Mag («Назад в будущее»)",38000),("fash","legend","fash_sable_coat","Шуба из соболя",21000),("fash","legend","fash_kaws","KAWS Companion",26000),("fash","legend","fash_bearbrick","Bearbrick 1000%",9500),("fash","legend","fash_lv_supreme_trunk","Чемодан Louis Vuitton × Supreme",32000),
+ ("fash","mythic","fash_birkin_himalaya","Birkin Himalaya (крокодил)",190000),("fash","mythic","fash_aj1_dior","Air Jordan 1 × Dior",110000),("fash","mythic","fash_chanel_necklace","Колье Chanel Haute Joaillerie",240000),("fash","mythic","fash_dior_couture","Платье Dior Haute Couture",150000),("fash","mythic","fash_chinchilla","Пальто из шиншиллы",95000),
+ # ── Геймерское и коллекционное ──
+ ("game","junk","game_tetris_cd","Диск «Тетрис» (поцарапан)",12),("game","junk","game_joystick","Сломанный джойстик",18),("game","junk","game_mousepad","Коврик для мыши",24),("game","junk","game_steamkey","Steam-ключ (уже активирован)",8),("game","junk","game_aa","Батарейки AA (севшие)",10),("game","junk","game_hdmi","HDMI-кабель",28),("game","junk","game_poster","Постер с киберспортсменом",16),("game","junk","game_poke_stickers","Наклейки с покемонами",20),
+ ("game","common","game_xbox_pad","Геймпад Xbox",170),("game","common","game_kb_membrane","Мембранная клавиатура",90),("game","common","game_deskmat","Игровой коврик XL",110),("game","common","game_steamcard","Подарочная карта Steam",200),("game","common","game_ssd500","SSD 500 ГБ",220),("game","common","game_webcam","Веб-камера Full HD",150),("game","common","game_chair_budget","Игровое кресло (бюджетное)",300),("game","common","game_fifa","Игра FIFA (диск)",120),("game","common","game_lego_tech","Набор LEGO Technic",260),("game","common","game_funko","Фигурка Funko Pop",100),("game","common","game_usb_mic","USB-микрофон",180),("game","common","game_ps_pad","Геймпад DualSense",160),
+ ("game","rare","game_switch_oled","Nintendo Switch OLED",650),("game","rare","game_rtx3060","Видеокарта RTX 3060",600),("game","rare","game_secretlab","Кресло Secretlab",700),("game","rare","game_monitor144","Монитор 144 Гц",520),("game","rare","game_xsx","Xbox Series X",900),("game","rare","game_quest3","Meta Quest 3",1000),("game","rare","game_rog_ally","ASUS ROG Ally",1100),("game","rare","game_gpro","Мышь Logitech G Pro X Superlight",450),("game","rare","game_wooting","Клавиатура Wooting 60HE",560),("game","rare","game_falcon","LEGO Star Wars Millennium Falcon",1400),("game","rare","game_pc_mid","Игровой ПК (средний)",1350),("game","rare","game_amiibo","Коллекция amiibo",480),
+ ("game","epic","game_pc_4080","Игровой ПК RTX 4080",4200),("game","epic","game_rtx4090","Видеокарта RTX 4090",3600),("game","epic","game_oled_mon","OLED-монитор 34 дюйма",3200),("game","epic","game_simrig","Гоночный симулятор (руль и кресло)",5200),("game","epic","game_poke_box","Бустер-бокс Pokémon 1999",2800),("game","epic","game_nes_box","NES в коробке (1985)",4500),("game","epic","game_gb_red","Game Boy + Pokémon Red (запечатан)",6200),("game","epic","game_arcade","Аркадный автомат",7200),("game","epic","game_valve_index","VR-комплект Valve Index",2400),("game","epic","game_major_cup","Кубок Major (реплика)",3900),
+ ("game","legend","game_mario_sealed","Super Mario Bros. (запечатан)",18000),("game","legend","game_charizard","Pokémon Charizard 1st Edition",24000),("game","legend","game_zelda_gold","Золотой картридж The Legend of Zelda",16000),("game","legend","game_pong","Atari Pong (оригинал)",12000),("game","legend","game_pacman","Автомат Pac-Man (коллекционный)",9800),("game","legend","game_ps1_devkit","Dev-kit PlayStation 1",30000),("game","legend","game_ti_ring","Чемпионский перстень The International",40000),
+ ("game","mythic","game_ps_proto","Nintendo PlayStation (прототип)",400000),("game","mythic","game_pikachu_ill","Pokémon Pikachu Illustrator",650000),("game","mythic","game_mario_wata","Super Mario Bros. WATA 9.8",260000),("game","mythic","game_gold_pad","Золотой геймпад (24 карата)",120000),("game","mythic","game_odyssey","Magnavox Odyssey (оригинал)",95000),
 ]
 
 ITEMS: dict[str, dict] = {k: {"name": n, "price": p, "rarity": r, "cat": c} for c, r, k, n, p in _ITEMS_RAW}
+assert len(ITEMS) == len(_ITEMS_RAW), "в каталоге повторяются ключи предметов"
 
 # Кейсы: тиры выше «sink» задаются относительными весами (shape); sink (самый частый тир) добирает остаток,
 # а общий масштаб подбирается автоматически так, чтобы средняя выплата = RTP × цена.
 CASES = {
-    "starter": dict(icon="🎁", name="Стартовый", price=100, cats=("cs", "car", "lux"), sink="junk",
+    "starter": dict(icon="🎁", name="Стартовый", price=100, cats=("cs", "car", "lux", "fash", "game"), sink="junk",
                     shape={"common": 1.0, "rare": 0.2},
                     desc="всё понемногу: хлам, обычное, иногда редкое"),
+    "game":    dict(icon="🎮", name="Геймерский", price=250, cats=("game",), sink="junk",
+                    shape={"common": 1.0, "rare": 0.4, "epic": 0.07, "legend": 0.006, "mythic": 0.0004},
+                    desc="геймпады, видеокарты, ретро-консоли и коллекционные карточки"),
     "cs":      dict(icon="🔫", name="Оружейный CS", price=400, cats=("cs",), sink="junk",
                     shape={"common": 1.0, "rare": 0.55, "epic": 0.15, "legend": 0.015, "mythic": 0.0015},
-                    desc="скины из CS: от Sand Dune до Howl и перчаток"),
+                    desc="скины из CS: от Sand Dune до Howl и Sapphire"),
+    "fash":    dict(icon="👟", name="Стрит-хайп", price=800, cats=("fash",), sink="junk",
+                    shape={"common": 1.0, "rare": 0.6, "epic": 0.15, "legend": 0.015, "mythic": 0.0015},
+                    desc="кроссовки, худи, сумки — от носков до Birkin"),
     "garage":  dict(icon="🚗", name="Гараж", price=1500, cats=("car",), sink="junk",
                     shape={"common": 1.0, "rare": 0.6, "epic": 0.18, "legend": 0.02, "mythic": 0.002},
-                    desc="от ёлочки до Bugatti Chiron"),
+                    desc="от ёлочки до Bugatti, катеров и вертолёта"),
     "lux":     dict(icon="💎", name="Люкс", price=5000, cats=("lux",), sink="common",
                     shape={"rare": 1.0, "epic": 0.5, "legend": 0.07, "mythic": 0.006},
                     desc="гаджеты, золото, бриллианты, недвижимость"),
-    "mythic":  dict(icon="🌌", name="Мифик", price=20000, cats=("cs", "car", "lux"), sink="rare",
+    "mythic":  dict(icon="🌌", name="Мифик", price=20000, cats=("cs", "car", "lux", "fash", "game"), sink="rare",
                     shape={"epic": 1.0, "legend": 0.9, "mythic": 0.06},
                     desc="только дорогое: эпик, легенда, миф. Для смелых"),
     # бесплатный кейс дня: цена 0, средняя выплата задана напрямую (ev_target), в магазине не продаётся
-    "free":    dict(icon="🎟", name="Бесплатный кейс дня", price=0, cats=("cs", "car", "lux"), sink="junk",
-                    shape={"common": 1.0, "rare": 0.25, "epic": 0.03}, ev_target=70, free=True,
+    "free":    dict(icon="🎟", name="Бесплатный кейс дня", price=0, cats=("cs", "car", "lux", "fash", "game"), sink="junk",
+                    shape={"common": 1.0, "rare": 0.25, "epic": 0.03}, ev_target=85, free=True,
                     desc="раз в день бесплатно — хлам, обычное, иногда редкое"),
 }
 SHOP = [k for k, c in CASES.items() if not c.get("free")]
@@ -805,7 +850,7 @@ def deal_available(uid: int, now: float | None = None) -> bool:
 # ── апгрейд ───────────────────────────────────────────────────────────────────
 def upgrade_options(src_item: str) -> list[dict]:
     """Варианты апгрейда: для каждого множителя — случайная цель из каталога около цены×множитель.
-    Шанс = RTP × цена_предмета / цена_цели, так что среднее остаётся 90% — апгрейд не «печатает деньги»."""
+    Шанс = RTP × цена_предмета / цена_цели, так что среднее остаётся равным RTP (<100%) — апгрейд не «печатает деньги»."""
     p0 = item_info(src_item)["price"]
     if p0 <= 0 or _is_trophy(src_item):
         return []
@@ -874,12 +919,14 @@ def basket_clear(uid: int):
 
 
 def contract_target_pool(total: int, mult: float) -> list[str]:
+    """Кандидаты на выдачу: цена в [0.85·цель, цель]. Предмет НИКОГДА не дороже цели — поэтому средний возврат
+    контракта строго ниже суммы множителей (<100%) при любой сумме, как бы «зернист» ни был каталог."""
     t = total * mult
-    cands = [k for k, v in ITEMS.items() if 0.75 * t <= v["price"] <= 1.33 * t]
+    cands = [k for k, v in ITEMS.items() if 0.85 * t <= v["price"] <= t]
     if cands:
         return cands
-    best = min(ITEMS, key=lambda k: abs(ITEMS[k]["price"] - t))
-    return [best]
+    below = [k for k, v in ITEMS.items() if v["price"] <= t]
+    return [max(below, key=lambda k: ITEMS[k]["price"])] if below else [min(ITEMS, key=lambda k: ITEMS[k]["price"])]
 
 
 def contract_expected_ratio(total: int) -> float:
@@ -1610,7 +1657,7 @@ def _pick_screen(owner: int, page: int, title: str, item_cb, page_cb, back_cb, *
 def up_pick_screen(uid: int, page: int = 0) -> tuple[str, Kb]:
     return _pick_screen(uid, page, "🚀 <b>АПГРЕЙД</b>: выбери предмет", lambda i, pg: f"cs:upi:{uid}:{i}",
                         lambda pg: f"cs:up:{uid}:{pg}", f"cs:menu:{uid}",
-                        footer="<i>Шанс честный: 90% × цена предмета / цена цели. Не повезёт — предмет сгорит.</i>",
+                        footer=f"<i>Шанс честный: {round(RTP * 100)}% × цена предмета / цена цели. Не повезёт — предмет сгорит.</i>",
                         empty="🎒 Нечем рисковать. Открой кейс!")
 
 
