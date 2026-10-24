@@ -7,7 +7,8 @@ main.py — точка входа бота. Только импорты, рег�
   vision_handlers.py — вопросы реплаем по фото/PDF/видео, мемы «сделай мем про…», /tr, /explain
   fun_handlers.py    — /pick, /who (жребий с анимацией, подиум, inline «p:»), /roll, /coin
   pick_cards.py      — картинки для /pick: диплом (PNG) и колесо фортуны (GIF)
-  cases_game.py      — кейс-клуб: /case, /daily, /inv, /ctop (монеты, кейсы, батлы)
+  cases_game.py      — кейс-клуб: /case, /daily, /inv, /ctop, /give, /trade, /cadmin (админ)
+  edit_guard.py      — безопасные правки сообщений: анимации не виснут при флуд-лимитах Telegram
   places_handlers.py — /nearby и геопозиция: кафе, аптеки, магазины
   film_handler.py    — /film через TMDB
   freebies.py        — /free: раздачи Epic/Steam и уведомления

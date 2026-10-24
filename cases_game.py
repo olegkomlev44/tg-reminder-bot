@@ -30,6 +30,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -69,8 +70,12 @@ CONTRACT_MIN, CONTRACT_MAX = 3, 10
 CONTRACT_OUTCOMES = [(0.4, 0.368), (0.8, 0.30), (1.2, 0.20), (2.0, 0.09), (4.0, 0.037), (8.0, 0.005)]
 GIVE_MIN, GIVE_FEE, GIVE_DAILY_CAP = 10, 0.05, 20000     # подарки: минимум, комиссия, лимит в сутки (в 🪙-стоимости)
 TRADE_TTL = 30 * 60
+ANIM_TIMEOUT = 45.0         # анимация дольше — прерываем и показываем результат (чтобы не «висело»)
+# Админы: только по числовому Telegram-ID. @BFF_Oleg — для справки (username можно сменить, поэтому по нему права не даём).
+ADMIN_USERNAME = "BFF_Oleg"
+ADMIN_IDS = {891298064} | {int(x) for x in re.split(r"[,\s]+", os.getenv("CASES_ADMIN_IDS", "")) if x.strip().lstrip("-").isdigit()}
 COMMANDS = {"menu": ("case", "cases"), "daily": ("daily",), "inv": ("inv", "inventory"), "top": ("ctop",),
-            "give": ("give",), "trade": ("trade",)}
+            "give": ("give",), "trade": ("trade",), "admin": ("cadmin",)}
 
 # ── Каталог ───────────────────────────────────────────────────────────────────
 RARITY = {
@@ -285,6 +290,12 @@ _NEW_USER_COLS = {
 }
 
 
+_SCHEMA_ADMIN = """
+CREATE TABLE IF NOT EXISTS admin_log(id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER, target_id INTEGER,
+  action TEXT, detail TEXT, ts REAL);
+"""
+
+
 def _migrate(conn: sqlite3.Connection):
     have = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
     for col, decl in _NEW_USER_COLS.items():
@@ -299,6 +310,7 @@ def _db() -> sqlite3.Connection:
         _conn.row_factory = sqlite3.Row
         _conn.executescript(_SCHEMA)
         _migrate(_conn)
+        _conn.executescript(_SCHEMA_ADMIN)
     return _conn
 
 
@@ -1084,6 +1096,71 @@ def accept_trade(tid: str, uid: int, now: float | None = None) -> dict:
             "a_item": ra["item"], "b_item": rb["item"]}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  v4: админ-команды (начисление баланса, выдача предметов) и тег админа
+# ══════════════════════════════════════════════════════════════════════════════
+ADMIN_MAX = 10 ** 12
+
+
+def is_admin(uid: int) -> bool:
+    """Права — только по числовому Telegram-ID (username можно сменить/перехватить, ID — нет)."""
+    return uid in ADMIN_IDS
+
+
+def _alog(c, admin_id: int, target: int, action: str, detail: str, now: float):
+    c.execute("INSERT INTO admin_log(admin_id,target_id,action,detail,ts) VALUES(?,?,?,?,?)",
+              (admin_id, target, action, detail, now))
+
+
+def admin_adjust(admin_id: int, target: int, mode: str, amount: int, name: str | None = None,
+                 now: float | None = None) -> dict:
+    """mode: add — начислить, take — снять (не ниже 0), set — установить баланс."""
+    if not is_admin(admin_id):
+        return {"ok": False, "reason": "forbidden"}
+    if mode not in ("add", "take", "set") or not (0 <= amount <= ADMIN_MAX):
+        return {"ok": False, "reason": "bad"}
+    now = now or time.time()
+    with _tx() as c:
+        old = _ensure(c, target, name, now)["coins"]
+        new = old + amount if mode == "add" else (max(0, old - amount) if mode == "take" else amount)
+        c.execute("UPDATE users SET coins=? WHERE user_id=?", (new, target))
+        _alog(c, admin_id, target, mode, f"{old}->{new}", now)
+        _check_ach(c, target, now)
+    return {"ok": True, "mode": mode, "old": old, "new": new, "amount": amount, "delta": new - old}
+
+
+def admin_search_items(query: str, limit: int = 12) -> list[str]:
+    q = query.strip().lower()
+    if not q:
+        return []
+    if q in ITEMS:
+        return [q]
+    hits = [k for k, v in ITEMS.items() if q in k.lower() or q in v["name"].lower()]
+    return sorted(hits, key=lambda k: (-ITEMS[k]["price"], k))[:limit]
+
+
+def admin_grant_item(admin_id: int, target: int, item_key: str, count: int = 1, name: str | None = None,
+                     now: float | None = None) -> dict:
+    if not is_admin(admin_id):
+        return {"ok": False, "reason": "forbidden"}
+    if item_key not in ITEMS:
+        return {"ok": False, "reason": "unknown_item"}
+    if not (1 <= count <= 50):
+        return {"ok": False, "reason": "bad"}
+    now = now or time.time()
+    with _tx() as c:
+        _ensure(c, target, name, now)
+        ids = [_record_drop(c, target, "admin", item_key, now) for _ in range(count)]
+        _alog(c, admin_id, target, "item", f"{item_key} x{count}", now)
+        _check_ach(c, target, now)
+    return {"ok": True, "item": item_key, "count": count, "ids": ids}
+
+
+def admin_log_tail(limit: int = 10) -> list[dict]:
+    rows = _db().execute("SELECT * FROM admin_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_inv_item(uid: int, inv_id: int) -> str | None:
     r = _db().execute("SELECT item FROM inventory WHERE id=? AND user_id=?", (inv_id, uid)).fetchone()
     return r["item"] if r else None
@@ -1098,21 +1175,6 @@ _BUSY: set[int] = set()          # игроки, у которых сейчас 
 def _name_of(u) -> str:
     n = (getattr(u, "full_name", None) or "").strip() or (f"@{u.username}" if getattr(u, "username", None) else "")
     return (n or str(u.id))[:32]
-
-
-async def _edit(msg, text: str, kb: Kb | None = None) -> bool:
-    try:
-        await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
-        return True
-    except Exception as e:
-        err = str(e).lower()
-        if "retry after" in err:
-            import re
-            m = re.search(r"retry after (\d+)", err)
-            await asyncio.sleep(min(int(m.group(1)) if m else 2, 5))
-        elif "not modified" not in err:
-            logger.warning("edit не удался: %s", e)
-        return False
 
 
 def _kb(rows) -> Kb:
@@ -1220,10 +1282,10 @@ async def _anim_battle(msg, res: dict):
     head = f"⚔️ <b>БАТЛ</b> · {c['icon']} {c['name']} · {_fmt(c['price'])} 🪙\n\n"
     pa, pb = item_info(res["a_item"])["price"], item_info(res["b_item"])["price"]
     for k in range(6):
-        await _edit(msg, head + f"{an}\n{_strip(res['case'])}  ❓\n\n{bn}\n{_strip(res['case'])}  ❓\n\n"
+        await _frame(msg, head + f"{an}\n{_strip(res['case'])}  ❓\n\n{bn}\n{_strip(res['case'])}  ❓\n\n"
                               f"<i>{'◐◓◑◒'[k % 4]} кейсы крутятся…</i>")
         await asyncio.sleep(0.6 + 0.1 * k)
-    await _edit(msg, head + f"{an}\n{_it(res['a_item'])} — <b>{_fmt(pa)}</b> 🪙\n\n{bn}\n"
+    await _frame(msg, head + f"{an}\n{_it(res['a_item'])} — <b>{_fmt(pa)}</b> 🪙\n\n{bn}\n"
                             f"{_strip(res['case'])}  ❓\n\n<i>◓ у соперника ещё крутится…</i>")
     await asyncio.sleep(1.3)
 
@@ -1256,7 +1318,7 @@ async def _do_open5(cb: types.CallbackQuery, uid: int, name: str, ckey: str):
     try:
         c = CASES[ckey]
         for k in range(3):
-            await _edit(cb.message, f"{c['icon']} <b>×5 · {c['name']}</b>\n\n"
+            await _frame(cb.message, f"{c['icon']} <b>×5 · {c['name']}</b>\n\n"
                                     + "\n".join(_strip(ckey) for _ in range(5)) + f"\n\n<i>{'◐◓◑◒'[k]} открываем…</i>")
             await asyncio.sleep(0.6)
         text, kb = open5_screen(uid, ckey, res["drops"], res["coins"], res["cost"])
@@ -1371,7 +1433,7 @@ async def _do_battle_accept(cb, bid: str):
         return
     await cb.answer("Батл начался!")
     try:
-        await _anim_battle(cb.message, res)
+        await asyncio.wait_for(_anim_battle(cb.message, res), ANIM_TIMEOUT)
     except Exception:
         logger.exception("анимация батла упала")
     kb = _kb([[("🔁 Свой батл на этот кейс", f"cs:brev:{res['case']}")]])
@@ -1414,7 +1476,7 @@ def _tt(title_key: str) -> str:
 
 def _dn(uid: int, name: str) -> str:
     """Имя с выбранным титулом (для топа, батлов, обмена)."""
-    return f"{name}{_tt(_title_of(uid))}"
+    return f"{name}{_tags(uid, _title_of(uid))}"
 
 
 def _mention(uid: int, name: str) -> str:
@@ -1457,7 +1519,7 @@ def menu_screen(uid: int, name: str, notice: str = "") -> tuple[str, Kb]:
     sg = season_growth(uid)
     text = (
         "🎰 <b>КЕЙС-КЛУБ</b>\n"
-        f"👤 {_e(name)}{_tt(p['title'])}\n\n"
+        f"👤 {_e(name)}{_tags(uid, p['title'])}\n\n"
         f"🪙 Баланс: <b>{_fmt(p['coins'])}</b>\n"
         f"🎒 Инвентарь: {p['inv_count']} шт. на {_fmt(p['inv_value'])} 🪙\n"
         f"📈 Капитал: <b>{_fmt(p['networth'])}</b> 🪙 · место <b>#{rank}</b> из {len(lb)}\n"
@@ -1552,7 +1614,7 @@ def top_screen(uid: int, mode: str = "all", chat_id: int | None = None) -> tuple
         for d in lb[:10]:
             mark = medals[d["rank"] - 1] if d["rank"] <= 3 else f"{d['rank']}."
             me = " ← ты" if d["user_id"] == uid else ""
-            lines.append(f"{mark} {_e(d['name'])}{_tt(d['title'])} — <b>{'+' if d['growth'] >= 0 else '−'}{_fmt(abs(d['growth']))}</b> 🪙{me}")
+            lines.append(f"{mark} {_e(d['name'])}{_tags(d['user_id'], d['title'])} — <b>{'+' if d['growth'] >= 0 else '−'}{_fmt(abs(d['growth']))}</b> 🪙{me}")
         mine = next((d for d in lb if d["user_id"] == uid), None)
         if mine and mine["rank"] > 10:
             lines.append(f"…\n{mine['rank']}. {_e(mine['name'])} — <b>{'+' if mine['growth'] >= 0 else '−'}{_fmt(abs(mine['growth']))}</b> 🪙 ← ты")
@@ -1566,7 +1628,7 @@ def top_screen(uid: int, mode: str = "all", chat_id: int | None = None) -> tuple
         for d in lb[:10]:
             mark = medals[d["rank"] - 1] if d["rank"] <= 3 else f"{d['rank']}."
             me = " ← ты" if d["user_id"] == uid else ""
-            lines.append(f"{mark} {_e(d['name'])}{_tt(d['title'])} — <b>{_fmt(d['networth'])}</b> 🪙 · ⚔️ {d['bw']}:{d['bl']}{me}")
+            lines.append(f"{mark} {_e(d['name'])}{_tags(d['user_id'], d['title'])} — <b>{_fmt(d['networth'])}</b> 🪙 · ⚔️ {d['bw']}:{d['bl']}{me}")
         mine = next((d for d in lb if d["user_id"] == uid), None)
         if mine and mine["rank"] > 10:
             lines.append(f"…\n{mine['rank']}. {_e(mine['name'])} — <b>{_fmt(mine['networth'])}</b> 🪙 ← ты")
@@ -1582,7 +1644,7 @@ def profile_screen(uid: int, name: str) -> tuple[str, Kb]:
     best = (f"{_it(p['best_item'])} — {_fmt(p['best_price'])} 🪙" if p["best_item"] else "—")
     have = get_achievements(uid)
     text = (
-        f"📊 <b>ПРОФИЛЬ</b> · {_e(name)}{_tt(p['title'])}\n\n"
+        f"📊 <b>ПРОФИЛЬ</b> · {_e(name)}{_tags(uid, p['title'])}\n\n"
         f"🪙 Баланс: <b>{_fmt(p['coins'])}</b>\n"
         f"📈 Капитал: <b>{_fmt(p['networth'])}</b> 🪙\n"
         f"📦 Открыто кейсов: {p['opened']}\n"
@@ -1706,7 +1768,7 @@ async def _anim_upgrade(msg, res: dict):
         if k == len(offs) - 1:
             pos = final
         pointer = "▫️" * pos + "🔻" + "▫️" * (cells - 1 - pos)
-        await _edit(msg, head + f"{pointer}\n{bar}\n\n<i>{'◐◓◑◒'[k % 4]} {notes[k]}</i>")
+        await _frame(msg, head + f"{pointer}\n{bar}\n\n<i>{'◐◓◑◒'[k % 4]} {notes[k]}</i>")
         await asyncio.sleep(delays[k])
 
 
@@ -1724,7 +1786,7 @@ async def _do_upgrade(cb, uid: int, inv_id: int, target: str):
     _BUSY.add(uid)
     try:
         try:
-            await _anim_upgrade(cb.message, res)
+            await asyncio.wait_for(_anim_upgrade(cb.message, res), ANIM_TIMEOUT)
         except Exception:
             logger.exception("анимация апгрейда упала")
         if res["success"]:
@@ -1785,7 +1847,7 @@ async def _do_contract_sign(cb, uid: int):
     try:
         try:
             for k in range(4):
-                await _edit(cb.message, f"🧾 <b>КОНТРАКТ</b>\n\n{res['n']} предметов на <b>{_fmt(res['total'])}</b> 🪙\n\n"
+                await _frame(cb.message, f"🧾 <b>КОНТРАКТ</b>\n\n{res['n']} предметов на <b>{_fmt(res['total'])}</b> 🪙\n\n"
                                         f"{'📄' * (k + 1)}{'▫️' * (3 - k)}\n<i>{'◐◓◑◒'[k]} подписываем и считаем…</i>")
                 await asyncio.sleep(0.8)
         except Exception:
@@ -1967,14 +2029,14 @@ async def _anim_open(msg, ckey: str, drop: str):
                 f"{''.join(cells)}\n"
                 f"{'🔽' if k < len(positions) - 1 else '✅'} <b>{_e(cur['name'])}</b>\n\n"
                 f"<i>{'◐◓◑◒'[k % 4]} {notes[k]}</i>")
-        await _edit(msg, text)
+        await _frame(msg, text)
         await asyncio.sleep(delays[k])
     r = item_info(drop)["rarity"]
     if r in ("epic", "legend", "mythic"):
         em = RARITY[r][0]
         for k in range(2):
             flash = (em * 5) if k == 0 else ("✨" + em) * 3
-            await _edit(msg, f"{flash}\n\n{_it(drop)}\n\n{flash}")
+            await _frame(msg, f"{flash}\n\n{_it(drop)}\n\n{flash}")
             await asyncio.sleep(0.55)
 
 
@@ -2003,7 +2065,7 @@ async def _do_open(cb, uid: int, name: str, ckey: str, deal: bool = False):
     try:
         item, inv_id = res["drops"][0]
         try:
-            await _anim_open(cb.message, ckey, item)
+            await asyncio.wait_for(_anim_open(cb.message, ckey, item), ANIM_TIMEOUT)
         except Exception:
             logger.exception("анимация кейса упала — показываю дроп")
         text, kb = drop_screen(uid, ckey, item, inv_id, res["coins"], res["cost"])
@@ -2025,7 +2087,7 @@ async def _do_free(cb, uid: int, name: str):
     _BUSY.add(uid)
     try:
         try:
-            await _anim_open(cb.message, "free", res["item"])
+            await asyncio.wait_for(_anim_open(cb.message, "free", res["item"]), ANIM_TIMEOUT)
         except Exception:
             logger.exception("анимация бесплатного кейса упала")
         text, kb = free_drop_screen(uid, res["item"], res["inv_id"])
@@ -2288,6 +2350,182 @@ async def _dispatch(cb: types.CallbackQuery):
     await _edit(msg, t, k)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  v4: защищённые правки сообщений (анимации не зависают при флуд-лимитах) и админ-панель
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    from edit_guard import safe_edit as _guard_edit      # рядом должен лежать edit_guard.py
+except Exception:                                        # без него — прежнее (менее надёжное) поведение
+    _guard_edit = None
+    logging.getLogger(__name__).warning("edit_guard.py не найден — анимации могут зависать при флуд-лимитах Telegram. "
+                                        "Положите edit_guard.py рядом с остальными модулями.")
+
+
+async def _edit(msg, text: str, kb: Kb | None = None, *, final: bool = True) -> bool:
+    """Итоговая правка (по умолчанию): доставляется обязательно — ждёт флуд-паузу и повторяется."""
+    if _guard_edit is not None:
+        return await _guard_edit(msg, text, kb, final=final)
+    try:
+        await msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        return True
+    except Exception as e:
+        err = str(e).lower()
+        if "retry after" in err:
+            m = re.search(r"retry after (\d+)", err)
+            await asyncio.sleep(min(int(m.group(1)) if m else 2, 5))
+        elif "not modified" not in err:
+            logger.warning("edit не удался: %s", e)
+        return False
+
+
+async def _frame(msg, text: str) -> bool:
+    """Кадр анимации: необязательный — при перегрузке чата молча пропускается (анимация не виснет)."""
+    return await _edit(msg, text, None, final=False)
+
+
+def _tags(uid: int, title_key: str = "") -> str:
+    """Теги рядом с именем: «🛡 Админ» (автоматически для админов) + выбранный титул."""
+    return (" «🛡 Админ»" if is_admin(uid) else "") + _tt(title_key)
+
+
+def _parse_amount(tok: str) -> int | None:
+    """500, 1_000, 5k, 2.5k, 1m, 3к, 2м → число; иначе None."""
+    t = tok.lower().replace("_", "").replace(",", ".")
+    mult = 1
+    if t.endswith(("k", "к")):
+        mult, t = 1000, t[:-1]
+    elif t.endswith(("m", "м")):
+        mult, t = 1_000_000, t[:-1]
+    try:
+        v = float(t)
+    except ValueError:
+        return None
+    if v < 0 or v != v or v == float("inf"):
+        return None
+    return int(round(v * mult))
+
+
+_ADMIN_SUB = {"add": "add", "+": "add", "give": "add", "начислить": "add", "дать": "add",
+              "take": "take", "-": "take", "снять": "take", "забрать": "take",
+              "set": "set", "=": "set", "установить": "set",
+              "item": "item", "предмет": "item", "find": "find", "поиск": "find",
+              "info": "info", "инфо": "info", "log": "log", "лог": "log", "help": "help", "?": "help"}
+
+
+def _admin_help() -> str:
+    return ("🛡 <b>Админ-панель кейс-клуба</b>\n"
+            "Цель — ответом на сообщение игрока, <code>@username</code> или числовой ID; без цели — ты сам.\n\n"
+            "<code>/cadmin add 5000</code> — начислить монеты (можно 5k, 2.5k, 1m)\n"
+            "<code>/cadmin take 500 @user</code> — снять (не ниже 0)\n"
+            "<code>/cadmin set 10000</code> — установить баланс\n"
+            "<code>/cadmin item howl</code> — выдать предмет (ключ или часть названия; <code>/cadmin item howl 3</code> — три штуки)\n"
+            "<code>/cadmin find birkin</code> — найти предмет в каталоге\n"
+            "<code>/cadmin info @user</code> — сведения об игроке\n"
+            "<code>/cadmin log</code> — последние админ-действия")
+
+
+def _admin_target(message, tokens: list[str]) -> tuple[int | None, str, str]:
+    rt = getattr(message, "reply_to_message", None)
+    if rt is not None and rt.from_user is not None and not getattr(rt.from_user, "is_bot", False):
+        return rt.from_user.id, _name_of(rt.from_user), ""
+    for tok in tokens:
+        if tok.startswith("@") and len(tok) > 1:
+            tid = find_user_by_username(tok)
+            if tid is None:
+                return None, "", f"{tok} не найден в базе — пусть игрок откроет /case или ответь командой на его сообщение"
+            return tid, user_name(tid) or tok, ""
+    for tok in tokens:
+        if tok.isdigit() and len(tok) >= 5:
+            return int(tok), user_name(int(tok)) or tok, ""
+    me = message.from_user
+    return me.id, _name_of(me), ""
+
+
+async def cmd_cadmin(message: types.Message):
+    if not message.from_user:
+        return
+    uid = message.from_user.id
+    if not is_admin(uid):
+        await message.answer("⛔ Эта команда только для администратора.")
+        return
+    _touch(message.from_user, message.chat.id)
+    args = (message.text or "").split()[1:]
+    sub = _ADMIN_SUB.get(args[0].lower(), "?") if args else "help"
+    rest = args[1:]
+
+    async def say(t: str):
+        await message.answer(t, parse_mode="HTML", disable_web_page_preview=True)
+
+    if sub in ("help", "?"):
+        return await say(_admin_help())
+    if sub == "log":
+        rows = admin_log_tail(10)
+        if not rows:
+            return await say("🛡 Журнал пуст.")
+        lines = ["🛡 <b>Последние действия админов</b>"]
+        for r in rows:
+            when = datetime.fromtimestamp(r["ts"], _TZ).strftime("%d.%m %H:%M")
+            lines.append(f"{when} · {r['admin_id']} → {r['target_id']} · {r['action']} {_e(r['detail'])}")
+        return await say("\n".join(lines))
+    if sub == "find":
+        hits = admin_search_items(" ".join(rest))
+        if not hits:
+            return await say("Ничего не найдено. Пример: <code>/cadmin find howl</code>")
+        return await say("🔎 <b>Каталог</b>\n" + "\n".join(
+            f"{_it(k)} — {_fmt(ITEMS[k]['price'])} 🪙 · <code>{k}</code>" for k in hits))
+
+    if sub in ("add", "take", "set"):
+        amount = _parse_amount(rest[0]) if rest else None
+        if amount is None or amount > ADMIN_MAX:
+            return await say("Укажи сумму: <code>/cadmin add 5000</code> (можно 5k, 2.5k, 1m)")
+        tid, tname, err = _admin_target(message, rest[1:])
+        if err:
+            return await say(f"⚠️ {_e(err)}")
+        r = admin_adjust(uid, tid, sub, amount, tname)
+        if not r["ok"]:
+            return await say("⚠️ Не получилось применить.")
+        who = _mention(tid, user_name(tid) or tname)
+        head = {"add": f"<b>+{_fmt(amount)}</b> 🪙", "take": f"<b>−{_fmt(abs(r['delta']))}</b> 🪙",
+                "set": f"баланс = <b>{_fmt(amount)}</b> 🪙"}[sub]
+        clamp = " (снято сколько было — ниже 0 не опускается)" if sub == "take" and abs(r["delta"]) < amount else ""
+        return await say(f"🛡 <b>Админ</b>: {head} → {who}{clamp}\nБаланс: {_fmt(r['old'])} → <b>{_fmt(r['new'])}</b> 🪙")
+
+    if sub == "item":
+        if not rest:
+            return await say("Укажи предмет: <code>/cadmin item howl</code> (поиск: <code>/cadmin find howl</code>)")
+        hits = admin_search_items(rest[0])
+        if len(hits) != 1:
+            if not hits:
+                return await say("Такого предмета нет. Поиск: <code>/cadmin find часть_названия</code>")
+            return await say("Нашлось несколько — уточни ключ:\n" + "\n".join(
+                f"{_it(k)} — {_fmt(ITEMS[k]['price'])} 🪙 · <code>{k}</code>" for k in hits))
+        count, tail = 1, rest[1:]
+        if tail and tail[0].isdigit() and len(tail[0]) <= 2:
+            count, tail = int(tail[0]), tail[1:]
+        tid, tname, err = _admin_target(message, tail)
+        if err:
+            return await say(f"⚠️ {_e(err)}")
+        r = admin_grant_item(uid, tid, hits[0], count, tname)
+        if not r["ok"]:
+            return await say("⚠️ Количество должно быть от 1 до 50.")
+        return await say(f"🛡 <b>Админ</b>: выдано {_it(hits[0])} ×{count} → {_mention(tid, user_name(tid) or tname)}")
+
+    if sub == "info":
+        tid, tname, err = _admin_target(message, rest)
+        if err:
+            return await say(f"⚠️ {_e(err)}")
+        if not user_exists(tid):
+            return await say("Игрок ещё не играл.")
+        p = get_profile(tid)
+        return await say(
+            f"🛡 <b>Игрок</b> {_mention(tid, p['name'])}{_tags(tid, p['title'])}\n"
+            f"ID: <code>{tid}</code>{' · @' + _e(p['username']) if p.get('username') else ''}\n"
+            f"🪙 {_fmt(p['coins'])} · 🎒 {p['inv_count']} шт. на {_fmt(p['inv_value'])} · 📈 капитал {_fmt(p['networth'])}\n"
+            f"📦 открыто {p['opened']} · 💸 потрачено {_fmt(p['spent'])} · ⚔️ {p['bw']}:{p['bl']} · "
+            f"🏅 {len(get_achievements(tid))}/{len(ACH)}")
+    await say(_admin_help())
+
+
 CASES_HELP = ("🎰 <b>кейс-клуб</b>\n/case — меню: кейсы, инвентарь, бонус, апгрейд, контракты, топ, батлы\n"
               "/daily — бонус · /inv — инвентарь · /ctop — топ (в группе — по чату)\n"
               "/give 500 и /trade — ответом на сообщение игрока: подарок и обмен")
@@ -2301,5 +2539,6 @@ def register_cases_handlers(dp):
     dp.message.register(cmd_ctop, Command(*COMMANDS["top"]))
     dp.message.register(cmd_give, Command(*COMMANDS["give"]))
     dp.message.register(cmd_trade, Command(*COMMANDS["trade"]))
+    dp.message.register(cmd_cadmin, Command(*COMMANDS["admin"]))
     dp.callback_query.register(on_callback, F.data.startswith("cs:"))
     logger.info("🎰 cases_game зарегистрирован (/case, /daily, /inv, /ctop, /give, /trade), БД: %s", _DB_PATH)

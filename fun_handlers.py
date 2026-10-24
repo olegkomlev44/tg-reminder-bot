@@ -117,7 +117,27 @@ _LOBBIES: dict[str, Lobby] = {}
 # Telegram режет частые edit'ы, поэтому кадров немного (~8–12) и пауза между ними ≥0.5 с.
 # Соседние кадры ВСЕГДА различаются (иначе Telegram отвечает «message is not modified»).
 
-async def _safe_edit(msg: types.Message, text: str, reply_markup=None) -> bool:
+try:
+    from edit_guard import safe_edit as _guard_edit      # рядом должен лежать edit_guard.py
+except Exception:                                        # без него — прежнее (менее надёжное) поведение
+    _guard_edit = None
+    logging.getLogger(__name__).warning("edit_guard.py не найден — анимации могут зависать при флуд-лимитах Telegram. "
+                                        "Положите edit_guard.py рядом с остальными модулями.")
+
+ANIM_TIMEOUT = 45.0           # анимация дольше — прерываем и показываем результат (чтобы не «висело»)
+_WHEEL_SEM = asyncio.Semaphore(2)    # GIF-колесо рисуется в потоке и грузит CPU — не больше двух одновременно
+
+
+async def _safe_edit(msg: types.Message, text: str, reply_markup=None, *, final: bool | None = None) -> bool:
+    """
+    Правка сообщения. final=True — итог (доставляется обязательно: ждёт флуд-паузу и повторяется);
+    final=False — кадр анимации (при перегрузке чата молча пропускается, чтобы анимация не зависала).
+    По умолчанию итогом считается правка с кнопками.
+    """
+    if final is None:
+        final = reply_markup is not None
+    if _guard_edit is not None:
+        return await _guard_edit(msg, text, reply_markup, final=final)
     try:
         await msg.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
         return True
@@ -656,7 +676,7 @@ async def spin(msg: types.Message, options: list[str], title: str,
         return idx
     key = style if style in STYLES and STYLES[style][2] is not None else _pick_style(media=False)
     try:
-        await STYLES[key][2](msg, options, title, idx)
+        await asyncio.wait_for(STYLES[key][2](msg, options, title, idx), ANIM_TIMEOUT)
         await _finale(msg, title, options[idx])
     except Exception:
         logger.exception("анимация %s упала — показываю результат без неё", key)
@@ -783,13 +803,13 @@ async def _run_round(msg, src: dict, key: str, reply_to: "types.Message | None",
     rid = _new_run(options, title, src.get("forced"), k)
     _PICKS[rid].update(seed=seed, commit=commit, order=order, last=key)
 
-    await _safe_edit(msg, _commit_text(title, commit))
+    await _safe_edit(msg, _commit_text(title, commit), final=True)
     await asyncio.sleep(0.9)
 
     if k > 1:
         key, label = "podium", "🏅 подиум"
         try:
-            await _anim_podium(msg, options, title, order)
+            await asyncio.wait_for(_anim_podium(msg, options, title, order), ANIM_TIMEOUT)
             await _finale(msg, title, names[0])
         except Exception:
             logger.exception("подиум упал — показываю результат без анимации")
@@ -800,7 +820,8 @@ async def _run_round(msg, src: dict, key: str, reply_to: "types.Message | None",
             label = "🎠 колесо"
             await _safe_edit(msg, "🎠 <b>Раскручиваем колесо…</b>")
             try:
-                gif = await asyncio.to_thread(make_wheel_gif, options, order[0], title, commit)
+                async with _WHEEL_SEM:
+                    gif = await asyncio.to_thread(make_wheel_gif, options, order[0], title, commit)
                 await reply_to.reply_animation(
                     BufferedInputFile(gif, filename="wheel.gif"),
                     caption=_result_text(title, names[0], style_label=label, n=n, commit=commit),
@@ -1126,7 +1147,7 @@ async def _lobby_timer(msg: types.Message, tok: str):
         return
     if len(lb.people) < 2:
         lb.finished = True
-        await _safe_edit(msg, f"🎲 <b>{_esc(lb.question)}</b>\n\n😴 Не набралось 2 участников — жребий отменён.")
+        await _safe_edit(msg, f"🎲 <b>{_esc(lb.question)}</b>\n\n😴 Не набралось 2 участников — жребий отменён.", final=True)
         return
     await _finish_lobby(msg, tok)
 
@@ -1302,7 +1323,7 @@ async def cmd_coin(message: types.Message):
     for frame in ("🪙 ⟳", "🪙 ⟲", "🪙 ⟳"):
         await asyncio.sleep(0.6)
         await _safe_edit(msg, frame)
-    await _safe_edit(msg, f"🪙 <b>{_RNG.choice(['Орёл 🦅', 'Решка 🌕'])}</b>")
+    await _safe_edit(msg, f"🪙 <b>{_RNG.choice(['Орёл 🦅', 'Решка 🌕'])}</b>", final=True)
 
 
 # ── Регистрация ───────────────────────────────────────────────────────────────
