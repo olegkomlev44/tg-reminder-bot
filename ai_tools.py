@@ -143,17 +143,19 @@ async def _resolve_instagram_handles(name: str) -> list[str]:
     return _parse_handles(resp.text or "")
 
 
-async def _tool_instagram_find_person(ctx: ToolContext, name: str = "") -> str:
-    import html
-    from instagram_handlers import _show_profile
-    from instagram_viewer import get_user_status
-    person = _clean(name, 80)
-    if not person:
-        return "ОШИБКА: не указано имя человека. Попроси пользователя его назвать."
-
+async def _resolve_person(person: str) -> dict:
+    """
+    Имя → аккаунт. Возвращает {"kind": ...}:
+      found      — уверенный выбор: handle, info (верифицирован / явно самый крупный);
+      ambiguous  — подходят 2+ аккаунта без явного лидера: cands (по убыванию значимости);
+      search     — интернет ника не дал, но поиск Instagram по имени что-то вернул: cands;
+      api_down   — ник нашёлся в интернете, но Instagram не отвечает: handle;
+      notinig    — ники из интернета в Instagram не существуют;
+      none       — ничего не нашлось.
+    """
+    from instagram_viewer import get_user_status, search_accounts
     key = person.lower()
     hit = _PERSON_CACHE.get(key)
-    handles: list[str]
     if hit and time.time() - hit[0] < _PERSON_TTL:
         handles = [hit[1]]
     else:
@@ -162,44 +164,166 @@ async def _tool_instagram_find_person(ctx: ToolContext, name: str = "") -> str:
         except Exception as e:
             logger.warning(f"find_person {person!r}: поиск не удался: {e}")
             handles = []
-    if not handles:
-        return (f"ОШИБКА: не нашёл официальный Instagram для «{person}» в интернете (имя неоднозначное "
-                "или это не публичная персона). Попроси пользователя прислать ник или ссылку.")
 
-    # проверяем кандидатов в самой Instagram: берём верифицированный / самый крупный
-    best: tuple[tuple[int, int], str] | None = None
+    if not handles:
+        try:
+            res = await search_accounts(person, 5)
+        except Exception:
+            res = None
+        return {"kind": "search", "cands": res} if res else {"kind": "none"}
+
+    evaluated: list[tuple[str, dict]] = []
     any_error = False
+    dominant = None
     for h in handles:
         status, info = await get_user_status(h, allow_stale=True)
         if status in ("ok", "stale") and info:
-            rank = (1 if info.get("is_verified") else 0, int(info.get("followers") or 0))
-            if best is None or rank > best[0]:
-                best = (rank, h)
-            if rank[0] or rank[1] >= 100_000:      # явный основной аккаунт — остальных не проверяем
+            evaluated.append((h, info))
+            if info.get("is_verified") or int(info.get("followers") or 0) >= 100_000:
+                dominant = (h, info)       # явный основной аккаунт — остальных не проверяем
                 break
         elif status == "error":
             any_error = True
 
-    if best is None:
-        if any_error:
-            h = handles[0]
-            await ctx.message.answer(
-                f"🔎 по имени «{html.escape(person)}» нашёл <a href=\"https://instagram.com/{h}\">@{h}</a>, "
-                "но сама инста сейчас не отвечает, карточку показать не могу",
-                parse_mode="HTML", disable_web_page_preview=True,
-            )
-            return (f"Найден ник @{h} (через интернет), но Instagram не ответил — карточки нет, "
-                    "ссылка отправлена в чат.")
-        return (f"ОШИБКА: по имени «{person}» в интернете нашлись ники {', '.join(handles)}, "
-                "но в Instagram таких аккаунтов нет. Попроси пользователя прислать ник.")
+    pick = dominant
+    if not pick and len(evaluated) == 1:
+        pick = evaluated[0]
+    if not pick and len(evaluated) >= 2:
+        ranked = sorted(evaluated, key=lambda x: (1 if x[1].get("is_verified") else 0,
+                                                  int(x[1].get("followers") or 0)), reverse=True)
+        top = int(ranked[0][1].get("followers") or 0)
+        second = int(ranked[1][1].get("followers") or 0)
+        if top >= 10_000 and top >= 5 * max(second, 1):
+            pick = ranked[0]               # один аккаунт заметно крупнее остальных
+        else:
+            return {"kind": "ambiguous", "cands": [
+                {"username": h, "full_name": i.get("full_name", ""), "followers": i.get("followers"),
+                 "is_verified": bool(i.get("is_verified"))} for h, i in ranked]}
+    if pick:
+        _PERSON_CACHE[key] = (time.time(), pick[0])
+        return {"kind": "found", "handle": pick[0], "info": pick[1]}
+    if any_error:
+        return {"kind": "api_down", "handle": handles[0]}
+    return {"kind": "notinig", "handles": handles}
 
-    handle = best[1]
-    _PERSON_CACHE[key] = (time.time(), handle)
-    await ctx.message.answer(
-        f"🔎 «{html.escape(person)}» → <b>@{handle}</b>", parse_mode="HTML")
-    await _show_profile(ctx.message, handle, ctx.user_id)
-    return (f"Instagram «{person}» найден через интернет: @{handle}. "
-            "Карточка профиля отправлена в чат (с кнопками сторис, постов, подписки).")
+
+def _pick_keyboard(cands: list[dict], limit: int = 5):
+    """Кнопки выбора аккаунта: 👤 @ник · 1.2M ✅ → открывает карточку (ig_profile:)."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from instagram_handlers import _fmt_count
+    rows = []
+    for c in cands[:limit]:
+        extra = f" · {_fmt_count(c['followers'])}" if c.get("followers") else ""
+        mark = " ✅" if c.get("is_verified") else ""
+        rows.append([InlineKeyboardButton(text=f"👤 @{c['username']}{extra}{mark}",
+                                          callback_data=f"ig_profile:{c['username']}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _deliver_person(ctx: ToolContext, person: str, r: dict) -> str:
+    """Показать результат поиска ОДНОГО человека и вернуть текст для модели."""
+    from instagram_handlers import _show_profile
+    esc = html.escape(person)
+    kind = r["kind"]
+    if kind == "found":
+        h = r["handle"]
+        await ctx.message.answer(f"🔎 «{esc}» → <b>@{h}</b>", parse_mode="HTML")
+        await _show_profile(ctx.message, h, ctx.user_id)
+        return (f"Instagram «{person}» найден через интернет: @{h}. "
+                "Карточка профиля отправлена в чат (с кнопками сторис, постов, подписки).")
+    if kind == "ambiguous":
+        await ctx.message.answer(f"🤔 по «{esc}» нашлось несколько аккаунтов — какой нужен?",
+                                 parse_mode="HTML", reply_markup=_pick_keyboard(r["cands"]))
+        return ("Нашлось несколько подходящих аккаунтов, пользователю показаны кнопки для выбора. "
+                "Больше ничего не пиши — он выберет сам.")
+    if kind == "search":
+        await ctx.message.answer(
+            f"🔎 официальный ник «{esc}» в интернете не определился. вот что даёт поиск инсты по имени "
+            "— проверь, что это тот человек:", parse_mode="HTML",
+            reply_markup=_pick_keyboard(r["cands"]))
+        return ("Официальный ник определить не удалось, пользователю показаны результаты поиска "
+                "Instagram кнопками. Больше ничего не пиши — он выберет сам.")
+    if kind == "api_down":
+        h = r["handle"]
+        await ctx.message.answer(
+            f"🔎 по имени «{esc}» нашёл <a href=\"https://instagram.com/{h}\">@{h}</a>, "
+            "но сама инста сейчас не отвечает, карточку показать не могу",
+            parse_mode="HTML", disable_web_page_preview=True)
+        return (f"Найден ник @{h} (через интернет), но Instagram не ответил — карточки нет, "
+                "ссылка отправлена в чат.")
+    if kind == "notinig":
+        return (f"ОШИБКА: по имени «{person}» в интернете нашлись ники {', '.join(r['handles'])}, "
+                "но в Instagram таких аккаунтов нет. Попроси пользователя прислать ник.")
+    return (f"ОШИБКА: не нашёл официальный Instagram для «{person}» (имя неоднозначное или это не "
+            "публичная персона). Попроси пользователя прислать ник или ссылку.")
+
+
+async def _tool_instagram_find_person(ctx: ToolContext, name: str = "") -> str:
+    person = _clean(name, 80)
+    if not person:
+        return "ОШИБКА: не указано имя человека. Попроси пользователя его назвать."
+    return await _deliver_person(ctx, person, await _resolve_person(person))
+
+
+def _split_names(text: str) -> list[str]:
+    parts = re.split(r"\s*(?:,|;|\n|&|\s+и\s+|\s+and\s+)\s*", text or "", flags=re.I)
+    out: list[str] = []
+    for p in parts:
+        p = re.sub(r"^(?:найди\s+)?(?:инст\w*|аккаунт\w*|профил\w*|instagram)\s+(?:у\s+|для\s+|от\s+)?", "", p.strip(), flags=re.I)
+        p = p.strip(" .\"«»")
+        if len(p) >= 2 and p.lower() not in [o.lower() for o in out]:
+            out.append(p[:80])
+    return out
+
+
+async def _tool_instagram_find_people(ctx: ToolContext, names: str = "") -> str:
+    """Несколько людей за раз: ищем параллельно, отвечаем одним сообщением со списком и кнопками."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from instagram_handlers import _fmt_count
+    parts = _split_names(names)[:4]
+    if not parts:
+        return "ОШИБКА: не указаны имена. Попроси пользователя назвать людей."
+    if len(parts) == 1:
+        return await _tool_instagram_find_person(ctx, parts[0])
+
+    results = await asyncio.gather(*(_resolve_person(p) for p in parts), return_exceptions=True)
+    lines = [f"🔎 нашёл {len(parts)} имён:\n"]
+    rows: list[list] = []
+
+    def btn(u: str, label: str = "") -> list:
+        return [InlineKeyboardButton(text=f"👤 @{u}{label}", callback_data=f"ig_profile:{u}")]
+
+    summary = []
+    for p, r in zip(parts, results):
+        if isinstance(r, Exception):
+            r = {"kind": "none"}
+        esc = html.escape(p)
+        k = r["kind"]
+        if k == "found":
+            f = int(r["info"].get("followers") or 0)
+            lines.append(f"✅ <b>{esc}</b> → @{r['handle']}" + (f" · {_fmt_count(f)}" if f else ""))
+            rows.append(btn(r["handle"]))
+            summary.append(f"{p}: @{r['handle']}")
+        elif k in ("ambiguous", "search"):
+            lines.append(f"🤔 <b>{esc}</b> — "
+                         + ("несколько вариантов:" if k == "ambiguous" else "ник не определился, вот поиск инсты:"))
+            for c in r["cands"][:2]:
+                rows.append(btn(c["username"], " ✅" if c.get("is_verified") else ""))
+            summary.append(f"{p}: варианты на выбор")
+        elif k == "api_down":
+            lines.append(f"⚠️ <b>{esc}</b> → @{r['handle']} (инста не отвечает, не проверил)")
+            rows.append([InlineKeyboardButton(text=f"↗️ @{r['handle']}",
+                                              url=f"https://instagram.com/{r['handle']}")])
+            summary.append(f"{p}: @{r['handle']} (не проверен)")
+        else:
+            lines.append(f"❌ <b>{esc}</b> — не нашёл")
+            summary.append(f"{p}: не найден")
+    lines.append("\n<i>нажми на ник — покажу карточку</i>")
+    await ctx.message.answer("\n".join(lines), parse_mode="HTML",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows[:8]),
+                             disable_web_page_preview=True)
+    return ("Список Instagram-аккаунтов отправлен в чат одним сообщением с кнопками: "
+            + "; ".join(summary) + ". Больше ничего не пиши.")
 
 
 async def _tool_instagram_download(ctx: ToolContext, url: str = "") -> str:
@@ -589,6 +713,14 @@ _tool("instagram_profile",
       _tool_instagram_profile,
       {"username": _s("Username без @, либо ссылка на профиль")}, ["username"])
 
+_tool("instagram_find_people",
+      "Найти Instagram СРАЗУ НЕСКОЛЬКИХ известных людей (2–4 имени), например «инста свити фокс и "
+      "эммы уотсон», «аккаунты Дженны Ортеги, Билли Айлиш». Ищет всех параллельно и присылает один "
+      "список с кнопками. Для ОДНОГО человека используй instagram_find_person.",
+      _tool_instagram_find_people,
+      {"names": _s("Имена через запятую или «и», как написал пользователь, например «Emma Watson, Jenna Ortega»")},
+      ["names"])
+
 _tool("instagram_find_person",
       "Найти Instagram известного человека по ИМЕНИ (актёр, певец, блогер, стример, спортсмен, модель): "
       "«найди инстаграм Эммы Уотсон», «инста свити фокс», «аккаунт Дженны Ортеги». Сама ищет ник "
@@ -770,7 +902,7 @@ TOOLS_HINT = (
     "функция, ВЫЗОВИ её, а не отвечай «я не умею» или «воспользуйся командой». Для обычного разговора, "
     "шуток и советов функции не вызывай. Не выдумывай параметры: если не хватает username, названия "
     "или ссылки — коротко спроси. Если просят Instagram знаменитости/блогера по ИМЕНИ — вызови "
-    "instagram_find_person, а не угадывай ник сам. Функции сами отправляют результат в чат, поэтому не пересказывай его. "
+    "instagram_find_person (один человек) или instagram_find_people (несколько имён сразу), а не угадывай ник сам. Функции сами отправляют результат в чат, поэтому не пересказывай его. "
     "Если функция вернула ОШИБКА — объясни пользователю своими словами и предложи вариант. "
     "Ответы после функций — 1 короткая фраза в твоём характере."
 )

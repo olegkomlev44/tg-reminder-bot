@@ -86,6 +86,9 @@ IG_POSTS_FORCE_EVERY  = int(os.getenv("IG_POSTS_FORCE_EVERY", str(6 * 3600)))
 # Устаревшая карточка: сколько дней держим копию профиля в БД, чтобы показать её,
 # когда Instagram не отвечает
 IG_STALE_MAX_DAYS     = int(os.getenv("IG_STALE_MAX_DAYS", "30"))
+# «Показать сразу, обновить в фоне»: карточку из кэша старше IG_USER_CACHE_TTL, но моложе
+# этого возраста, отдаём мгновенно, а свежие цифры подтягиваем фоном и правим сообщение
+IG_SWR_MAX_AGE        = int(os.getenv("IG_SWR_MAX_AGE", str(6 * 3600)))
 # Эскалация кэша «не найден»: 1-й раз, 2-й раз, 3-й и дальше (сек)
 IG_NOTFOUND_TTLS      = (300, 3600, 86400)
 # Сколько хранить кэш Telegram file_id
@@ -1238,9 +1241,70 @@ _LOOKUP_STATS: dict[str, dict[str, int]] = {}
 _LOOKUP_ORDER = ("web", "gql", "private", "search")
 
 
+_LK_RECENT: dict[str, deque] = {}        # метод → последние (ts, ok) для адаптивного порядка
+_LK_PROBE: Counter = Counter()
+_LK_WINDOW = 3600                        # по каким результатам оцениваем метод, сек
+_LK_BREAK_WINDOW = 600                   # «5 неудач подряд за это время» → метод временно пропускаем
+_LOOKUP_LOG: deque = deque(maxlen=80)    # журнал для /ig_log
+
+
 def _lk_note(method: str, ok: bool) -> None:
     d = _LOOKUP_STATS.setdefault(method, {"ok": 0, "fail": 0})
     d["ok" if ok else "fail"] += 1
+    _LK_RECENT.setdefault(method, deque(maxlen=30)).append((time.time(), ok))
+
+
+def _lk_score(method: str) -> float | None:
+    """Доля успехов метода за последний час (None — данных мало, меньше 3 вызовов)."""
+    now = time.time()
+    xs = [ok for ts, ok in _LK_RECENT.get(method, ()) if now - ts <= _LK_WINDOW]
+    return (sum(xs) / len(xs)) if len(xs) >= 3 else None
+
+
+def _lk_broken(method: str) -> bool:
+    now = time.time()
+    last = [ok for ts, ok in _LK_RECENT.get(method, ()) if now - ts <= _LK_BREAK_WINDOW][-5:]
+    return len(last) == 5 and not any(last)
+
+
+def _lk_arrange(steps: list, commit: bool = True) -> list:
+    """
+    Адаптивный порядок: методы с лучшей недавней статистикой идут первыми, «лежащие»
+    (5 неудач подряд за 10 минут) пропускаются — но каждый 5-й вызов пробуем снова, чтобы
+    заметить, что метод ожил. «search» всегда последний; если пропустили бы всё — идём как есть.
+    """
+    head, tail = steps[:-1], steps[-1:]
+    pos = {n: i for i, (n, _) in enumerate(head)}
+    ordered = sorted(head, key=lambda st: (-(0.5 if _lk_score(st[0]) is None else _lk_score(st[0])),
+                                           pos[st[0]]))
+    live = []
+    for st in ordered:
+        if _lk_broken(st[0]):
+            if not commit or _bump_probe(st[0]) % 5 != 0:
+                continue
+        live.append(st)
+    return (live or ordered) + tail
+
+
+def _bump_probe(method: str) -> int:
+    _LK_PROBE[method] += 1
+    return _LK_PROBE[method]
+
+
+def _acc_login(cl) -> str:
+    try:
+        i = _POOL._clients.index(cl)
+        return _POOL._accounts[i][0]
+    except Exception:
+        return "?"
+
+
+def _lk_log(cl, username: str, result: str, method: str = "", notes: list | None = None) -> None:
+    """result: ok | notfound | fail. Журнал для /ig_log."""
+    _LOOKUP_LOG.append({
+        "ts": time.time(), "kind": "lookup", "user": username, "result": result,
+        "method": method, "notes": "; ".join(notes or []), "acc": _acc_login(cl),
+    })
 
 
 def _web_profile_info(cl, username: str):
@@ -1330,6 +1394,7 @@ def _lookup_user(cl, username: str) -> dict:
     if v1:
         steps.append(("private", lambda: v1(username)))
     steps.append(("search", lambda: _lookup_via_search(cl, username)))
+    steps = _lk_arrange(steps)
 
     rate = login = net = None
     nf_votes = 0
@@ -1343,12 +1408,14 @@ def _lookup_user(cl, username: str) -> dict:
             if not d or not d.get("username"):
                 raise ClientError("пустой результат")
             _lk_note(name, True)
+            _lk_log(cl, username, "ok", name, notes)
             return d
         except PrivateAccount:
             raise
         except UserNotFound as e:
             if name == "web":
                 _lk_note(name, True)       # метод отработал — ответ подтверждённый
+                _lk_log(cl, username, "notfound", name, notes)
                 raise
             try:
                 _fail_if_endpoint_404(cl, e)
@@ -1377,6 +1444,7 @@ def _lookup_user(cl, username: str) -> dict:
             notes.append(f"{name}: {type(e).__name__}: {e}")
 
     logger.warning(f"[lookup] @{username}: все методы не сработали — {'; '.join(notes)}")
+    _lk_log(cl, username, "notfound" if nf_votes else "fail", "", notes)
     if nf_votes:
         raise UserNotFound(f"private: User not found @{username}", username=username)
     if rate:
@@ -1523,13 +1591,15 @@ def _fail_result(username: str, allow_stale: bool) -> tuple[str, dict | None]:
 
 
 async def get_user_status(username: str, force: bool = False,
-                          allow_stale: bool = False) -> tuple[str, dict | None]:
+                          allow_stale: bool = False, swr: bool = False) -> tuple[str, dict | None]:
     """
     Как get_user_info, но различает причины пустого ответа:
       ("ok", info)       — профиль получен (в т.ч. приватный);
       ("notfound", None) — IG подтвердил, что такого ника нет;
       ("stale", info)    — только при allow_stale=True: IG не ответил, но есть сохранённая
                            копия (info["_stale_ts"] — когда она получена);
+      ("swr", info)      — только при swr=True: кэш старше TTL, но моложе IG_SWR_MAX_AGE;
+                           отдаём сразу, а вызывающий обновляет данные фоном (force=True);
       ("error", None)    — не вышло (429, сеть, пул пуст) — это НЕ «аккаунта нет».
     Нужно фоновой проверке: без этого смена ника и сбой сети выглядят одинаково.
     «error» никогда не кэшируется; «notfound» кэшируется с эскалацией TTL (5 мин → 1 ч → сутки).
@@ -1547,6 +1617,13 @@ async def get_user_status(username: str, force: bool = False,
         if nf and time.time() - nf[0] < _nf_ttl(nf[1]):
             _CSTAT["nf_hit"] += 1
             return "notfound", None
+        if swr:
+            st = _ucache_stale(username)
+            if st and time.time() - st[1] <= IG_SWR_MAX_AGE:
+                info, ts = st
+                info["_stale_ts"] = ts
+                _CSTAT["swr"] += 1
+                return "swr", info
     _CSTAT["miss"] += 1
 
     def _fetch(cl: Client):
@@ -1667,8 +1744,27 @@ def get_lookup_stats() -> dict:
         "cache_db": db_n,
         "notfound": len(_NOTFOUND_CACHE),
         "hit": _CSTAT["hit"], "miss": _CSTAT["miss"],
-        "nf_hit": _CSTAT["nf_hit"], "stale": _CSTAT["stale"],
+        "nf_hit": _CSTAT["nf_hit"], "stale": _CSTAT["stale"], "swr": _CSTAT["swr"],
+        "order": [n for n, _ in _lk_arrange([(m, None) for m in _LOOKUP_ORDER[:-1]] + [("search", None)], commit=False)],
+        "broken": [m for m in _LOOKUP_ORDER[:-1] if _lk_broken(m)],
+        "scores": {m: _lk_score(m) for m in _LOOKUP_ORDER},
     }
+
+
+def get_recent_events(n: int = 10, include_ok: bool = False) -> list[dict]:
+    """
+    Последние события для /ig_log: сбои каскада (с причиной по каждому методу и аккаунтом)
+    и ошибки пула (429, LoginRequired, сеть). include_ok=True добавляет и успешные запросы.
+    Новые — первыми.
+    """
+    ev: list[dict] = []
+    for e in _LOOKUP_LOG:
+        if include_ok or e["result"] != "ok":
+            ev.append(e)
+    for ts, kind, msg in _POOL._err_events:
+        ev.append({"ts": ts, "kind": "pool", "type": kind, "msg": msg})
+    ev.sort(key=lambda e: e["ts"], reverse=True)
+    return ev[:max(1, n)]
 
 
 # ── ПОИСК АККАУНТОВ ПО ИМЕНИ ──────────────────────────────────────────────────

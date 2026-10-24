@@ -60,7 +60,7 @@ from instagram_viewer import (
     ig_get_user_state, ig_get_all_user_states, ig_set_user_state, ig_rename_username,
     ig_cache_get, ig_cache_put, ig_cache_drop, ig_get_filter, ig_set_filter,
     search_accounts, reset_notfound_cache, clear_profile_caches,
-    get_lookup_stats, cached_usernames,
+    get_lookup_stats, cached_usernames, get_recent_events,
 )
 
 logger = logging.getLogger(__name__)
@@ -879,19 +879,20 @@ async def _show_profile(source, ig_username: str, tg_user_id: int) -> bool:
     await anim.start(f"🔍 Ищу профиль @{ig_username}...")
     await asyncio.sleep(0.3)
 
-    status, info = await get_user_status(ig_username, allow_stale=True)
+    status, info = await get_user_status(ig_username, allow_stale=True, swr=True)
 
-    if status not in ("ok", "stale") or not info:
+    if status not in ("ok", "stale", "swr") or not info:
         await anim.done()
         await _profile_fail_message(source, ig_username, tg_user_id, status)
         return False
 
-    stale_ts = info.pop("_stale_ts", None) if status == "stale" else None
+    stale_ts = info.pop("_stale_ts", None) if status in ("stale", "swr") else None
+    old_info = dict(info)
 
     await anim.step("📸 Загружаю аватарку...")
 
     avatar_bytes: bytes | None = None
-    if not stale_ts:                     # при сбое IG не гоняем пул ради аватарки — зависнем на ретраях
+    if not stale_ts:                     # из кэша (swr / сбой IG) пул ради аватарки не гоняем — зависнем на ретраях
         try:
             avatar_bytes = await get_avatar_bytes(ig_username)
         except Exception:
@@ -909,8 +910,11 @@ async def _show_profile(source, ig_username: str, tg_user_id: int) -> bool:
 
     _record_view(ig_username, str(tg_user_id))
     kb = _profile_keyboard(ig_username, tg_user_id)
-    await _send_profile_with_counter_animation(source, info, kb, avatar_bytes)
-    if stale_ts:
+    sent = await _send_profile_with_counter_animation(source, info, kb, avatar_bytes)
+    if status == "swr" and sent is not None:
+        # карточка показана мгновенно из кэша — свежие цифры подтянем фоном и поправим сообщение
+        _spawn(_swr_refresh_card(sent, ig_username, old_info, kb))
+    elif status == "stale" and stale_ts:
         when = datetime.fromtimestamp(stale_ts).strftime("%d.%m %H:%M")
         await source.answer(
             f"⚠️ инста сейчас не отвечает — это сохранённая карточка от {when}, цифры могли поменяться",
@@ -919,6 +923,24 @@ async def _show_profile(source, ig_username: str, tg_user_id: int) -> bool:
             ]]),
         )
     return True
+
+
+async def _swr_refresh_card(sent, ig_username: str, old: dict, kb) -> None:
+    """Фон: берём свежий профиль и, если цифры/био поменялись, правим подпись уже отправленной карточки."""
+    try:
+        set_background_priority()
+        status, new = await get_user_status(ig_username, force=True)
+        if status != "ok" or not new or not _profile_changed(old, new):
+            return
+        text = _profile_text_final(new)
+        if getattr(sent, "photo", None):
+            await sent.edit_caption(caption=text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await sent.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        logger.info(f"[swr] @{ig_username}: карточка обновлена в фоне")
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            logger.debug(f"[swr] @{ig_username}: {e}")
 
 
 # ── ПОИСК ПО ИМЕНИ / ПОВТОР ───────────────────────────────────────────────────
@@ -2624,6 +2646,33 @@ class _LoadingAnimation:
 
 # ── В13: АНИМАЦИЯ СЧЁТЧИКОВ ───────────────────────────────────────────────────
 
+def _profile_text_final(info: dict) -> str:
+    """Подпись карточки профиля с реальными цифрами (используется и при фоновом обновлении)."""
+    import html
+    safe_name = html.escape(info.get("full_name") or info.get("username", ""))
+    safe_user = html.escape(info.get("username", ""))
+    verified  = "✅" if info.get("is_verified") else ""
+    private   = "🔒 приватный" if info.get("is_private") else "🌐 открытый"
+    bio_line  = (f"\n📝 <i>{html.escape(info.get('biography','').strip())}</i>"
+                 if info.get("biography", "").strip() else "")
+    return (
+        f"📸 <b>{safe_name}</b> {verified}\n"
+        f"👤 @{safe_user} · {private}\n\n"
+        f"👥 <b>{_fmt_count(info.get('followers', 0))}</b> подписчиков · "
+        f"👣 <b>{_fmt_count(info.get('following', 0))}</b> подписок · "
+        f"🖼 <b>{_fmt_count(info.get('posts_count', 0))}</b> постов"
+        f"{bio_line}"
+    )
+
+
+_PROFILE_WATCH = ("followers", "following", "posts_count", "biography", "full_name",
+                  "is_verified", "is_private")
+
+
+def _profile_changed(old: dict, new: dict) -> bool:
+    return any(old.get(k) != new.get(k) for k in _PROFILE_WATCH)
+
+
 async def _send_profile_with_counter_animation(
     source, info: dict, kb: InlineKeyboardMarkup, avatar_bytes: bytes | None
 ):
@@ -2643,14 +2692,7 @@ async def _send_profile_with_counter_animation(
         f"🖼 <i>загружаю...</i> постов"
         f"{bio_line}"
     )
-    text_final = (
-        f"📸 <b>{safe_name}</b> {verified}\n"
-        f"👤 @{safe_user} · {private}\n\n"
-        f"👥 <b>{_fmt_count(info.get('followers', 0))}</b> подписчиков · "
-        f"👣 <b>{_fmt_count(info.get('following', 0))}</b> подписок · "
-        f"🖼 <b>{_fmt_count(info.get('posts_count', 0))}</b> постов"
-        f"{bio_line}"
-    )
+    text_final = _profile_text_final(info)
 
     card = _make_profile_card(info, avatar_bytes)
     if card:
@@ -2665,7 +2707,7 @@ async def _send_profile_with_counter_animation(
             await sent.edit_caption(caption=text_final, parse_mode="HTML", reply_markup=kb)
         except Exception:
             pass
-        return
+        return sent
 
     if avatar_bytes:
         sent = await source.answer_photo(
@@ -2684,6 +2726,7 @@ async def _send_profile_with_counter_animation(
             await sent.edit_text(text_final, parse_mode="HTML", reply_markup=kb)
         except Exception:
             pass
+    return sent
 
 
 # ── Ф13: СЧЁТЧИК ПРОСМОТРОВ ───────────────────────────────────────────────────
@@ -3470,14 +3513,18 @@ async def cmd_ig_status(message: types.Message):
     try:
         st = get_lookup_stats()
         meth = "  ".join(f"{k} {v['ok']}✓/{v['fail']}✗" for k, v in st["methods"].items())
+        order = " → ".join(st["order"])
+        brk = (f"\n    ⏸ временно пропускаю: {', '.join(st['broken'])}" if st["broken"] else "")
         total = st["hit"] + st["miss"]
         ratio = f"{st['hit'] * 100 // total}%" if total else "—"
         lines.append(
             f"\n🧭 <b>методы получения профиля</b> (с запуска):\n    {meth}\n"
+            f"    сейчас порядок: {order}{brk}\n"
             f"\n💾 <b>кэш профилей:</b>\n"
             f"    в памяти: {st['cache_mem']}, на диске: {st['cache_db']}\n"
             f"    попаданий: {ratio} ({st['hit']} / {total}), «не найден» из кэша: {st['nf_hit']}\n"
-            f"    устаревших карточек показано: {st['stale']}, ников в «не найден»: {st['notfound']}"
+            f"    мгновенных (с фоновым обновлением): {st['swr']}, устаревших при сбое: {st['stale']}, "
+            f"ников в «не найден»: {st['notfound']}"
         )
     except Exception as e:
         logger.warning(f"ig_status lookup stats: {e}")
@@ -3493,12 +3540,68 @@ async def cmd_ig_status(message: types.Message):
         InlineKeyboardButton(text="🔍 проверить сессии", callback_data="ig_stat:check"),
         InlineKeyboardButton(text="🧹 сбросить кэш", callback_data="ig_stat:clear"),
     ])
+    buttons.append([InlineKeyboardButton(text="📜 лог сбоев", callback_data="ig_stat:log")])
 
     await message.answer(
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
+
+
+def _ago(ts: float) -> str:
+    d = max(0, int(time.time() - ts))
+    if d < 90:
+        return f"{d}с"
+    if d < 5400:
+        return f"{d // 60}м"
+    return f"{d // 3600}ч"
+
+
+def _ig_log_view(include_ok: bool = False, n: int = 10) -> tuple[str, InlineKeyboardMarkup]:
+    """Текст и кнопки для /ig_log: последние сбои каскада и ошибки пула."""
+    import html as _h
+    ev = get_recent_events(n, include_ok)
+    title = "📜 <b>Instagram: последние события</b>" + (" (с успешными)" if include_ok else " (только сбои)")
+    lines = [title, ""]
+    if not ev:
+        lines.append("пока тихо — сбоев не было 🎉")
+    for e in ev:
+        t = _ago(e["ts"])
+        if e["kind"] == "pool":
+            lines.append(f"⚠️ <code>{t}</code> пул · <b>{_h.escape(str(e['type']))}</b>: "
+                         f"{_h.escape(str(e['msg'])[:140])}")
+            continue
+        acc = f" · <code>{_h.escape(e['acc'])}</code>" if e.get("acc") not in (None, "", "?") else ""
+        notes = f"\n      <i>{_h.escape(e['notes'][:200])}</i>" if e.get("notes") else ""
+        if e["result"] == "ok":
+            lines.append(f"✅ <code>{t}</code> @{_h.escape(e['user'])} · через <b>{e['method']}</b>{acc}{notes}")
+        elif e["result"] == "notfound":
+            lines.append(f"🤷 <code>{t}</code> @{_h.escape(e['user'])} · не найден"
+                         f"{(' (' + e['method'] + ')') if e['method'] else ''}{acc}{notes}")
+        else:
+            lines.append(f"❌ <code>{t}</code> @{_h.escape(e['user'])} · все методы упали{acc}{notes}")
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        text = text[:3900].rsplit("\n", 1)[0] + "\n…"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔄 обновить", callback_data="ig_stat:logall" if include_ok else "ig_stat:log"),
+        InlineKeyboardButton(text=("только сбои" if include_ok else "показать и успешные"),
+                             callback_data="ig_stat:log" if include_ok else "ig_stat:logall"),
+    ]])
+    return text, kb
+
+
+async def cmd_ig_log(message: types.Message):
+    """/ig_log [all] — последние сбои Instagram с причиной по каждому методу (админ)."""
+    admin_ids = _get_admin_ids()
+    if admin_ids and message.from_user.id not in admin_ids:
+        await message.answer("⛔ Команда доступна только администратору.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    include_ok = len(parts) > 1 and parts[1].strip().lower() in ("all", "ok", "все", "всё")
+    text, kb = _ig_log_view(include_ok)
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def callback_ig_stat(callback: types.CallbackQuery):
@@ -3508,6 +3611,14 @@ async def callback_ig_stat(callback: types.CallbackQuery):
         await callback.answer("только для админа", show_alert=True)
         return
     action = callback.data.split(":", 1)[1]
+    if action in ("log", "logall"):
+        text, kb = _ig_log_view(action == "logall")
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            await callback.answer("обновил")
+        except Exception:
+            await callback.answer("без изменений")
+        return
     if action == "clear":
         n = clear_profile_caches()
         await callback.answer(
@@ -3864,6 +3975,7 @@ def register_ig_handlers(dp: Dispatcher):
     dp.message.register(cmd_ig_popular, Command("ig_popular"))
     dp.message.register(cmd_ig_status,  Command("ig_status"))
     dp.message.register(cmd_ig_find,    Command("ig_find"))
+    dp.message.register(cmd_ig_log,     Command("ig_log"))
 
     # /cancel — регистрируем РАНЬШЕ хендлеров состояний, чтобы команда
     # перехватывалась в любом состоянии, а не улетала в парсер username/кук
