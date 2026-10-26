@@ -2,21 +2,11 @@
 ai_tools.py — Function Calling для ИИ бота (Gemini).
 
 ИИ сам решает, когда вызвать функцию бота: профиль Instagram, поиск/отправка песни,
-аниме, товары, скачивание видео, наряды, дембель-таймер, картинки, поиск в интернете.
-
-Как это работает:
-  1. handle_ai_chat() вызывает run_ai_with_tools() вместо обычного _stream_reply().
-  2. Gemini получает список функций (TOOLS). Если просьба — это действие, она отвечает
-     function_call вместо текста.
-  3. Мы выполняем соответствующий существующий хэндлер бота (он сам шлёт карточки,
-     кнопки, аудио и т.д. в чат), а модели возвращаем короткий статус.
-  4. Для «терминальных» функций (результат уже показан в чате) второй запрос к Gemini
-     не делается — экономим квоту и время. Для web_search / ошибок — делается.
+аниме, товары, скачивание видео, 18+ видео (со спойлером, авто-переводом тегов,
+превью или прямой отправкой и сборкой больших роликов в альбом), наряды, дембель-таймер,
+картинки, поиск в интернете.
 
 Отключить целиком: переменная окружения AI_TOOLS=0 (на BotHost, без правки кода).
-
-Чтобы добавить новую функцию: напиши async def _tool_xxx(ctx, ...) и добавь запись в
-TOOLS через _tool(...). Больше ничего менять не нужно.
 """
 
 import asyncio
@@ -77,8 +67,7 @@ def _clean(value, limit: int = 300) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Функции-обёртки над существующими хэндлерами. Импорты ленивые — иначе круговые
-# зависимости (ai_handlers ↔ остальные модули).
+# Функции-обёртки над существующими хэндлерами.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Instagram ────────────────────────────────────────────────────────────────
@@ -95,14 +84,12 @@ async def _tool_instagram_profile(ctx: ToolContext, username: str = "") -> str:
     return f"Карточка профиля @{user} отправлена в чат (с кнопками сторис, постов, подписки)."
 
 
-# ── Instagram знаменитости по ИМЕНИ: ник ищем в интернете, потом проверяем в самой инсте ──
-_PERSON_CACHE: dict[str, tuple[float, str]] = {}      # имя → (когда, ник)
+_PERSON_CACHE: dict[str, tuple[float, str]] = {}
 _PERSON_TTL = 24 * 3600
 _IG_RESERVED = {"p", "reel", "reels", "tv", "stories", "explore", "share", "accounts", "none", "hashtag"}
 
 
 def _parse_handles(text: str) -> list[str]:
-    """Достаём до 3 ников из ответа модели: строка «HANDLES: a, b» либо ссылки instagram.com/<ник>."""
     text = text or ""
     raw: list[str] = []
     m = re.search(r"HANDLES:\s*(.+)", text, re.I)
@@ -121,7 +108,6 @@ def _parse_handles(text: str) -> list[str]:
 
 
 async def _resolve_instagram_handles(name: str) -> list[str]:
-    """Спрашиваем Gemini с поиском Google: какие ники у ПУБЛИЧНОЙ персоны с таким именем."""
     from ai_handlers import get_gemini
     from google.genai import types as gt
     client = get_gemini()
@@ -144,15 +130,6 @@ async def _resolve_instagram_handles(name: str) -> list[str]:
 
 
 async def _resolve_person(person: str) -> dict:
-    """
-    Имя → аккаунт. Возвращает {"kind": ...}:
-      found      — уверенный выбор: handle, info (верифицирован / явно самый крупный);
-      ambiguous  — подходят 2+ аккаунта без явного лидера: cands (по убыванию значимости);
-      search     — интернет ника не дал, но поиск Instagram по имени что-то вернул: cands;
-      api_down   — ник нашёлся в интернете, но Instagram не отвечает: handle;
-      notinig    — ники из интернета в Instagram не существуют;
-      none       — ничего не нашлось.
-    """
     from instagram_viewer import get_user_status, search_accounts
     key = person.lower()
     hit = _PERSON_CACHE.get(key)
@@ -180,7 +157,7 @@ async def _resolve_person(person: str) -> dict:
         if status in ("ok", "stale") and info:
             evaluated.append((h, info))
             if info.get("is_verified") or int(info.get("followers") or 0) >= 100_000:
-                dominant = (h, info)       # явный основной аккаунт — остальных не проверяем
+                dominant = (h, info)
                 break
         elif status == "error":
             any_error = True
@@ -194,7 +171,7 @@ async def _resolve_person(person: str) -> dict:
         top = int(ranked[0][1].get("followers") or 0)
         second = int(ranked[1][1].get("followers") or 0)
         if top >= 10_000 and top >= 5 * max(second, 1):
-            pick = ranked[0]               # один аккаунт заметно крупнее остальных
+            pick = ranked[0]
         else:
             return {"kind": "ambiguous", "cands": [
                 {"username": h, "full_name": i.get("full_name", ""), "followers": i.get("followers"),
@@ -208,7 +185,6 @@ async def _resolve_person(person: str) -> dict:
 
 
 def _pick_keyboard(cands: list[dict], limit: int = 5):
-    """Кнопки выбора аккаунта: 👤 @ник · 1.2M ✅ → открывает карточку (ig_profile:)."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     from instagram_handlers import _fmt_count
     rows = []
@@ -221,7 +197,6 @@ def _pick_keyboard(cands: list[dict], limit: int = 5):
 
 
 async def _deliver_person(ctx: ToolContext, person: str, r: dict) -> str:
-    """Показать результат поиска ОДНОГО человека и вернуть текст для модели."""
     from instagram_handlers import _show_profile
     esc = html.escape(person)
     kind = r["kind"]
@@ -277,7 +252,6 @@ def _split_names(text: str) -> list[str]:
 
 
 async def _tool_instagram_find_people(ctx: ToolContext, names: str = "") -> str:
-    """Несколько людей за раз: ищем параллельно, отвечаем одним сообщением со списком и кнопками."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     from instagram_handlers import _fmt_count
     parts = _split_names(names)[:4]
@@ -336,15 +310,42 @@ async def _tool_instagram_download(ctx: ToolContext, url: str = "") -> str:
             else "ОШИБКА: не удалось достать (приватный аккаунт, удалено или Instagram капризничает).")
 
 
-# ── Скачивание видео (YouTube / TikTok / X / Reddit / Pinterest / VK Видео / Twitch / Threads) ──
+# ── Скачивание видео ─────────────────────────────────────────────────────────
 async def _tool_download_video(ctx: ToolContext, url: str = "") -> str:
     from media_downloader import detect_platform, handle_media_link
     platform, link = detect_platform(_clean(url, 500))
     if not platform:
         return ("ОШИБКА: поддерживаются ссылки YouTube, TikTok, X/Twitter, Reddit, Pinterest, "
-                "VK Видео/Клипы, Twitch-клипы и Threads.")
+                "VK Видео/Клипы, Twitch-клипы, Threads, Pornhub и XVideos.")
     await handle_media_link(ctx.message, custom_url=link, custom_platform=platform)
     return f"Запрос на скачивание с {platform} обработан, результат (или ошибка) показан в чате."
+
+
+# ── Случайное 18+ видео (со спойлером, кэшем file_id, превью и альбомом) ─────
+async def _tool_random_adult_video(
+    ctx: ToolContext,
+    query: str = "",
+    source: str = "any",
+    preview: bool = False,
+) -> str:
+    from media_downloader import send_random_adult_video
+    q = _clean(query, 80)
+    src = _clean(source, 15).lower()
+    if src not in ("pornhub", "xvideos", "any"):
+        src = "any"
+    ok = await send_random_adult_video(
+        ctx.message,
+        query=q,
+        source=src,
+        quality=480,
+        preview=bool(preview),
+    )
+    if not ok:
+        return "ОШИБКА: не удалось найти или скачать 18+ видео (возможно, сервер блокирует доступ без ADULT_PROXY)."
+    if preview:
+        return "Карточка предпросмотра 18+ видео (со спойлером и кнопками 480p/720p/Другое) отправлена в чат."
+    return ("Случайное 18+ видео отправлено в чат под спойлером "
+            "(если оно было больше 50 МБ — автоматически разрезано и собрано в единый альбом).")
 
 
 # ── Музыка ───────────────────────────────────────────────────────────────────
@@ -417,9 +418,7 @@ async def _tool_anime_schedule(ctx: ToolContext) -> str:
     return "Календарь выхода серий отправлен в чат."
 
 
-
 async def _anime_pick(title: str, alt: str = "", min_score: float = 0.0):
-    """Находит релиз по названию. Возвращает (rel, ошибка)."""
     from anixart_handler import _best_release_match, _get_release
     t = _clean(title, 120)
     if not t:
@@ -494,7 +493,7 @@ async def _tool_anime_franchise(ctx: ToolContext, title: str = "") -> str:
     return f"Порядок просмотра франшизы «{rel.get('title_ru') or rel.get('title_original')}» отправлен в чат."
 
 
-# ── Товары (поиск идёт по Wildberries; команда исторически называется /ozon) ──
+# ── Товары ───────────────────────────────────────────────────────────────────
 async def _tool_product_search(ctx: ToolContext, query: str = "") -> str:
     from ozon_handler import ozon_search
     q = _clean(query, 150)
@@ -567,11 +566,6 @@ async def _tool_generate_image(ctx: ToolContext, prompt: str = "") -> str:
 
 # ── Интернет (погода, новости, факты) ────────────────────────────────────────
 async def _tool_web_search(ctx: ToolContext, query: str = "") -> str:
-    """
-    Gemini нельзя одновременно дать function calling и google_search в одном запросе,
-    поэтому поиск вынесен в отдельную функцию с собственным вызовом модели.
-    Результат возвращается ИИ-собеседнику (не в чат), он сам формулирует ответ.
-    """
     from ai_handlers import get_gemini
     from google.genai import types as gt
     client = get_gemini()
@@ -703,7 +697,7 @@ async def _tool_music_link(ctx: ToolContext, url: str = "") -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Реестр функций. description — это то, по чему ИИ решает, когда вызывать.
+# Реестр функций.
 # ══════════════════════════════════════════════════════════════════════════════
 _tool("instagram_profile",
       "Показать профиль Instagram ПО ГОТОВОМУ НИКУ или ссылке (карточка: аватар, подписчики, кнопки "
@@ -738,9 +732,18 @@ _tool("instagram_download",
 
 _tool("download_video",
       "Скачать видео/медиа по ссылке с YouTube, TikTok, X (Twitter), Reddit, Pinterest, VK Видео/Клипов, "
-      "Twitch-клипов или Threads.",
+      "Twitch-клипов, Threads, Pornhub или XVideos.",
       _tool_download_video,
       {"url": _s("Ссылка на видео")}, ["url"])
+
+_tool("random_adult_video",
+      "Найти и отправить случайное 18+ видео (прон, порно) с Pornhub или XVideos прямо медиафайлом в чат "
+      "(со спойлером; если видео весит больше 50 МБ — оно автоматически режется на части и собирается в альбом). "
+      "Если пользователь просит сначала превью/карточку на выбор — передай preview=True.",
+      _tool_random_adult_video,
+      {"query": _s("Категория или поисковый запрос на русском или английском (необязательно)"),
+       "source": {"type": "STRING", "description": "pornhub, xvideos или any", "enum": ["pornhub", "xvideos", "any"]},
+       "preview": {"type": "BOOLEAN", "description": "True — сначала показать карточку превью с выбором качества; False — сразу скачать видео"}})
 
 _tool("music_send_track",
       "Найти песню и СРАЗУ отправить её аудиофайлом. Вызывай на «скинь/кинь/пришли/включи песню X», "
@@ -834,7 +837,6 @@ _tool("remember_fact",
       _tool_remember_fact,
       {"fact": _s("Короткая формулировка факта")}, ["fact"], terminal=False)
 
-
 _tool("make_meme",
       "Сделать мем (демотиватор) из картинки, на которую пользователь ответил, или прикрепил. Вызывай на "
       "«сделай мем про …» / «сделай мем из этого».",
@@ -897,7 +899,7 @@ _tool("music_link",
 
 TOOLS_HINT = (
     "\n\nИНСТРУМЕНТЫ: у тебя есть функции бота (Instagram, музыка и музыкальные ссылки, аниме, фильмы и сериалы, "
-    "товары, скачивание видео, наряды, дембель, картинки, мемы, жребий и выбор, места рядом, бесплатные игры, "
+    "товары, скачивание видео, случайное 18+ видео, наряды, дембель, картинки, мемы, жребий и выбор, места рядом, бесплатные игры, "
     "разбор фото/файлов реплаем, поиск в интернете). Если просьба — это действие, которое покрывает "
     "функция, ВЫЗОВИ её, а не отвечай «я не умею» или «воспользуйся командой». Для обычного разговора, "
     "шуток и советов функции не вызывай. Не выдумывай параметры: если не хватает username, названия "
@@ -950,10 +952,6 @@ def _build_gemini_tool(gt):
 
 
 async def _stream_step(client, gt, message, contents, config):
-    """
-    Один запрос к модели со стримингом. Возвращает (text, function_call_parts, model_parts).
-    Текст плавно показывается в сообщении, как в обычном _stream_reply.
-    """
     from ai_handlers import _md_to_tg_html
 
     text = ""
@@ -1001,7 +999,6 @@ async def _stream_step(client, gt, message, contents, config):
             except Exception:
                 pass
     elif final:
-        # текст пришёл одним куском без промежуточных правок
         try:
             await message.reply(_md_to_tg_html(final), parse_mode="HTML")
         except Exception:
@@ -1015,11 +1012,6 @@ async def run_ai_with_tools(
     system_instruction: str,
     user_id: int,
 ) -> tuple[bool, str | None]:
-    """
-    Возвращает (handled, text).
-    handled=False — до выполнения каких-либо функций что-то сломалось, вызывающему стоит
-    откатиться на обычный _stream_reply (чтобы пользователь не остался без ответа).
-    """
     from ai_handlers import get_gemini
 
     client = get_gemini()
@@ -1051,7 +1043,6 @@ async def run_ai_with_tools(
         if not call_parts:
             return True, last_text or None
 
-        # Возвращаем модели её собственный ход (с function_call и thought-signature).
         model_parts = ([gt.Part(text=text)] if text else []) + list(call_parts)
         contents.append(gt.Content(role="model", parts=model_parts))
 
@@ -1071,7 +1062,6 @@ async def run_ai_with_tools(
                 all_ok_terminal = False
             response_parts.append(gt.Part.from_function_response(
                 name=fc.name, response={"result": result}))
-        # Лишние вызовы (сверх лимита) тоже надо закрыть ответом, иначе API вернёт 400.
         for part in call_parts[MAX_CALLS_PER_STEP:]:
             response_parts.append(gt.Part.from_function_response(
                 name=part.function_call.name,
@@ -1081,7 +1071,6 @@ async def run_ai_with_tools(
         contents.append(gt.Content(role="user", parts=response_parts))
 
         if all_ok_terminal:
-            # Всё уже показано в чате карточками/файлами — второй запрос к модели не нужен.
             return True, last_text or None
 
     return True, last_text or None
