@@ -1,29 +1,44 @@
 """
 media_downloader.py — скачивание медиа из YouTube, TikTok, Twitter/X, Reddit,
-Pinterest, VK Видео/Клипы, Twitch-клипов и Threads.
+Pinterest, VK Видео/Клипы, Twitch-клипов, Threads, Pornhub и XVideos.
 
-Подключение в main.py:
-    from media_downloader import register_media_handlers
-    register_media_handlers(dp)
-
-Пользователь просто кидает ссылку в чат — бот сам определяет платформу,
-скачивает медиа через yt-dlp и отправляет файлом (видео или фото).
+Включает улучшения 1, 2, 3, 4, 5, 8, 10 для 18+ модуля (/pron, /xxx):
+  1. Авто-спойлер (has_spoiler=True) + кнопка мгновенного удаления всех частей/сообщений.
+  2. Кэширование Telegram file_id в SQLite (мгновенная повторная отправка за 0.1 сек).
+  3. Карточка предпросмотра (постер, длительность, выбор 480p / 720p / Звук / Другое).
+  4. Интерактивная клавиатура под видео («🎲 Ещё по теме», «🎧 Звук», «🗑 Скрыть»).
+  5. Авто-перевод русских поисковых запросов в английские теги через Gemini.
+  8. Сборка нарезанных частей (>50 МБ) в единый компактный альбом (send_media_group).
+  10. Обход блокировок: ротация зеркал (pornhub.com / rt.pornhub.com / pornhub.org /
+      xvideos.com / xnxx.com) + встроенный экстрактор yt-dlp phsearch.
 """
 
 import asyncio
+import glob
+import html as _html
+import json
 import logging
 import os
+import random
 import re
 import secrets
 import shutil
 import tempfile
 import time
+import urllib.parse
 from collections import OrderedDict
 from pathlib import Path
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    BufferedInputFile,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +51,8 @@ DOWNLOAD_TIMEOUT = int(os.getenv("MEDIA_DOWNLOAD_TIMEOUT", "900"))   # секу�
 MAX_TOTAL_MB = int(os.getenv("MEDIA_MAX_TOTAL_MB", "1000"))          # максимум исходного файла
 MAX_TOTAL_BYTES = MAX_TOTAL_MB * 1024 * 1024
 MAX_PARTS = int(os.getenv("MEDIA_MAX_PARTS", "25"))                 # максимум частей
-PART_TARGET_BYTES = int(os.getenv("MEDIA_PART_MB", "32")) * 1024 * 1024                                # целевой размер части
-PART_HARD_BYTES = int(PART_TARGET_BYTES * 1.25)                                  # больше этого Telegram не примет
+PART_TARGET_BYTES = int(os.getenv("MEDIA_PART_MB", "32")) * 1024 * 1024  # целевой размер части
+PART_HARD_BYTES = int(PART_TARGET_BYTES * 1.25)                     # больше этого Telegram не примет
 MAX_HEIGHT = int(os.getenv("MEDIA_MAX_HEIGHT", "720"))              # потолок качества YouTube
 
 # Очередь и защита хостинга
@@ -46,6 +61,9 @@ PER_USER_LIMIT = int(os.getenv("MEDIA_PER_USER_LIMIT", "2"))        # сколь
 QUEUE_MAX = int(os.getenv("MEDIA_QUEUE_MAX", "15"))                 # максимум ожидающих в очереди
 MIN_FREE_MB = int(os.getenv("MEDIA_MIN_FREE_MB", "500"))            # минимум свободного места на диске
 FRAGMENTS = int(os.getenv("MEDIA_FRAGMENTS", "4"))                  # параллельные фрагменты yt-dlp
+
+# Опциональный прокси для 18+ сайтов (если нода BotHost блокирует прямой доступ)
+ADULT_PROXY = os.getenv("ADULT_PROXY", "").strip() or None
 
 # ── ПАТТЕРНЫ ССЫЛОК ───────────────────────────────────────────────────────────
 URL_PATTERNS = {
@@ -81,6 +99,14 @@ URL_PATTERNS = {
         r"https?://(?:www\.)?threads\.(?:net|com)/(?:@[\w.]+/post/|t/)[\w-]+\S*",
         re.IGNORECASE
     ),
+    "pornhub": re.compile(
+        r"https?://(?:[a-z]{2,3}\.|www\.)?pornhub\.(?:com|org)/view_video\.php\?viewkey=[\w-]+\S*",
+        re.IGNORECASE
+    ),
+    "xvideos": re.compile(
+        r"https?://(?:www\.)?(?:xvideos\.com/video[\w./-]+|xv-ru\.com/video[\w./-]+|xnxx\.com/video-[\w./-]+)\S*",
+        re.IGNORECASE
+    ),
 }
 
 PLATFORM_LABELS = {
@@ -92,6 +118,8 @@ PLATFORM_LABELS = {
     "vkvideo": "VK Видео",
     "twitch":  "Twitch",
     "threads": "Threads",
+    "pornhub": "Pornhub",
+    "xvideos": "XVideos",
 }
 
 PLATFORM_EMOJIS = {
@@ -103,6 +131,8 @@ PLATFORM_EMOJIS = {
     "vkvideo": "🟦",
     "twitch":  "🟣",
     "threads": "🧵",
+    "pornhub": "🔞",
+    "xvideos": "🔞",
 }
 
 
@@ -118,12 +148,103 @@ def detect_platform(text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# УЛУЧШЕНИЕ 2: КЭШ TELEGRAM FILE_ID В SQLITE ДЛЯ 18+ ВИДЕО И АЛЬБОМОВ
+# ══════════════════════════════════════════════════════════════════════════════
+def _init_adult_cache_table():
+    try:
+        from db import _db_connect
+        conn = _db_connect()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS adult_video_cache (
+                cache_key TEXT PRIMARY KEY,
+                file_ids_json TEXT NOT NULL,
+                title TEXT,
+                uploader TEXT,
+                duration INTEGER DEFAULT 0,
+                width INTEGER DEFAULT 0,
+                height INTEGER DEFAULT 0,
+                is_audio INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"adult_video_cache init warning: {e}")
+
+
+def _adult_cache_key(url: str, quality) -> str:
+    q_tag = "audio" if quality == "audio" else str(quality or MAX_HEIGHT)
+    clean_u = url.split("&")[0].strip()
+    return f"{clean_u}::{q_tag}"
+
+
+def _get_adult_cached(url: str, quality) -> dict | None:
+    try:
+        from db import _db_connect
+        _init_adult_cache_table()
+        conn = _db_connect()
+        row = conn.execute(
+            "SELECT file_ids_json, title, uploader, duration, width, height, is_audio "
+            "FROM adult_video_cache WHERE cache_key=?",
+            (_adult_cache_key(url, quality),)
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        fids = json.loads(row[0] or "[]")
+        if not fids:
+            return None
+        return {
+            "file_ids": fids,
+            "title": row[1] or "",
+            "uploader": row[2] or "",
+            "duration": int(row[3] or 0),
+            "width": int(row[4] or 0),
+            "height": int(row[5] or 0),
+            "is_audio": bool(row[6]),
+        }
+    except Exception as e:
+        logger.debug(f"_get_adult_cached error: {e}")
+        return None
+
+
+def _save_adult_cached(url: str, quality, file_ids: list[str], info: dict):
+    if not file_ids:
+        return
+    try:
+        from db import _db_connect
+        _init_adult_cache_table()
+        conn = _db_connect()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO adult_video_cache
+                (cache_key, file_ids_json, title, uploader, duration, width, height, is_audio, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                _adult_cache_key(url, quality),
+                json.dumps(file_ids),
+                str(info.get("title") or "")[:200],
+                str(info.get("uploader") or "")[:100],
+                int(info.get("duration") or 0),
+                int(info.get("width") or 0),
+                int(info.get("height") or 0),
+                1 if info.get("is_audio") else 0,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"_save_adult_cached error: {e}")
+
+
 # ── YT-DLP ОБЁРТКА ────────────────────────────────────────────────────────────
 
 def _ydl_opts(out_path: str, platform: str, height: int | None = None, audio_only: bool = False) -> dict:
     """Настройки yt-dlp под каждую платформу."""
 
-    # Базовые настройки — берём лучшее видео до 720p
     base = {
         "outtmpl": out_path,
         "quiet": True,
@@ -140,7 +261,6 @@ def _ydl_opts(out_path: str, platform: str, height: int | None = None, audio_onl
 
     if platform == "youtube":
         base.update({
-            # Предпочитаем mp4, <=720p, с аудио в одном файле
             "format": (
                 f"bestvideo[ext=mp4][height<={h}]+bestaudio[ext=m4a]"
                 f"/bestvideo[height<={h}]+bestaudio"
@@ -152,7 +272,6 @@ def _ydl_opts(out_path: str, platform: str, height: int | None = None, audio_onl
 
     elif platform == "tiktok":
         base.update({
-            # TikTok — берём версию без водяного знака если есть
             "format": "best",
             "extractor_args": {
                 "tiktok": {
@@ -178,11 +297,24 @@ def _ydl_opts(out_path: str, platform: str, height: int | None = None, audio_onl
             "merge_output_format": "mp4",
         })
 
+    elif platform in ("pornhub", "xvideos"):
+        base.update({
+            "format": f"best[ext=mp4][height<={h}]/bestvideo[height<={h}]+bestaudio/best[height<={h}]/best",
+            "merge_output_format": "mp4",
+            "age_limit": 99,
+            "http_headers": {
+                "User-Agent": _BROWSER_UA,
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cookie": "age_verified=1; accessAgeDisclaimerPH=1",
+            },
+        })
+        if ADULT_PROXY:
+            base["proxy"] = ADULT_PROXY
+
     elif platform == "pinterest":
         base.update({"format": "best"})
 
     if audio_only:
-        # только звук: m4a без перекодирования (если источник AAC), Telegram играет его как аудио
         base.update({
             "format": "bestaudio[ext=m4a]/bestaudio/best",
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
@@ -204,7 +336,6 @@ async def _download_ytdlp(url: str, platform: str, height: int | None = None,
         logger.error("yt-dlp не установлен!")
         return None, {}
 
-    # Временная папка — чистим сами после отправки
     tmp_dir = tempfile.mkdtemp(prefix="tgdl_")
     out_template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
 
@@ -248,13 +379,11 @@ async def _download_ytdlp(url: str, platform: str, height: int | None = None,
                 _info = ydl.extract_info(url, download=True)
                 return ydl.prepare_filename(_info), _info
 
-        # Запускаем блокирующий yt-dlp в отдельном треде
         filepath, raw_info = await asyncio.wait_for(
             loop.run_in_executor(None, _run),
             timeout=DOWNLOAD_TIMEOUT,
         )
 
-        # Ищем реально скачанный файл (расширение может поменяться после merge)
         found = None
         for f in Path(tmp_dir).iterdir():
             if f.is_file():
@@ -290,7 +419,7 @@ async def _download_ytdlp(url: str, platform: str, height: int | None = None,
 
     except asyncio.TimeoutError:
         logger.error(f"Таймаут скачивания {url}")
-        prog["cancel"] = True          # останавливаем фоновый поток yt-dlp
+        prog["cancel"] = True
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return None, {"_timeout": True}
     except Exception as e:
@@ -298,7 +427,6 @@ async def _download_ytdlp(url: str, platform: str, height: int | None = None,
         logger.error(f"yt-dlp error {url}: {e}")
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        # Разбираем типичные ошибки
         if "private" in err_str.lower() or "login" in err_str.lower():
             return None, {"_private": True}
         if "not available" in err_str.lower() or "unavailable" in err_str.lower():
@@ -320,10 +448,15 @@ def _md_escape(s: str) -> str:
     return re.sub(r"([_*`\[])", r"\\\1", s or "")
 
 
-async def _http_text(url: str, ua: str = _BROWSER_UA) -> tuple[str, str]:
+async def _http_text(url: str, ua: str = _BROWSER_UA, proxy: str | None = None) -> tuple[str, str]:
+    headers = {
+        "User-Agent": ua,
+        "Accept-Language": "en-US,en;q=0.8",
+        "Cookie": "age_verified=1; accessAgeDisclaimerPH=1",
+    }
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers={"User-Agent": ua, "Accept-Language": "en-US,en;q=0.8"},
+            async with s.get(url, headers=headers, proxy=proxy,
                              timeout=aiohttp.ClientTimeout(total=20), allow_redirects=True) as r:
                 if r.status == 200:
                     return await r.text(errors="ignore"), str(r.url)
@@ -333,16 +466,14 @@ async def _http_text(url: str, ua: str = _BROWSER_UA) -> tuple[str, str]:
 
 
 def _meta(page: str, prop: str) -> str:
-    import html as _h
     m = re.search(rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']*)["\']', page, re.I) \
         or re.search(rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']{re.escape(prop)}["\']', page, re.I)
-    return _h.unescape(m.group(1)).strip() if m else ""
+    return _html.unescape(m.group(1)).strip() if m else ""
 
 
 def _json_unescape(s: str) -> str:
-    import json as _j
     try:
-        return _j.loads('"' + s + '"')
+        return json.loads('"' + s + '"')
     except Exception:
         return s.replace("\\/", "/").replace("\\u0026", "&")
 
@@ -369,8 +500,6 @@ async def _fetch_to_file(url: str, dest: str, max_bytes: int = MAX_TOTAL_BYTES) 
 
 
 def _threads_items(page: str, code: str) -> tuple[list[dict], str, str]:
-    """Достаёт из HTML поста Threads: [{type,url}], текст, автора. Пусто — если медиа нет."""
-    import json as _j
     items: list[dict] = []
     text = _meta(page, "og:description")
     user = ""
@@ -405,12 +534,12 @@ def _threads_items(page: str, code: str) -> tuple[list[dict], str, str]:
         if "video_versions" not in blob and "image_versions2" not in blob:
             continue
         try:
-            if walk(_j.loads(blob)):
+            if walk(json.loads(blob)):
                 break
         except Exception:
             continue
 
-    if not items:   # запасной путь: регулярки по сырому HTML и og-теги
+    if not items:
         m = re.search(r'"video_versions":\[\{"type":\d+,"url":"(.*?)"', page)
         if m:
             items.append({"type": "video", "url": _json_unescape(m.group(1))})
@@ -441,7 +570,7 @@ async def _download_threads(url: str) -> tuple[str | None, dict]:
         author = a or author
         if items:
             break
-        if text and not items:      # хотя бы текст поста — запомним, но попробуем другие варианты
+        if text and not items:
             continue
     if not items and not text:
         return None, {"_unavailable": True}
@@ -468,12 +597,10 @@ async def _download_threads(url: str) -> tuple[str | None, dict]:
 
 
 def shutil_rm(path: str):
-    import shutil
     shutil.rmtree(path, ignore_errors=True)
 
 
 async def _download_pinterest_fallback(url: str) -> tuple[str | None, dict]:
-    """Если yt-dlp не справился (чаще всего — пин-картинка): берём og:video / og:image со страницы."""
     page, final = await _http_text(url)
     if not page:
         return None, {"_unavailable": True}
@@ -488,7 +615,7 @@ async def _download_pinterest_fallback(url: str) -> tuple[str | None, dict]:
     ext = "mp4" if is_video else (img.split("?")[0].rsplit(".", 1)[-1][:4] or "jpg")
     dest = os.path.join(tmp_dir, f"pin.{ext}")
     ok = await _fetch_to_file(vid if is_video else img, dest)
-    if not ok and not is_video and "/originals/" in img:      # originals бывают недоступны — берём как есть
+    if not ok and not is_video and "/originals/" in img:
         ok = await _fetch_to_file(_meta(page, "og:image"), dest)
     if not ok:
         shutil_rm(tmp_dir)
@@ -504,7 +631,7 @@ async def _download_media(url: str, platform: str, height: int | None = None,
     if platform == "threads":
         return await _download_threads(url)
     if platform == "pinterest":
-        if "pin.it/" in url:                                   # короткая ссылка → реальный адрес пина
+        if "pin.it/" in url:
             _, final = await _http_text(url)
             if "/pin/" in final:
                 url = final
@@ -516,13 +643,7 @@ async def _download_media(url: str, platform: str, height: int | None = None,
     return await _download_ytdlp(url, platform, height, audio_only, progress)
 
 
-
 async def ytdlp_instagram_post(url: str) -> dict | None:
-    """
-    Метаданные поста/рилса Instagram через yt-dlp БЕЗ скачивания файла — только прямые CDN-ссылки.
-    Возвращает dict в формате instagram_viewer (media: [{type,url,thumb}], username, caption…) или None.
-    Опционально: IG_YTDLP_COOKIES=/путь/cookies.txt (Netscape) — для постов, требующих логин.
-    """
     try:
         import yt_dlp
     except ImportError:
@@ -583,7 +704,7 @@ async def ytdlp_instagram_post(url: str) -> dict | None:
 
 
 def _make_error_message(info: dict, label: str, url: str) -> str:
-    """Текст ошибки скачивания (раньше функция вызывалась, но не была определена)."""
+    """Текст ошибки скачивания."""
     if info.get("_too_large"):
         return (f"❌ Файл слишком большой даже для нарезки: {info.get('_size_mb', '?')} МБ "
                 f"(максимум {MAX_TOTAL_MB} МБ).\n\n🔗 Оригинал: {url}")
@@ -612,11 +733,8 @@ async def _probe_duration(path: str) -> float:
 
 async def _split_video(path: str, tmp_dir: str, duration: float = 0, audio: bool = False) -> list[str] | None:
     """
-    Нарезать видео на части ≤ ~49 МБ БЕЗ пережатия (-c copy): качество то же, что в исходнике.
-    Резка идёт по ключевым кадрам, поэтому размеры частей «плавают» — при перелёте уменьшаем шаг и повторяем.
-    None — не вышло (нет ffmpeg / слишком много частей).
+    Нарезать видео на части ≤ ~40 МБ БЕЗ пережатия (-c copy): качество то же, что в исходнике.
     """
-    import glob
     ext = "m4a" if audio else "mp4"
     maps = ["-map", "0:a:0"] if audio else ["-map", "0:v:0", "-map", "0:a:0?"]
     size = os.path.getsize(path)
@@ -660,32 +778,55 @@ async def _split_video(path: str, tmp_dir: str, duration: float = 0, audio: bool
                 return parts
             logger.error(f"split: частей {len(parts)} > лимита {MAX_PARTS}")
             return None
-        # уменьшаем шаг пропорционально перелёту, а не слепо на 25%
         seg = max(3, int(seg * min(0.85, PART_TARGET_BYTES / (biggest * 1024 * 1024))))
     logger.error("split: не удалось уложить части в лимит Telegram за 6 попыток")
     return None
 
 
-async def _send_video_parts(message: types.Message, parts: list[str], caption: str,
-                            width: int, height: int, progress_cb=None) -> None:
+# ══════════════════════════════════════════════════════════════════════════════
+# УЛУЧШЕНИЕ 8: СБОРКА НАРЕЗАННЫХ ЧАСТЕЙ В ЕДИНЫЙ АЛЬБОМ (И КЭШ FILE_ID)
+# ══════════════════════════════════════════════════════════════════════════════
+async def _send_video_parts(
+    message: types.Message,
+    parts: list[str],
+    caption: str,
+    width: int,
+    height: int,
+    progress_cb=None,
+    has_spoiler: bool = False,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> tuple[list[str], list[int]]:
     """
-    Части — по одной, по порядку. Альбомом нельзя: Telegram считает размер всего запроса,
-    и 8 частей по 42 МБ в одном запросе дают «Request Entity Too Large».
+    Загружает части по одной (чтобы не словить Request Entity Too Large),
+    собирает их Telegram file_id, а если частей ≥ 2 — объединяет их в компактные
+    альбомы (send_media_group по 10 штук) и прикрепляет панель управления!
+    Возвращает (список_file_id, список_id_отправленных_сообщений).
     """
     n = len(parts)
+    file_ids: list[str] = []
+    temp_msg_ids: list[int] = []
+
     for i, fp in enumerate(parts):
         num = i + 1
         cap = (f"{caption}\n\n✂️ Часть {num}/{n}" if i == 0 else f"✂️ Часть {num}/{n}")[:1000]
-        kw = dict(caption=cap, parse_mode="Markdown", supports_streaming=True,
-                  width=width or None, height=height or None)
-        logger.info(f"send part {num}/{n}: {os.path.getsize(fp)/1024/1024:.1f} МБ (по одной, send_video)")
+        kw = dict(
+            caption=cap,
+            parse_mode="Markdown",
+            supports_streaming=True,
+            width=width or None,
+            height=height or None,
+            has_spoiler=has_spoiler,
+            reply_markup=reply_markup if (n == 1) else None,
+        )
+        logger.info(f"upload part {num}/{n}: {os.path.getsize(fp)/1024/1024:.1f} МБ")
+        sent = None
         for attempt in range(3):
             f = FSInputFile(fp, filename=f"part_{num:02d}_of_{n:02d}.mp4")
             try:
                 try:
-                    await message.bot.send_video(message.chat.id, f, request_timeout=900, **kw)
-                except TypeError:       # старый aiogram без request_timeout
-                    await message.bot.send_video(message.chat.id, f, **kw)
+                    sent = await message.bot.send_video(message.chat.id, f, request_timeout=900, **kw)
+                except TypeError:
+                    sent = await message.bot.send_video(message.chat.id, f, **kw)
                 break
             except Exception as e:
                 logger.error(f"send part {num}/{n} failed: {type(e).__name__}: {e}")
@@ -694,12 +835,124 @@ async def _send_video_parts(message: types.Message, parts: list[str], caption: s
                     await asyncio.sleep(int(retry) + 1)
                     continue
                 raise
+
+        if sent and sent.video:
+            file_ids.append(sent.video.file_id)
+            temp_msg_ids.append(sent.message_id)
+
         if progress_cb:
             try:
                 await progress_cb(num, n)
             except Exception:
                 pass
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.8)
+
+    # Улучшение 8: если частей несколько и все file_id получены — собираем их в единый альбом!
+    if len(file_ids) >= 2:
+        album_msg_ids: list[int] = []
+        try:
+            for chunk_start in range(0, len(file_ids), 10):
+                chunk_fids = file_ids[chunk_start:chunk_start + 10]
+                media_group = []
+                for idx, fid in enumerate(chunk_fids):
+                    part_no = chunk_start + idx + 1
+                    m_cap = (
+                        f"{caption}\n\n📦 *Альбом: части 1–{len(file_ids)}*"
+                        if (chunk_start == 0 and idx == 0)
+                        else f"✂️ Часть {part_no}/{len(file_ids)}"
+                    )[:1000]
+                    media_group.append(
+                        InputMediaVideo(
+                            media=fid,
+                            caption=m_cap,
+                            parse_mode="Markdown",
+                            width=width or None,
+                            height=height or None,
+                            supports_streaming=True,
+                            has_spoiler=has_spoiler,
+                        )
+                    )
+                grp_msgs = await message.bot.send_media_group(message.chat.id, media_group)
+                album_msg_ids.extend(m.message_id for m in grp_msgs)
+
+            # Удаляем одиночные технические сообщения, оставляя только красивый альбом
+            for mid in temp_msg_ids:
+                try:
+                    await message.bot.delete_message(message.chat.id, mid)
+                except Exception:
+                    pass
+            return file_ids, album_msg_ids
+        except Exception as e:
+            logger.warning(f"Сборка альбома из file_id не удалась, оставляю одиночные части: {e}")
+
+    return file_ids, temp_msg_ids
+
+
+async def _send_from_cached_file_ids(
+    message: types.Message,
+    cached: dict,
+    caption: str,
+    has_spoiler: bool = False,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> list[int]:
+    """Отправляет видео или альбом мгновенно по сохранённым в SQLite file_id."""
+    fids = cached.get("file_ids") or []
+    width = cached.get("width") or None
+    height = cached.get("height") or None
+    duration = cached.get("duration") or None
+    sent_ids: list[int] = []
+
+    if cached.get("is_audio"):
+        for idx, fid in enumerate(fids, 1):
+            cap = caption if len(fids) == 1 else f"{caption}\n✂️ Часть {idx}/{len(fids)}"
+            s = await message.bot.send_audio(
+                message.chat.id,
+                fid,
+                caption=cap[:1000],
+                parse_mode="Markdown",
+                reply_markup=reply_markup if idx == len(fids) else None,
+            )
+            sent_ids.append(s.message_id)
+        return sent_ids
+
+    if len(fids) == 1:
+        s = await message.answer_video(
+            fids[0],
+            caption=caption[:1000],
+            parse_mode="Markdown",
+            width=width,
+            height=height,
+            duration=duration,
+            supports_streaming=True,
+            has_spoiler=has_spoiler,
+            reply_markup=reply_markup,
+        )
+        return [s.message_id]
+
+    for chunk_start in range(0, len(fids), 10):
+        chunk = fids[chunk_start:chunk_start + 10]
+        media_group = []
+        for idx, fid in enumerate(chunk):
+            part_no = chunk_start + idx + 1
+            m_cap = (
+                f"{caption}\n\n📦 *Альбом: части 1–{len(fids)} (из кэша ⚡)*"
+                if (chunk_start == 0 and idx == 0)
+                else f"✂️ Часть {part_no}/{len(fids)}"
+            )[:1000]
+            media_group.append(
+                InputMediaVideo(
+                    media=fid,
+                    caption=m_cap,
+                    parse_mode="Markdown",
+                    width=width,
+                    height=height,
+                    supports_streaming=True,
+                    has_spoiler=has_spoiler,
+                )
+            )
+        grp = await message.bot.send_media_group(message.chat.id, media_group)
+        sent_ids.extend(m.message_id for m in grp)
+    return sent_ids
 
 
 def _cleanup(filepath: str, info: dict):
@@ -709,7 +962,6 @@ def _cleanup(filepath: str, info: dict):
             os.remove(filepath)
         tmp_dir = info.get("_tmp_dir")
         if tmp_dir and os.path.isdir(tmp_dir):
-            import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
     except Exception as e:
         logger.debug(f"cleanup error: {e}")
@@ -726,20 +978,13 @@ def _fmt_duration(seconds: int | float) -> str:
     return f"{m}:{sec:02d}"
 
 
-# ── СКАЧИВАНИЕ ФОТО ДЛЯ REDDIT/TWITTER (картинки без видео) ──────────────────
-
 async def _download_image_bytes(url: str) -> bytes | None:
     """Скачать изображение напрямую через aiohttp."""
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
+    headers = {"User-Agent": _BROWSER_UA}
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            async with s.get(url, headers=headers, proxy=ADULT_PROXY,
+                             timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 if resp.status == 200:
                     data = await resp.read()
                     return data if len(data) > 1000 else None
@@ -747,8 +992,6 @@ async def _download_image_bytes(url: str) -> bytes | None:
         logger.error(f"image download error {url}: {e}")
     return None
 
-
-# ── ХЕНДЛЕР ───────────────────────────────────────────────────────────────────
 
 # ── Форматирование ────────────────────────────────────────────────────────────
 def _fmt_size(b: float) -> str:
@@ -779,9 +1022,9 @@ class _Job:
         _Job._seq += 1
         self.id = _Job._seq
         self.user_id = user_id
-        self.kind = kind                      # "video" | "audio"
+        self.kind = kind
         self.est_bytes = est_bytes
-        self.event = asyncio.Event()          # выставляется, когда задача получила слот
+        self.event = asyncio.Event()
         self.cancelled = False
         self.ok = False
         self.started = 0.0
@@ -789,13 +1032,13 @@ class _Job:
 
 
 class _DownloadQueue:
-    """FIFO-очередь с N слотами. Считает позицию и примерное ожидание по реальному времени прошлых задач."""
+    """FIFO-очередь с N слотами."""
 
     def __init__(self, slots: int):
         self.slots = max(1, slots)
         self.running: list[_Job] = []
         self.waiting: list[_Job] = []
-        self.avg = {"video": 90.0, "audio": 40.0}      # стартовые оценки, дальше — скользящее среднее
+        self.avg = {"video": 90.0, "audio": 40.0}
 
     def active_for(self, uid: int) -> int:
         return sum(1 for j in self.running + self.waiting if j.user_id == uid)
@@ -804,7 +1047,6 @@ class _DownloadQueue:
         return self.waiting.index(job) + 1 if job in self.waiting else 0
 
     def eta(self, job: _Job) -> float:
-        """Сколько секунд до старта job: прогоняем простую симуляцию по слотам."""
         now = time.monotonic()
         free = sorted(max(5.0, self.avg[j.kind] - (now - j.started)) for j in self.running)
         free += [0.0] * (self.slots - len(free))
@@ -818,7 +1060,6 @@ class _DownloadQueue:
         return 0.0
 
     def submit(self, job: _Job) -> bool:
-        """True — слот свободен, стартуем сразу; False — встали в очередь."""
         if len(self.running) < self.slots and not self.waiting:
             self._start(job)
             return True
@@ -852,13 +1093,61 @@ class _DownloadQueue:
 
 _QUEUE = _DownloadQueue(QUEUE_SLOTS)
 _JOBS: dict[int, _Job] = {}
-_PENDING: "OrderedDict[str, dict]" = OrderedDict()        # ожидают выбора качества
+_PENDING: "OrderedDict[str, dict]" = OrderedDict()
+_ADULT_SESSIONS: "OrderedDict[str, dict]" = OrderedDict()
 QUALITY_TIERS = [h for h in (1080, 720, 480, 360) if h <= MAX_HEIGHT] or [MAX_HEIGHT]
+
+
+def _put_adult_session(data: dict) -> str:
+    tok = secrets.token_hex(4)
+    _ADULT_SESSIONS[tok] = data
+    while len(_ADULT_SESSIONS) > 300:
+        _ADULT_SESSIONS.popitem(last=False)
+    return tok
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# УЛУЧШЕНИЕ 1 и 4: ИНТЕРАКТИВНЫЕ КНОПКИ ПОД ВИДЕО И УДАЛЕНИЕ ПАЛЕВА
+# ══════════════════════════════════════════════════════════════════════════════
+def _adult_post_kb(tok: str, is_album: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(text="🎲 Ещё по теме", callback_data=f"prn:more:{tok}"),
+            InlineKeyboardButton(text="🖼 Превью другого", callback_data=f"prn:reroll:{tok}"),
+        ],
+        [
+            InlineKeyboardButton(text="🎧 Только звук", callback_data=f"prn:dl:{tok}:audio"),
+            InlineKeyboardButton(
+                text="🗑 Скрыть всё (палево)" if is_album else "🗑 Скрыть (палево)",
+                callback_data=f"prn:del:{tok}",
+            ),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _adult_preview_kb(tok: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📥 Скачать 480p", callback_data=f"prn:dl:{tok}:480"),
+            InlineKeyboardButton(text="🎬 Скачать 720p", callback_data=f"prn:dl:{tok}:720"),
+        ],
+        [
+            InlineKeyboardButton(text="🎧 Только звук", callback_data=f"prn:dl:{tok}:audio"),
+            InlineKeyboardButton(text="🎲 Другое видео", callback_data=f"prn:reroll:{tok}"),
+        ],
+        [
+            InlineKeyboardButton(text="🗑 Скрыть (палево)", callback_data=f"prn:del:{tok}"),
+        ],
+    ])
 
 
 async def _edit(status: types.Message, text: str, kb: InlineKeyboardMarkup | None = None, **kw) -> None:
     try:
-        await status.edit_text(text, reply_markup=kb, **kw)
+        if status.photo:
+            await status.edit_caption(caption=text, reply_markup=kb, **kw)
+        else:
+            await status.edit_text(text, reply_markup=kb, **kw)
     except Exception as e:
         if "not modified" not in str(e):
             logger.debug(f"status edit: {e}")
@@ -911,7 +1200,6 @@ async def _progress_ticker(status: types.Message, job: _Job, header: str, interv
 
 
 async def _wait_in_queue(job: _Job, status: types.Message, header: str) -> bool:
-    """Ждём слот, показывая позицию и ожидание. False — отменили, пока ждали."""
     if _QUEUE.submit(job):
         return True
     last = ""
@@ -954,7 +1242,6 @@ async def _probe_youtube(url: str) -> dict | None:
 
 
 def _quality_options(info: dict | None) -> list[dict]:
-    """[{tier, label, size}] — только варианты, которые реально влезут в лимиты. Последний — аудио."""
     if not info:
         return ([{"tier": h, "label": f"{h}p", "size": 0} for h in QUALITY_TIERS]
                 + [{"tier": "audio", "label": "🎧 Аудио", "size": 0}])
@@ -989,9 +1276,9 @@ def _quality_options(info: dict | None) -> list[dict]:
         size = v + a_size if v else 0
         parts = -(-size // PART_TARGET_BYTES) if size else 0
         if size and (size > MAX_TOTAL_BYTES or parts > MAX_PARTS):
-            continue                                   # не влезет — не предлагаем
+            continue
         out.append({"tier": tier, "label": f"{actual}p", "size": size})
-    if not out and not fmts:                           # нет данных о форматах — даём стандартный набор
+    if not out and not fmts:
         out = [{"tier": h, "label": f"{h}p", "size": 0} for h in QUALITY_TIERS]
     out.append({"tier": "audio", "label": "🎧 Аудио", "size": a_size})
     return out
@@ -1091,11 +1378,6 @@ async def callback_dl_cancel(callback: types.CallbackQuery):
 async def handle_media_link(message: types.Message, custom_url: str | None = None,
                             custom_platform: str | None = None, ask_quality: bool | None = None,
                             quality=None):
-    """
-    Основной хендлер: пользователь кинул ссылку →
-    определяем платформу → (YouTube: выбор качества) → очередь → скачиваем → отправляем.
-    Вызовы из других модулей (custom_url) качество не спрашивают — берут MAX_HEIGHT.
-    """
     text = custom_url or message.text or message.caption or ""
 
     if custom_platform and custom_url:
@@ -1104,7 +1386,7 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
         platform, url = detect_platform(text)
 
     if not platform or not url:
-        return  # не наша ссылка — пропускаем
+        return
 
     if ask_quality is None:
         ask_quality = custom_url is None
@@ -1116,12 +1398,58 @@ async def handle_media_link(message: types.Message, custom_url: str | None = Non
 
 async def _start_job(message: types.Message, platform: str, url: str, quality=None,
                      status: types.Message | None = None, est_bytes: int = 0,
-                     title: str = "", user_id: int | None = None):
+                     title: str = "", user_id: int | None = None,
+                     adult_meta: dict | None = None):
     emoji = PLATFORM_EMOJIS[platform]
     label = PLATFORM_LABELS[platform]
     uid = user_id if user_id is not None else (message.from_user.id if message.from_user else 0)
     is_bot = bool(message.from_user and message.from_user.is_bot)
+    is_adult = platform in ("pornhub", "xvideos") or bool(adult_meta)
     header = _job_header(emoji, label, quality, title)
+
+    # Улучшение 2: мгновенная отправка из SQLite кэша file_id, если видео уже скачивалось ранее
+    if is_adult:
+        cached = _get_adult_cached(url, quality)
+        if cached:
+            logger.info(f"⚡ 18+ cache hit for {url} ({quality})")
+            cap_parts = []
+            if cached.get("uploader"):
+                cap_parts.append(f"{emoji} *{_md_escape(cached['uploader'])}*")
+            if cached.get("title"):
+                cap_parts.append(f"_{_md_escape(cached['title'])}_")
+            dur_s = _fmt_duration(cached.get("duration") or 0)
+            if dur_s:
+                cap_parts.append(f"⏱ {dur_s}")
+            cap_parts.append(f"🔗 {label} · ⚡ из кэша")
+            cap = "\n".join(cap_parts)[:1000]
+
+            tok = _put_adult_session({
+                "query": (adult_meta or {}).get("query", ""),
+                "source": (adult_meta or {}).get("source", platform),
+                "url": url,
+                "platform": platform,
+                "title": cached.get("title", ""),
+                "user_id": uid,
+                "msg_ids": [],
+            })
+            fids = cached.get("file_ids") or []
+            kb = _adult_post_kb(tok, is_album=len(fids) > 1)
+            try:
+                sent_ids = await _send_from_cached_file_ids(
+                    message, cached, cap, has_spoiler=True, reply_markup=kb if len(fids) == 1 else None
+                )
+                if len(fids) > 1:
+                    ctrl = await message.answer("🔞 Управление 18+ альбомом:", reply_markup=kb)
+                    sent_ids.append(ctrl.message_id)
+                _ADULT_SESSIONS[tok]["msg_ids"] = sent_ids
+                if status:
+                    try:
+                        await status.delete()
+                    except Exception:
+                        pass
+                return
+            except Exception as e:
+                logger.warning(f"Кэш file_id устарел, качаю заново: {e}")
 
     async def _say(text: str):
         nonlocal status
@@ -1148,7 +1476,7 @@ async def _start_job(message: types.Message, platform: str, url: str, quality=No
         if not await _wait_in_queue(job, status, header):
             await _edit(status, "❌ Загрузка отменена.")
             return
-        await _process(message, platform, url, quality, status, job, header, title)
+        await _process(message, platform, url, quality, status, job, header, title, adult_meta=adult_meta)
     except Exception as e:
         logger.exception(f"media job error: {e}")
         await _edit(status, f"❌ Что-то пошло не так.\n{str(e)[:200]}")
@@ -1157,24 +1485,36 @@ async def _start_job(message: types.Message, platform: str, url: str, quality=No
         _QUEUE.release(job)
 
 
-async def _send_audio_result(message: types.Message, status: types.Message, filepath: str,
-                             info: dict, header: str) -> None:
+async def _send_audio_result(
+    message: types.Message,
+    status: types.Message,
+    filepath: str,
+    info: dict,
+    header: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> tuple[list[str], list[int]]:
     title = (info.get("title") or "audio")[:60]
     performer = (info.get("uploader") or "")[:60]
     duration = int(info.get("duration") or 0)
     safe = re.sub(r'[\\/:*?"<>|]+', "_", title).strip() or "audio"
+    fids: list[str] = []
+    msg_ids: list[int] = []
 
-    async def _send(path: str, fname: str, caption: str | None, dur: int | None):
-        kw = dict(caption=caption, title=title, performer=performer or None, duration=dur)
+    async def _send(path: str, fname: str, caption: str | None, dur: int | None, kb=None):
+        kw = dict(caption=caption, title=title, performer=performer or None, duration=dur, reply_markup=kb)
         f = FSInputFile(path, filename=fname)
         try:
-            await message.bot.send_audio(message.chat.id, f, request_timeout=600, **kw)
-        except TypeError:       # старый aiogram без request_timeout
-            await message.bot.send_audio(message.chat.id, f, **kw)
+            s = await message.bot.send_audio(message.chat.id, f, request_timeout=600, **kw)
+        except TypeError:
+            s = await message.bot.send_audio(message.chat.id, f, **kw)
+        if s:
+            msg_ids.append(s.message_id)
+            if s.audio:
+                fids.append(s.audio.file_id)
 
     if os.path.getsize(filepath) <= MAX_VIDEO_BYTES:
         await _edit(status, f"{header}\n📤 Загружаю в Telegram…")
-        await _send(filepath, f"{safe}.m4a", f"🎧 {title}"[:1000], duration or None)
+        await _send(filepath, f"{safe}.m4a", f"🎧 {title}"[:1000], duration or None, kb=reply_markup)
     else:
         await _edit(status, f"{header}\n✂️ Файл {_fmt_size(os.path.getsize(filepath))} — режу на части…")
         parts = await _split_video(filepath, info.get("_tmp_dir") or os.path.dirname(filepath), duration, audio=True)
@@ -1183,21 +1523,23 @@ async def _send_audio_result(message: types.Message, status: types.Message, file
         n = len(parts)
         for i, fp in enumerate(parts, 1):
             await _edit(status, f"{header}\n📤 Загружаю в Telegram: {i}/{n} частей")
-            await _send(fp, f"{safe}_part{i:02d}.m4a", f"🎧 {title}\n✂️ Часть {i}/{n}"[:1000], None)
+            await _send(fp, f"{safe}_part{i:02d}.m4a", f"🎧 {title}\n✂️ Часть {i}/{n}"[:1000], None,
+                        kb=reply_markup if i == n else None)
             await asyncio.sleep(0.5)
     try:
         await status.delete()
     except Exception:
         pass
+    return fids, msg_ids
 
 
 async def _process(message: types.Message, platform: str, url: str, quality, status: types.Message,
-                   job: _Job, header: str, title_hint: str = ""):
+                   job: _Job, header: str, title_hint: str = "", adult_meta: dict | None = None):
     """Скачивание → отправка. Выполняется, пока задача держит слот очереди."""
     emoji = PLATFORM_EMOJIS[platform]
     label = PLATFORM_LABELS[platform]
+    is_adult = platform in ("pornhub", "xvideos") or bool(adult_meta)
 
-    # защита диска хостинга
     try:
         free = shutil.disk_usage(tempfile.gettempdir()).free
     except Exception:
@@ -1223,28 +1565,25 @@ async def _process(message: types.Message, platform: str, url: str, quality, sta
         await _edit(status, "❌ Загрузка отменена.")
         return
 
-    # ── Threads: пост только с текстом ────────────────────────────
     if info.get("_text_only"):
         job.ok = True
         who = f"*{_md_escape(info.get('uploader', ''))}*\n" if info.get("uploader") else ""
         body = _md_escape(info.get("title", ""))[:3500]
         try:
-            await status.edit_text(f"{emoji} {who}{body}\n\n_В посте нет фото/видео — прислал текст_",
-                                   parse_mode="Markdown", disable_web_page_preview=True)
+            await _edit(status, f"{emoji} {who}{body}\n\n_В посте нет фото/видео — прислал текст_",
+                        parse_mode="Markdown", disable_web_page_preview=True)
         except Exception:
-            await status.edit_text(f"{emoji} {info.get('uploader', '')}\n{info.get('title', '')}")
+            await _edit(status, f"{emoji} {info.get('uploader', '')}\n{info.get('title', '')}")
         return
 
-    # ── Ошибки ────────────────────────────────────────────────────
     if not filepath:
         err_msg = _make_error_message(info, label, url)
         try:
-            await status.edit_text(err_msg, parse_mode="Markdown", disable_web_page_preview=True)
+            await _edit(status, err_msg, parse_mode="Markdown", disable_web_page_preview=True)
         except Exception:
-            await message.answer(err_msg, parse_mode="Markdown")
+            await message.answer(err_msg)
         return
 
-    # ── Успех: отправляем медиа ───────────────────────────────────
     title    = info.get("title", "")[:100]
     uploader = info.get("uploader", "")[:60]
     duration = info.get("duration", 0)
@@ -1263,14 +1602,32 @@ async def _process(message: types.Message, platform: str, url: str, quality, sta
     caption_parts.append(f"🔗 {label}")
     caption = "\n".join(caption_parts)[:1000]
 
-    try:
-        await status.edit_text(f"{emoji} Загружаю в Telegram...", parse_mode="Markdown")
-    except Exception:
-        pass
+    # Готовим интерактивные кнопки для 18+ видео (Улучшения 1 и 4)
+    adult_tok = None
+    post_kb = None
+    if is_adult:
+        adult_tok = _put_adult_session({
+            "query": (adult_meta or {}).get("query", ""),
+            "source": (adult_meta or {}).get("source", platform),
+            "url": url,
+            "platform": platform,
+            "title": title,
+            "user_id": job.user_id,
+            "msg_ids": [],
+        })
+        post_kb = _adult_post_kb(adult_tok, is_album=False)
+
+    await _edit(status, f"{emoji} Загружаю в Telegram...")
 
     if info.get("is_audio"):
         try:
-            await _send_audio_result(message, status, filepath, info, header)
+            fids, msg_ids = await _send_audio_result(
+                message, status, filepath, info, header, reply_markup=post_kb
+            )
+            if is_adult and fids:
+                _save_adult_cached(url, quality, fids, info)
+                if adult_tok:
+                    _ADULT_SESSIONS[adult_tok]["msg_ids"] = msg_ids
             job.ok = True
         except Exception as e:
             logger.error(f"audio send error: {e}")
@@ -1279,25 +1636,24 @@ async def _process(message: types.Message, platform: str, url: str, quality, sta
             _cleanup(filepath, info)
         return
 
-    # Карусель (Threads): отправляем альбомом
     if info.get("_album"):
-        from aiogram.types import InputMediaPhoto, InputMediaVideo
         media = []
         for i, (pth, typ) in enumerate(info["_album"][:10]):
             if os.path.getsize(pth) > MAX_VIDEO_BYTES:
                 continue
             cls = InputMediaVideo if typ == "video" else InputMediaPhoto
             media.append(cls(media=FSInputFile(pth), caption=caption if i == 0 else None,
-                             parse_mode="Markdown" if i == 0 else None))
+                             parse_mode="Markdown" if i == 0 else None,
+                             has_spoiler=is_adult))
         try:
             if len(media) > 1:
                 await message.bot.send_media_group(message.chat.id, media)
             elif media:
                 m0 = media[0]
                 if isinstance(m0, InputMediaVideo):
-                    await message.answer_video(m0.media, caption=caption, parse_mode="Markdown")
+                    await message.answer_video(m0.media, caption=caption, parse_mode="Markdown", has_spoiler=is_adult)
                 else:
-                    await message.answer_photo(m0.media, caption=caption, parse_mode="Markdown")
+                    await message.answer_photo(m0.media, caption=caption, parse_mode="Markdown", has_spoiler=is_adult)
             else:
                 raise ValueError("все файлы больше лимита")
             job.ok = True
@@ -1307,39 +1663,44 @@ async def _process(message: types.Message, platform: str, url: str, quality, sta
                 pass
         except Exception as e:
             logger.error(f"album send error: {e}")
-            try:
-                await status.edit_text(f"❌ Не удалось отправить альбом.\n`{str(e)[:200]}`", parse_mode="Markdown")
-            except Exception:
-                pass
+            await _edit(status, f"❌ Не удалось отправить альбом.\n`{str(e)[:200]}`", parse_mode="Markdown")
         finally:
             _cleanup(filepath, info)
         return
 
-    # Большое видео: режем на части ≤ лимита Telegram без потери качества
+    # Большое видео (> 50 МБ): режем на части и собираем в единый альбом (Улучшение 8)
     if not is_photo and os.path.getsize(filepath) > MAX_VIDEO_BYTES:
         size_mb = os.path.getsize(filepath) / 1024 / 1024
-        try:
-            await status.edit_text(f"✂️ Файл {size_mb:.0f} МБ — режу на части без потери качества…")
-        except Exception:
-            pass
+        await _edit(status, f"✂️ Файл {size_mb:.0f} МБ — режу на части без потери качества…")
         parts = await _split_video(filepath, info.get("_tmp_dir") or os.path.dirname(filepath), duration)
         if not parts:
-            try:
-                await status.edit_text(
-                    f"❌ Не удалось нарезать ({size_mb:.0f} МБ, максимум частей: {MAX_PARTS}).\n\n"
-                    f"🔗 Оригинал: {url}", disable_web_page_preview=True)
-            except Exception:
-                pass
+            await _edit(
+                status,
+                f"❌ Не удалось нарезать ({size_mb:.0f} МБ, максимум частей: {MAX_PARTS}).\n\n"
+                f"🔗 Оригинал: {url}",
+                disable_web_page_preview=True,
+            )
             _cleanup(filepath, info)
             return
-        try:
-            await status.edit_text(f"{emoji} Загружаю {len(parts)} частей в Telegram…")
-        except Exception:
-            pass
+        await _edit(status, f"{emoji} Загружаю и собираю альбом ({len(parts)} частей)…")
         try:
             async def _pcb(done, total):
                 await _edit(status, f"{header}\n📤 Загружаю в Telegram: {done}/{total} частей")
-            await _send_video_parts(message, parts, caption, width, height, progress_cb=_pcb)
+
+            fids, sent_ids = await _send_video_parts(
+                message, parts, caption, width, height,
+                progress_cb=_pcb, has_spoiler=is_adult,
+            )
+            if is_adult:
+                if fids:
+                    _save_adult_cached(url, quality, fids, info)
+                if adult_tok:
+                    ctrl = await message.answer(
+                        "🔞 Управление 18+ альбомом:",
+                        reply_markup=_adult_post_kb(adult_tok, is_album=True),
+                    )
+                    sent_ids.append(ctrl.message_id)
+                    _ADULT_SESSIONS[adult_tok]["msg_ids"] = sent_ids
             job.ok = True
             try:
                 await status.delete()
@@ -1347,27 +1708,28 @@ async def _process(message: types.Message, platform: str, url: str, quality, sta
                 pass
         except Exception as e:
             logger.error(f"send parts error: {e}")
-            try:
-                await status.edit_text(f"❌ Не удалось отправить части.\n`{str(e)[:200]}`",
-                                       parse_mode="Markdown")
-            except Exception:
-                pass
+            await _edit(status, f"❌ Не удалось отправить части.\n`{str(e)[:200]}`", parse_mode="Markdown")
         finally:
             _cleanup(filepath, info)
         return
 
+    # Одиночное видео до 50 МБ (Улучшения 1, 2, 4)
     try:
         if is_photo:
             with open(filepath, "rb") as f:
                 data = f.read()
-            await message.answer_photo(
+            sent = await message.answer_photo(
                 BufferedInputFile(data, filename="photo.jpg"),
                 caption=caption,
                 parse_mode="Markdown",
+                has_spoiler=is_adult,
+                reply_markup=post_kb,
             )
+            if is_adult and adult_tok and sent:
+                _ADULT_SESSIONS[adult_tok]["msg_ids"] = [sent.message_id]
         else:
             video_file = FSInputFile(filepath, filename="video.mp4")
-            await message.answer_video(
+            sent = await message.answer_video(
                 video_file,
                 caption=caption,
                 parse_mode="Markdown",
@@ -1375,7 +1737,13 @@ async def _process(message: types.Message, platform: str, url: str, quality, sta
                 height=height or None,
                 duration=int(duration) if duration else None,
                 supports_streaming=True,
+                has_spoiler=is_adult,
+                reply_markup=post_kb,
             )
+            if is_adult and sent and sent.video:
+                _save_adult_cached(url, quality, [sent.video.file_id], info)
+                if adult_tok:
+                    _ADULT_SESSIONS[adult_tok]["msg_ids"] = [sent.message_id]
 
         job.ok = True
         try:
@@ -1388,23 +1756,15 @@ async def _process(message: types.Message, platform: str, url: str, quality, sta
         logger.error(f"Telegram send error: {e}")
 
         if "file is too big" in err_str.lower() or "request entity too large" in err_str.lower():
-            try:
-                await status.edit_text(
-                    f"❌ Файл слишком большой для Telegram.\n"
-                    f"Лимит одного файла: {MAX_VIDEO_MB} МБ\n\n"
-                    f"🔗 Оригинал: {url}",
-                    disable_web_page_preview=True
-                )
-            except Exception:
-                pass
+            await _edit(
+                status,
+                f"❌ Файл слишком большой для Telegram.\n"
+                f"Лимит одного файла: {MAX_VIDEO_MB} МБ\n\n"
+                f"🔗 Оригинал: {url}",
+                disable_web_page_preview=True,
+            )
         else:
-            try:
-                await status.edit_text(
-                    f"❌ Не удалось отправить медиа.\n`{err_str[:200]}`",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
+            await _edit(status, f"❌ Не удалось отправить медиа.\n`{err_str[:200]}`", parse_mode="Markdown")
     finally:
         _cleanup(filepath, info)
 
@@ -1425,11 +1785,12 @@ async def cmd_dl(message: types.Message):
             "📌 Pinterest (пины-картинки и видео)\n"
             "🟦 VK Видео и Клипы\n"
             "🟣 Twitch-клипы\n"
-            "🧵 Threads (фото, видео, карусели)\n\n"
+            "🧵 Threads (фото, видео, карусели)\n"
+            "🔞 Pornhub / XVideos (по ссылке или `/pron`)\n\n"
             "Просто скинь ссылку в чат — бот сам скачает!\n"
             "Или: `/dl <ссылка>`\n\n"
             f"⚠️ Лимит файла в Telegram — {MAX_VIDEO_MB} МБ: большие видео (до {MAX_TOTAL_MB} МБ) "
-            f"бот режет на части без потери качества",
+            f"бот режет на части без потери качества и собирает в альбом",
             parse_mode="Markdown"
         )
         return
@@ -1441,14 +1802,454 @@ async def cmd_dl(message: types.Message):
         platform = "youtube"
         matched_url = url
 
-    # Вызываем функцию напрямую без модификации объекта message
     await handle_media_link(message, custom_url=matched_url, custom_platform=platform, ask_quality=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# УЛУЧШЕНИЯ 1, 3, 4, 5, 10: 18+ ПОИСК, ПЕРЕВОД GEMINI, ЗЕРКАЛА И ПРЕВЬЮ-КАРТОЧКА
+# ══════════════════════════════════════════════════════════════════════════════
+
+_DEFAULT_ADULT_TAGS = [
+    "amateur", "solo", "pov", "cosplay", "hentai",
+    "latina", "asian", "blonde", "redhead", "milf",
+]
+
+_PORNHUB_MIRRORS = [
+    "https://www.pornhub.com",
+    "https://rt.pornhub.com",
+    "https://www.pornhub.org",
+]
+
+_XVIDEOS_MIRRORS = [
+    ("https://www.xvideos.com", r'href=["\'](/video[a-zA-Z0-9._-]+/[^"\'>\s]+)["\']'),
+    ("https://xv-ru.com",       r'href=["\'](/video[a-zA-Z0-9._-]+/[^"\'>\s]+)["\']'),
+    ("https://www.xnxx.com",    r'href=["\'](/video-[a-zA-Z0-9._-]+/[^"\'>\s]+)["\']'),
+]
+
+
+# Улучшение 5: авто-перевод русских запросов в английские теги через Gemini
+async def _translate_adult_query(query: str) -> str:
+    q = (query or "").strip()
+    if not q or not re.search(r"[А-Яа-яЁё]", q):
+        return q
+    try:
+        from ai_handlers import get_gemini
+        client = get_gemini()
+        if not client:
+            return q
+        prompt = (
+            "Translate the following Russian search query into 2-4 concise English search keywords "
+            "suitable for a video tube search engine. Return ONLY the English keywords separated by spaces, "
+            f"no quotes, no explanation: {q}"
+        )
+        resp = await client.aio.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        tr = re.sub(r"[^a-zA-Z0-9\s-]", " ", (resp.text or "")).strip()
+        if len(tr) >= 2:
+            logger.info(f"🌐 Adult query translated: {q!r} -> {tr!r}")
+            return tr[:80]
+    except Exception as e:
+        logger.debug(f"adult query translate fallback: {e}")
+    return q
+
+
+# Улучшение 10: резервный поиск через внутренний экстрактор yt-dlp (phsearch)
+async def _ytdlp_phsearch(query: str, max_results: int = 15) -> list[dict]:
+    try:
+        import yt_dlp
+    except ImportError:
+        return []
+
+    def _run():
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,
+            "skip_download": True,
+            "socket_timeout": 15,
+            "age_limit": 99,
+        }
+        if ADULT_PROXY:
+            opts["proxy"] = ADULT_PROXY
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(f"phsearch{max_results}:{query}", download=False)
+
+    try:
+        info = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, _run), timeout=25)
+        entries = (info or {}).get("entries") or []
+        out = []
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("url"):
+                continue
+            dur = int(e.get("duration") or 0)
+            if dur and dur > 2700:
+                continue
+            thumbs = e.get("thumbnails") or []
+            thumb = e.get("thumbnail") or (thumbs[-1].get("url") if thumbs else "")
+            out.append({
+                "platform": "pornhub",
+                "url": e["url"],
+                "title": e.get("title") or query,
+                "duration": dur,
+                "thumb": thumb or "",
+                "uploader": e.get("uploader") or "",
+            })
+        return out
+    except Exception as e:
+        logger.info(f"yt-dlp phsearch fallback failed: {e}")
+        return []
+
+
+async def _pick_random_adult_item(query: str = "", source: str = "any") -> dict | None:
+    """
+    Улучшение 10: Ищет случайный ролик с метаданными (url, title, duration, thumb, platform)
+    через цепочку фоллбэков:
+      1) Pornhub Webmasters JSON API (с ротацией зеркал)
+      2) yt-dlp phsearch экстрактор
+      3) HTML-поиск по зеркалам Pornhub
+      4) HTML-поиск по зеркалам XVideos / XNXX + догрузка og:title / og:image
+    """
+    raw_q = (query or "").strip()
+    translated_q = await _translate_adult_query(raw_q) if raw_q else random.choice(_DEFAULT_ADULT_TAGS)
+    enc_q = urllib.parse.quote_plus(translated_q)
+
+    sources = ["pornhub", "xvideos"] if source not in ("pornhub", "xvideos") else [source]
+    random.shuffle(sources)
+
+    headers = {
+        "User-Agent": _BROWSER_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cookie": "age_verified=1; accessAgeDisclaimerPH=1",
+    }
+
+    for src in sources:
+        if src == "pornhub":
+            # А. Официальный JSON API по всем зеркалам Pornhub
+            for mirror in _PORNHUB_MIRRORS:
+                api_url = (
+                    f"{mirror}/webmasters/search"
+                    f"?search={enc_q}&ordering=mostviewed&period=weekly&thumbsize=large"
+                )
+                try:
+                    async with aiohttp.ClientSession(headers=headers) as s:
+                        async with s.get(api_url, proxy=ADULT_PROXY, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                            if r.status == 200:
+                                data = await r.json(content_type=None)
+                                videos = []
+                                for v in (data.get("videos") or []):
+                                    if not v.get("url"):
+                                        continue
+                                    # duration в API бывает строкой "12:34" или числом секунд
+                                    d_raw = str(v.get("duration") or "0")
+                                    if ":" in d_raw:
+                                        parts = [int(x) for x in d_raw.split(":") if x.isdigit()]
+                                        dur_s = parts[0] * 60 + parts[1] if len(parts) == 2 else 0
+                                    else:
+                                        dur_s = int(d_raw) if d_raw.isdigit() else 0
+                                    if dur_s <= 2700:
+                                        videos.append((v, dur_s))
+                                if videos:
+                                    chosen, dur_s = random.choice(videos[:25])
+                                    return {
+                                        "platform": "pornhub",
+                                        "url": chosen["url"],
+                                        "title": chosen.get("title") or translated_q,
+                                        "duration": dur_s,
+                                        "thumb": chosen.get("default_thumb") or chosen.get("thumb") or "",
+                                        "uploader": "",
+                                        "query": raw_q or translated_q,
+                                    }
+                except Exception as e:
+                    logger.debug(f"Pornhub API mirror {mirror} error: {e}")
+
+            # Б. Встроенный экстрактор yt-dlp phsearch
+            ph_items = await _ytdlp_phsearch(translated_q, max_results=15)
+            if ph_items:
+                chosen = random.choice(ph_items)
+                chosen["query"] = raw_q or translated_q
+                return chosen
+
+            # В. Парсинг HTML-страницы поиска по зеркалам Pornhub
+            for mirror in _PORNHUB_MIRRORS:
+                search_url = f"{mirror}/video/search?search={enc_q}"
+                page, _ = await _http_text(search_url, proxy=ADULT_PROXY)
+                keys = list(dict.fromkeys(re.findall(r'viewkey=([a-zA-Z0-9]+)', page)))
+                if keys:
+                    chosen_key = random.choice(keys[:25])
+                    v_url = f"https://www.pornhub.com/view_video.php?viewkey={chosen_key}"
+                    v_page, _ = await _http_text(v_url, proxy=ADULT_PROXY)
+                    return {
+                        "platform": "pornhub",
+                        "url": v_url,
+                        "title": _meta(v_page, "og:title") or translated_q,
+                        "duration": 0,
+                        "thumb": _meta(v_page, "og:image") or "",
+                        "uploader": "",
+                        "query": raw_q or translated_q,
+                    }
+
+        if src == "xvideos":
+            # Ротация зеркал XVideos / XNXX
+            page_num = random.randint(0, 2)
+            for mirror, rx in _XVIDEOS_MIRRORS:
+                search_url = (
+                    f"{mirror}/search/{enc_q}/{page_num}"
+                    if "xnxx" in mirror
+                    else f"{mirror}/?k={enc_q}&p={page_num}"
+                )
+                page, _ = await _http_text(search_url, proxy=ADULT_PROXY)
+                paths = list(dict.fromkeys(re.findall(rx, page)))
+                if paths:
+                    chosen_path = random.choice(paths[:25])
+                    v_url = f"{mirror}{chosen_path}"
+                    v_page, _ = await _http_text(v_url, proxy=ADULT_PROXY)
+                    return {
+                        "platform": "xvideos",
+                        "url": v_url,
+                        "title": _meta(v_page, "og:title") or translated_q,
+                        "duration": 0,
+                        "thumb": _meta(v_page, "og:image") or "",
+                        "uploader": "",
+                        "query": raw_q or translated_q,
+                    }
+
+    return None
+
+
+def _format_preview_caption(item: dict) -> str:
+    label = PLATFORM_LABELS.get(item["platform"], "18+")
+    title = _md_escape(item.get("title") or "Случайное видео")[:140]
+    dur = _fmt_duration(item.get("duration") or 0)
+    q = _md_escape(item.get("query") or "")
+    lines = [
+        f"🔞 *{label} — Предпросмотр*",
+        f"🎬 _{title}_",
+    ]
+    if dur:
+        lines.append(f"⏱ Длительность: `{dur}`")
+    if q:
+        lines.append(f"🏷 Тег: `{q}`")
+    lines.append("\nВыбери качество для скачивания или нажми «🎲 Другое видео»:")
+    return "\n".join(lines)
+
+
+async def send_random_adult_video(
+    message: types.Message,
+    query: str = "",
+    source: str = "any",
+    quality: int = 480,
+    preview: bool = False,
+    edit_target: types.Message | None = None,
+) -> bool:
+    """
+    Улучшения 1, 2, 3, 4, 5, 8, 10:
+    - Если preview=True: показывает карточку с постером (под спойлером!) и кнопками
+      «Скачать 480p / 720p / Только звук / Другое видео / Скрыть».
+    - Если preview=False: сразу скачивает (или достаёт из SQLite кэша file_id) и отправляет
+      видео под спойлером, а при весе > 50 МБ режет и собирает в единый альбом.
+    """
+    status = edit_target or await message.answer("🔞 Ищу подходящее видео…")
+    item = await _pick_random_adult_item(query=query, source=source)
+
+    if not item or not item.get("url"):
+        await _edit(
+            status,
+            "❌ Не удалось получить видео с серверов Pornhub / XVideos.\n"
+            "Если сервер BotHost блокирует доступ — задай переменную окружения `ADULT_PROXY`."
+        )
+        return False
+
+    uid = message.from_user.id if message.from_user else 0
+    adult_meta = {"query": item.get("query") or query, "source": source}
+
+    # Улучшение 3: Режим карточки предпросмотра перед скачиванием
+    if preview:
+        tok = _put_adult_session({
+            "query": adult_meta["query"],
+            "source": source,
+            "url": item["url"],
+            "platform": item["platform"],
+            "title": item.get("title") or "",
+            "user_id": uid,
+            "message": message,
+            "msg_ids": [status.message_id],
+        })
+        cap = _format_preview_caption(item)
+        kb = _adult_preview_kb(tok)
+        thumb_bytes = await _download_image_bytes(item["thumb"]) if item.get("thumb") else None
+
+        if thumb_bytes:
+            try:
+                if status.photo:
+                    media = InputMediaPhoto(
+                        media=BufferedInputFile(thumb_bytes, filename="preview.jpg"),
+                        caption=cap,
+                        parse_mode="Markdown",
+                        has_spoiler=True,
+                    )
+                    await status.edit_media(media=media, reply_markup=kb)
+                else:
+                    sent = await message.answer_photo(
+                        BufferedInputFile(thumb_bytes, filename="preview.jpg"),
+                        caption=cap,
+                        parse_mode="Markdown",
+                        has_spoiler=True,
+                        reply_markup=kb,
+                    )
+                    _ADULT_SESSIONS[tok]["msg_ids"] = [sent.message_id]
+                    try:
+                        await status.delete()
+                    except Exception:
+                        pass
+                return True
+            except Exception as e:
+                logger.debug(f"preview photo fallback to text: {e}")
+
+        await _edit(status, cap, kb, parse_mode="Markdown")
+        return True
+
+    # Прямое скачивание медиафайла (с кэшем file_id, спойлером и авто-альбомом)
+    await _start_job(
+        message=message,
+        platform=item["platform"],
+        url=item["url"],
+        quality=quality,
+        status=status,
+        title=item.get("title") or "",
+        user_id=uid,
+        adult_meta=adult_meta,
+    )
+    return True
+
+
+async def callback_adult_action(callback: types.CallbackQuery):
+    """
+    Обработчик всех кнопок 18+ модуля (prn:<action>:<tok>[:<arg>]):
+      - prn:dl:<tok>:480 / 720 / audio — скачать выбранное видео
+      - prn:reroll:<tok>               — показать превью другого случайного ролика
+      - prn:more:<tok>                 — сразу скачать ещё одно видео по тому же тегу
+      - prn:del:<tok>                  — удалить видео/альбом/превью («палево»)
+    """
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+
+    action, tok = parts[1], parts[2]
+    arg = parts[3] if len(parts) > 3 else ""
+    sess = _ADULT_SESSIONS.get(tok)
+
+    if action == "del":
+        await callback.answer("🗑 Удаляю…")
+        msg_ids = list((sess or {}).get("msg_ids") or [])
+        if callback.message and callback.message.message_id not in msg_ids:
+            msg_ids.append(callback.message.message_id)
+        for mid in msg_ids:
+            try:
+                await callback.bot.delete_message(callback.message.chat.id, mid)
+            except Exception:
+                pass
+        _ADULT_SESSIONS.pop(tok, None)
+        return
+
+    if not sess:
+        await callback.answer("Карточка устарела — вызови /pron заново", show_alert=True)
+        return
+
+    if action == "reroll":
+        await callback.answer("🎲 Ищу другое видео…")
+        target_msg = callback.message if (callback.message and not callback.message.video) else None
+        await send_random_adult_video(
+            callback.message,
+            query=sess.get("query", ""),
+            source=sess.get("source", "any"),
+            preview=True,
+            edit_target=target_msg,
+        )
+        return
+
+    if action == "more":
+        await callback.answer("🔞 Качаю ещё по этой теме…")
+        await send_random_adult_video(
+            callback.message,
+            query=sess.get("query", ""),
+            source=sess.get("source", "any"),
+            quality=480,
+            preview=False,
+        )
+        return
+
+    if action == "dl":
+        quality = "audio" if arg == "audio" else int(arg or 480)
+        await callback.answer(f"📥 Запускаю загрузку ({arg})…")
+        # Если нажали «Скачать» на карточке с фото — удаляем постер и создаём текстовый статус прогресса
+        status_msg = callback.message
+        if status_msg and (status_msg.photo or status_msg.video):
+            if status_msg.photo:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+            status_msg = None
+        await _start_job(
+            message=callback.message,
+            platform=sess["platform"],
+            url=sess["url"],
+            quality=quality,
+            status=status_msg,
+            title=sess.get("title", ""),
+            user_id=callback.from_user.id,
+            adult_meta={"query": sess.get("query", ""), "source": sess.get("source", "any")},
+        )
+
+
+async def cmd_pron(message: types.Message):
+    """
+    /pron [запрос] или /xxx [запрос] — случайное 18+ видео с Pornhub / XVideos.
+    Режимы:
+      • /pron [тег]          — сразу скачивает и кидает видео со спойлером (по умолчанию)
+      • /pron preview [тег]  — сначала карточка предпросмотра с выбором 480p / 720p / Другое
+      • /pron ph [тег]       — только с Pornhub
+      • /pron xv [тег]       — только с XVideos
+      • Понимает русские запросы (переводит через Gemini автоматически).
+    """
+    args = (message.text or "").split(maxsplit=1)
+    raw = args[1].strip() if len(args) > 1 else ""
+
+    preview = False
+    source = "any"
+
+    tokens = raw.split()
+    while tokens:
+        head = tokens[0].lower()
+        if head in ("preview", "превью", "card", "выбор"):
+            preview = True
+            tokens.pop(0)
+        elif head in ("go", "direct", "сразу"):
+            preview = False
+            tokens.pop(0)
+        elif head in ("ph", "pornhub"):
+            source = "pornhub"
+            tokens.pop(0)
+        elif head in ("xv", "xvideos", "xnxx"):
+            source = "xvideos"
+            tokens.pop(0)
+        else:
+            break
+
+    clean_query = " ".join(tokens).strip()
+    await send_random_adult_video(
+        message,
+        query=clean_query,
+        source=source,
+        quality=480,
+        preview=preview,
+    )
+
 
 # ── РЕГИСТРАЦИЯ ───────────────────────────────────────────────────────────────
 
 def cleanup_stale_tmp(max_age_s: int = 7200) -> None:
     """Удаляем «осиротевшие» папки tgdl_* (после падений/рестартов), чтобы не забивать диск хостинга."""
-    import glob
     now = time.time()
     for d in glob.glob(os.path.join(tempfile.gettempdir(), "tgdl_*")):
         try:
@@ -1462,13 +2263,15 @@ def register_media_handlers(dp: Dispatcher):
     """Зарегистрировать хендлеры скачивания медиа."""
     from aiogram.filters import Command
 
+    _init_adult_cache_table()
     dp.message.register(cmd_dl, Command("dl"))
+    dp.message.register(cmd_pron, Command("pron", "xxx"))
     dp.callback_query.register(callback_dl_quality, F.data.startswith("dlq:"))
     dp.callback_query.register(callback_dl_cancel, F.data.startswith("dlx:"))
+    dp.callback_query.register(callback_adult_action, F.data.startswith("prn:"))
     cleanup_stale_tmp()
 
     # Перехватываем текстовые сообщения со ссылками
-    # Регистрируем ДО общего handle_ai_chat, чтобы ссылки не уходили в AI
     dp.message.register(
         handle_media_link,
         F.text.regexp(
@@ -1481,9 +2284,11 @@ def register_media_handlers(dp: Dispatcher):
             r"(?:[a-z]{2,3}\.|www\.)?pinterest\.[a-z.]{2,6}/pin/|pin\.it/|"
             r"(?:www\.|m\.)?(?:vk\.com|vk\.ru|vkvideo\.ru)/(?:video|clip)-?\d+_\d+|"
             r"clips\.twitch\.tv/|(?:www\.|m\.)?twitch\.tv/\w+/clip/|"
-            r"(?:www\.)?threads\.(?:net|com)/"
+            r"(?:www\.)?threads\.(?:net|com)/|"
+            r"(?:[a-z]{2,3}\.|www\.)?pornhub\.(?:com|org)/view_video\.php|"
+            r"(?:www\.)?(?:xvideos\.com/video|xv-ru\.com/video|xnxx\.com/video-)"
             r")"
         )
     )
 
-    logger.info("✅ Media downloader хендлеры зарегистрированы (/dl + ссылки)")
+    logger.info("✅ Media downloader хендлеры зарегистрированы (/dl, /pron, /xxx + 18+ кэш/альбомы/превью)")
