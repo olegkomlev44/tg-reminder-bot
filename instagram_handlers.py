@@ -61,6 +61,9 @@ from instagram_viewer import (
     ig_cache_get, ig_cache_put, ig_cache_drop, ig_get_filter, ig_set_filter,
     search_accounts, reset_notfound_cache, clear_profile_caches,
     get_lookup_stats, cached_usernames, get_recent_events,
+    ig_follow_rows, ig_follow_state, ig_follow_logins, ig_like_get, ig_bm_has, ig_bm_count, ig_bm_list, ig_bm_del,
+    ig_all_subscriptions as _ig_all_subs_for_follow,
+    follow_user, unfollow_user, refresh_pending_follows, like_toggle, bookmark_toggle,
 )
 
 logger = logging.getLogger(__name__)
@@ -709,6 +712,10 @@ def _profile_keyboard(ig_username: str, user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🌟 Хайлайты", callback_data=f"ig_hl:{ig_username}"),
         ],
         [
+            InlineKeyboardButton(text=_follow_label(ig_username), callback_data=f"ig_fl:{ig_username}"),
+            InlineKeyboardButton(text="🔖 Закладки", callback_data="ig_bml:0"),
+        ],
+        [
             InlineKeyboardButton(text="🖼 Скачать аватарку", callback_data=f"ig_avdl:{ig_username}"),
             InlineKeyboardButton(text="📋 Мои подписки", callback_data="ig_my_subs"),
         ],
@@ -733,9 +740,17 @@ def _stories_keyboard(ig_username: str, user_id: int) -> InlineKeyboardMarkup:
 
 def _posts_keyboard(
     ig_username: str, user_id: int, next_cursor: str, has_more: bool,
-    carousels: list | None = None,
+    carousels: list | None = None, acts: list | None = None,
 ) -> InlineKeyboardMarkup:
     buttons = []
+    if acts:                                   # ❤️ лайк и 📑 закладка по номеру поста в ленте
+        lk = [InlineKeyboardButton(text=f"{'❤️' if ig_like_get(sc) else '🤍'}{n}",
+                                   callback_data=f"ig_lk:{sc}:{ig_username}") for n, sc in acts if sc]
+        bm = [InlineKeyboardButton(text=f"{'🔖' if ig_bm_has(str(user_id), sc) else '📑'}{n}",
+                                   callback_data=f"ig_bm:{sc}:{ig_username}") for n, sc in acts if sc]
+        for grp in (lk, bm):
+            for i in range(0, len(grp), 5):
+                buttons.append(grp[i:i + 5])
     # «🗂 Пост #3 (10 слайдов)» — по клику выгружаем все слайды альбомом
     row = []
     for num, sc, n in (carousels or [])[:12]:
@@ -1206,8 +1221,11 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         pass
 
     if result.get("private"):
+        _fs = ig_follow_state(ig_username)
+        _hint = ("⏳ заявка уже отправлена — жду одобрения." if _fs == "pending"
+                 else "Нажми «➕ Подписать бота» — бот отправит заявку, а после одобрения посты и истории откроются.")
         await callback.message.answer(
-            f"🔒 Профиль *@{_mdu(ig_username)}* приватный — посты недоступны.",
+            f"🔒 Профиль *@{_mdu(ig_username)}* приватный — посты недоступны.\n_{_hint}_",
             parse_mode="Markdown",
             reply_markup=_profile_keyboard(ig_username, callback.from_user.id)
         )
@@ -1224,6 +1242,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
     album_items = []
     carousels: list = []         # (номер в ленте, shortcode, число слайдов)
     to_cache: list = []          # параллельно album_items: (shortcode, total) или None
+    acts: list = []              # (номер в ленте, shortcode) — для кнопок лайк/закладка
     for i, post in enumerate(posts[:10]):
         media_list = post.get("media", [])
         if not media_list:
@@ -1236,7 +1255,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         link = f"https://www.instagram.com/p/{sc}/" if sc else ""
         n_media = len(media_list)
 
-        cap = f"❤️ {_fmt_count(likes)}  💬 {_fmt_count(comments)}"
+        cap = f"#{len(album_items) + 1}  ❤️ {_fmt_count(likes)}  💬 {_fmt_count(comments)}"
         if n_media > 1:
             cap = f"🗂 {n_media}  " + cap
         if caption:
@@ -1251,6 +1270,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
             if n_media > 1 and sc:
                 carousels.append((len(album_items) + 1, sc, n_media))
                 _carousel_remember(sc, post, ig_username)
+            acts.append((len(album_items) + 1, sc))
             album_items.append(_mk_cached_media(row["items"][0], cap))
             to_cache.append(None)
             continue
@@ -1262,6 +1282,7 @@ async def callback_ig_posts(callback: types.CallbackQuery):
         if n_media > 1 and sc:
             carousels.append((len(album_items) + 1, sc, n_media))
             _carousel_remember(sc, post, ig_username)
+        acts.append((len(album_items) + 1, sc))
         album_items.append(_mk_input_media(f, cap, None, f"post_{i}"))
         # в кэш кладём только одиночные посты: набор должен быть полным
         to_cache.append((sc, 1) if (sc and n_media == 1 and not f["degraded"]) else None)
@@ -1304,10 +1325,12 @@ async def callback_ig_posts(callback: types.CallbackQuery):
     shown_from = max(0, shown_up - 10)
     total_str  = f" из {total}" if total else ""
     footer = f"✅ Посты {shown_from+1}–{shown_from+len(posts)}{total_str} @{ig_username}"
+    if acts:
+        footer += "\n🤍 лайк (в Instagram) · 📑 в закладки — кнопки с номером поста"
     await callback.message.answer(
         footer,
         reply_markup=_posts_keyboard(ig_username, callback.from_user.id, cursor_key, has_more,
-                                     carousels)
+                                     carousels, acts)
     )
 
 
@@ -1328,6 +1351,8 @@ async def callback_ig_sub(callback: types.CallbackQuery):
         # Запоминаем текущее состояние (и pk аккаунта — чтобы пережить смену ника),
         # чтобы не завалить уведомлениями о старом
         _spawn(_seed_subscription(uid, ig_username, sub_type))
+        if sub_type in ("posts", "stories"):
+            _spawn(_private_hint(callback.message, ig_username))
 
     try:
         await callback.message.edit_reply_markup(
@@ -1510,6 +1535,9 @@ async def ig_checker_task(bot: Bot):
     if not _ALERT_TASK_STARTED:
         _ALERT_TASK_STARTED = True
         _spawn(ig_pool_alert_task(bot))
+    if not _FOLLOW_TASK["started"]:
+        _FOLLOW_TASK["started"] = True
+        _spawn(ig_follow_watch_task(bot))
 
     last_cleanup = 0.0
     await asyncio.sleep(90)   # состояние проверок хранится в БД — долго ждать не нужно
@@ -1647,12 +1675,14 @@ async def _check_user(bot: Bot, ig_username: str, subs: list[dict]) -> bool:
     if cur_pk and cur_pk != stored_pk:
         upd["pk"] = cur_pk
     priv = bool(info.get("is_private"))
+    has_access = (not priv) or bool(ig_follow_logins(ig_username, "following"))
     if cur_pk:                                              # без pk (приватный fallback) состояние не трогаем
         if st.get("is_private") is not None and st["is_private"] != priv:
             await _notify_users(
                 bot, _sub_users(subs),
-                (f"🔒 <b>@{ig_username}</b> закрыл(а) аккаунт — посты и истории недоступны, "
-                 f"пока он приватный.") if priv else
+                ((f"🔒 <b>@{ig_username}</b> закрыл(а) аккаунт, но бот подписан — слежу дальше.") if has_access else
+                 (f"🔒 <b>@{ig_username}</b> закрыл(а) аккаунт — посты и истории недоступны, "
+                  f"пока он приватный.")) if priv else
                 (f"🔓 <b>@{ig_username}</b> снова открытый аккаунт — слежу дальше."),
             )
         upd["is_private"] = priv
@@ -1665,7 +1695,7 @@ async def _check_user(bot: Bot, ig_username: str, subs: list[dict]) -> bool:
     # (или давно не проверяли — защита от «удалил один, выложил другой»).
     latest = None
     post_subs = [x for x in subs if x["sub_type"] == "posts"]
-    if post_subs and not priv:
+    if post_subs and has_access:
         count = info.get("posts_count")
         unchanged = (
             st.get("media_count") is not None and count is not None and st["media_count"] == count
@@ -2094,9 +2124,13 @@ def _music_line(music: dict) -> str:
     return f"🎵 {_h.escape(txt)}"[:200]
 
 
-def _post_kb(user: str, sc: str, music_kind: str | None):
-    """Профиль + (для рилсов со звуком) кнопки «найти трек» / «скачать звук»."""
+def _post_kb(user: str, sc: str, music_kind: str | None, uid=None):
+    """Лайк/закладка + профиль + (для рилсов со звуком) кнопки «найти трек» / «скачать звук»."""
     rows = []
+    if sc and uid is not None:
+        ar = _act_row(sc, user, uid)
+        if ar:
+            rows.append(ar)
     if sc and music_kind == "licensed":
         rows.append([InlineKeyboardButton(text="🎵 Найти трек", callback_data=f"ig_music:s:{sc}"),
                      InlineKeyboardButton(text="🎧 Только звук", callback_data=f"ig_music:a:{sc}")])
@@ -2128,7 +2162,8 @@ async def _send_ig_media(message: types.Message, link: str) -> bool:
         row = ig_cache_get(url_sc)
         if row and len(row["items"]) == row["total"]:
             try:
-                kb = (_post_kb(row["username"], url_sc, _music_kind_from_caption(row.get("caption", "")))
+                kb = (_post_kb(row["username"], url_sc, _music_kind_from_caption(row.get("caption", "")),
+                               uid=message.chat.id)
                       if row["total"] == 1 else None)
                 await _send_cached(out, row, kb=kb)
                 return True
@@ -2159,7 +2194,7 @@ async def _send_post_dict(message: types.Message, post: dict, url_sc: str = "") 
     base_caption = _post_caption_html(
         user, post.get("caption") or "", post.get("like_count", 0), post.get("comment_count", 0),
         extra=(("\n" + _music_line(music)) if music else ""))
-    kb_single = _post_kb(user, sc, music.get("kind") if music else None)
+    kb_single = _post_kb(user, sc, music.get("kind") if music else None, uid=message.chat.id)
 
     all_msgs: list = []
     n_files = too_big_total = compressed = 0
@@ -2965,10 +3000,24 @@ async def _notify_new_post_styled(bot: Bot, user_id: str, ig_username: str, post
     out = _out_chat(bot, user_id)
 
     # Пост уже уходил кому-то (или по ссылке) — шлём по file_id, без скачивания
+    act_kb = None
+    if sc:
+        _ar = _act_row(sc, ig_username, user_id)
+        act_kb = InlineKeyboardMarkup(inline_keyboard=[_ar]) if _ar else None
+
+    async def _album_buttons():                 # к альбому кнопку не прикрепить — тихим сообщением
+        if act_kb is not None and n > 1:
+            try:
+                await bot.send_message(user_id, f"Пост @{ig_username}:", reply_markup=act_kb,
+                                       disable_notification=True)
+            except Exception as e:
+                logger.debug(f"post kb {user_id}: {e}")
+
     row = ig_cache_get(sc) if sc else None
     if row and len(row["items"]) == row["total"] == n:
         try:
-            await _send_cached(out, row, caption=caption[:1020])
+            await _send_cached(out, row, caption=caption[:1020], kb=act_kb if n == 1 else None)
+            await _album_buttons()
             return
         except Exception as e:
             logger.warning(f"cached notify {sc}: {e}")
@@ -2980,7 +3029,9 @@ async def _notify_new_post_styled(bot: Bot, user_id: str, ig_username: str, post
         return
 
     try:
-        msgs, complete = await _send_files_safe(out, files, caption[:1020])
+        msgs, complete = await _send_files_safe(out, files, caption[:1020],
+                                                kb=act_kb if len(files) == 1 else None)
+        await _album_buttons()
     except Exception as e:
         logger.warning(f"_notify_new_post_styled {user_id}: {e}")
         await _text_only()
@@ -3963,6 +4014,344 @@ async def inline_instagram(iq: types.InlineQuery):
 
 # ── РЕГИСТРАЦИЯ ───────────────────────────────────────────────────────────────
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПОДПИСКА БОТА НА АККАУНТЫ / ЛАЙКИ / ЗАКЛАДКИ
+# ══════════════════════════════════════════════════════════════════════════════
+import html as _htmlmod
+from collections import deque as _deque
+
+# Подписывать донор-аккаунты может только админ (IG_ADMIN_IDS): это меняет «лицо» аккаунтов
+# для всех пользователей бота. Если IG_ADMIN_IDS пуст — разрешено всем. Отключить: IG_FOLLOW_ADMIN_ONLY=0
+IG_FOLLOW_ADMIN_ONLY = os.getenv("IG_FOLLOW_ADMIN_ONLY", "1") != "0"
+IG_ACT_PER_HOUR      = int(os.getenv("IG_ACT_PER_HOUR", "30"))       # лайков на пользователя в час
+IG_FOLLOW_WATCH_EVERY = int(os.getenv("IG_FOLLOW_WATCH_EVERY", str(20 * 60)))   # проверка заявок, сек
+_ACT_HITS: dict[str, _deque] = {}
+_FOLLOW_TASK = {"started": False}
+
+
+def _rate_ok(uid, kind: str, limit: int) -> bool:
+    key = f"{kind}:{uid}"
+    dq = _ACT_HITS.setdefault(key, _deque())
+    now = time.time()
+    while dq and now - dq[0] > 3600:
+        dq.popleft()
+    if len(dq) >= limit:
+        return False
+    dq.append(now)
+    return True
+
+
+def _can_follow(uid: int) -> bool:
+    if not IG_FOLLOW_ADMIN_ONLY:
+        return True
+    admins = _get_admin_ids()
+    return (not admins) or uid in admins
+
+
+def _follow_label(ig_username: str) -> str:
+    st = ig_follow_state(ig_username)
+    return {"following": "✅ Бот подписан", "pending": "⏳ Заявка отправлена"}.get(st, "➕ Подписать бота")
+
+
+def _act_row(sc: str, user: str, uid) -> list:
+    """Ряд кнопок «лайк / закладка» под постом."""
+    if not sc:
+        return []
+    user = (user or "")[:30]
+    cb_l, cb_b = f"ig_lk:{sc}:{user}", f"ig_bm:{sc}:{user}"
+    if len(cb_l.encode()) > 64 or len(cb_b.encode()) > 64:
+        return []
+    liked = bool(ig_like_get(sc))
+    saved = ig_bm_has(str(uid), sc)
+    return [
+        InlineKeyboardButton(text="❤️ Лайкнуто" if liked else "🤍 Лайк", callback_data=cb_l),
+        InlineKeyboardButton(text="🔖 В закладках" if saved else "📑 В закладки", callback_data=cb_b),
+    ]
+
+
+def _patch_act_buttons(markup, sc: str, user: str, uid):
+    """Перерисовать кнопки лайк/закладка конкретного поста в уже отправленной клавиатуре."""
+    if markup is None:
+        return None
+    liked = bool(ig_like_get(sc))
+    saved = ig_bm_has(str(uid), sc)
+    rows = []
+    for row in markup.inline_keyboard:
+        new_row = []
+        for b in row:
+            d = b.callback_data or ""
+            if d.startswith(f"ig_lk:{sc}:"):
+                num = re.search(r"\d+", b.text or "")
+                txt = (("❤️" if liked else "🤍") + num.group(0)) if num else ("❤️ Лайкнуто" if liked else "🤍 Лайк")
+                b = InlineKeyboardButton(text=txt, callback_data=d)
+            elif d.startswith(f"ig_bm:{sc}:"):
+                num = re.search(r"\d+", b.text or "")
+                txt = (("🔖" if saved else "📑") + num.group(0)) if num else ("🔖 В закладках" if saved else "📑 В закладки")
+                b = InlineKeyboardButton(text=txt, callback_data=d)
+            new_row.append(b)
+        rows.append(new_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _private_hint(message: types.Message, ig_username: str) -> None:
+    """Подписался на уведомления приватного аккаунта, к которому у бота нет доступа — объясняем."""
+    try:
+        info = await get_user_info(ig_username)
+        if info and info.get("is_private") and ig_follow_state(ig_username) == "none":
+            await message.answer(
+                f"🔒 @{ig_username} приватный — уведомления придут, только когда бот подпишется на него "
+                f"и владелец примет заявку. Кнопка «➕ Подписать бота» в профиле.")
+    except Exception as e:
+        logger.debug(f"private hint @{ig_username}: {e}")
+
+
+async def _refresh_profile_kb(message: types.Message, ig_username: str, uid: int) -> None:
+    try:
+        await message.edit_reply_markup(reply_markup=_profile_keyboard(ig_username, uid))
+    except Exception:
+        pass
+
+
+# ── ➕ подписать бота ─────────────────────────────────────────────────────────
+
+async def callback_ig_follow(callback: types.CallbackQuery):
+    ig_username = callback.data.split(":", 1)[1]
+    uid = callback.from_user.id
+    if not _can_follow(uid):
+        await callback.answer("Подписывать бота может только админ", show_alert=True)
+        return
+    state = ig_follow_state(ig_username)
+
+    if state != "none":                                   # уже подписан / ждёт одобрения → спросим про отписку
+        await callback.answer()
+        what = "Отозвать заявку" if state == "pending" else "Отписать бота"
+        await callback.message.answer(
+            f"{what} от @{ig_username}?" + (
+                "\n\n⚠️ Если аккаунт приватный, чтобы вернуть доступ, владельцу придётся снова принять заявку."
+                if state == "following" else ""),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Да", callback_data=f"ig_flc:{ig_username}:1"),
+                InlineKeyboardButton(text="✖️ Нет", callback_data=f"ig_flc:{ig_username}:0"),
+            ]]))
+        return
+
+    if not _rate_ok(uid, "follow", 10):
+        await callback.answer("Слишком часто, подожди немного", show_alert=True)
+        return
+    await callback.answer("⏳ Подписываюсь...")
+    res = await follow_user(ig_username, requested_by=str(uid))
+
+    if res.get("ok"):
+        n = len(res.get("logins", {}))
+        if res["status"] == "pending":
+            text = (f"⏳ Заявка на @{ig_username} отправлена ({n} акк.). "
+                    f"Как только владелец её примет, я напишу — и посты с историями станут доступны.")
+        else:
+            text = f"✅ Бот подписался на @{ig_username}" + (f" ({n} акк.)" if n > 1 else "") + "."
+        if res.get("errors"):
+            text += f"\n⚠️ Часть аккаунтов не смогла: {len(res['errors'])}"
+        await callback.message.answer(text)
+    else:
+        err = res.get("error")
+        text = {
+            "notfound":    f"❌ @{ig_username} не найден.",
+            "unavailable": "❌ Instagram сейчас не отвечает, попробуй позже.",
+            "nopk":        "❌ Не удалось определить аккаунт (нет id). Открой профиль ещё раз и повтори.",
+            "nodonors":    "❌ Нет живых аккаунтов-доноров (проверь /ig_status).",
+            "limit":       "⛔ Дневной лимит подписок исчерпан — это защита доноров от бана.",
+        }.get(err, "❌ Instagram не принял подписку (возможен лимит/проверка). Подробности — в логах.")
+        await callback.message.answer(text)
+        for e in (res.get("errors") or [])[:3]:
+            logger.warning(f"[follow] @{ig_username}: {e}")
+    await _refresh_profile_kb(callback.message, ig_username, uid)
+
+
+async def callback_ig_follow_confirm(callback: types.CallbackQuery):
+    _, ig_username, yes = callback.data.split(":", 2)
+    uid = callback.from_user.id
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    if yes != "1":
+        await callback.answer("Отмена")
+        return
+    if not _can_follow(uid):
+        await callback.answer("Только админ", show_alert=True)
+        return
+    await callback.answer("⏳")
+    res = await unfollow_user(ig_username)
+    if res.get("ok"):
+        await callback.message.answer(f"🔕 Бот отписался от @{ig_username}.")
+    else:
+        await callback.message.answer(f"❌ Не вышло отписаться от @{ig_username}: Instagram не ответил.")
+
+
+async def ig_follow_watch_task(bot: Bot):
+    """Раз в IG_FOLLOW_WATCH_EVERY проверяет заявки: одобрили → сообщаем и пересеиваем подписки."""
+    set_background_priority()
+    await asyncio.sleep(120)
+    while True:
+        try:
+            changes = await refresh_pending_follows()
+            by_user: dict[str, list[dict]] = {}
+            for ch in changes:
+                by_user.setdefault(ch["username"], []).append(ch)
+            for uname, chs in by_user.items():
+                approved = any(c["new"] == "following" for c in chs)
+                targets = {c["requested_by"] for c in chs if c.get("requested_by")}
+                subs = [x for x in _ig_all_subs_for_follow() if x["ig_username"] == uname]
+                targets |= {x["user_id"] for x in subs}
+                if approved:
+                    text = (f"✅ <b>@{uname}</b> принял(а) заявку — бот теперь видит посты и истории. "
+                            f"Уведомления для этого аккаунта работают.")
+                    for x in subs:                       # старые посты не слать «новыми»
+                        if x["sub_type"] in ("posts", "stories"):
+                            try:
+                                await _seed_subscription(x["user_id"], uname, x["sub_type"])
+                            except Exception as e:
+                                logger.debug(f"reseed {uname}: {e}")
+                else:
+                    text = f"❌ <b>@{uname}</b> отклонил(а) заявку (или отозвал(а) её)."
+                await _notify_users(bot, targets, text, kb=_profile_btn(uname))
+        except Exception as e:
+            logger.error(f"ig_follow_watch_task: {e}")
+        await asyncio.sleep(IG_FOLLOW_WATCH_EVERY)
+
+
+# ── ❤️ лайк ───────────────────────────────────────────────────────────────────
+
+async def callback_ig_like(callback: types.CallbackQuery):
+    parts = callback.data.split(":", 2)
+    sc = parts[1]
+    user = parts[2] if len(parts) > 2 else ""
+    uid = callback.from_user.id
+    if not _rate_ok(uid, "like", IG_ACT_PER_HOUR):
+        await callback.answer("Слишком часто — подожди немного", show_alert=True)
+        return
+    await callback.answer("⏳")
+    res = await like_toggle(sc, user, str(uid))
+    if not res.get("ok"):
+        msg = {
+            "private": "🔒 Аккаунт приватный, а бот на него не подписан",
+            "limit":   "⛔ Дневной лимит лайков исчерпан",
+        }.get(res.get("error"), "❌ Instagram не принял лайк")
+        await callback.answer(msg, show_alert=True)
+        return
+    await callback.answer("❤️ Лайк поставлен" if res["liked"] else "💔 Лайк снят")
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=_patch_act_buttons(callback.message.reply_markup, sc, user, uid))
+    except Exception:
+        pass
+
+
+# ── 🔖 закладки ───────────────────────────────────────────────────────────────
+
+def _caption_plain(sc: str) -> str:
+    cap = ""
+    row = ig_cache_get(sc)
+    if row:
+        cap = row.get("caption") or ""
+    if not cap:
+        cap = (_CAROUSEL_CACHE.get(sc) or {}).get("caption") or ""
+    cap = re.sub(r"<[^>]+>", "", cap)
+    return _htmlmod.unescape(cap).replace("\n", " ").strip()[:200]
+
+
+async def callback_ig_bookmark(callback: types.CallbackQuery):
+    parts = callback.data.split(":", 2)
+    sc = parts[1]
+    user = parts[2] if len(parts) > 2 else ""
+    uid = callback.from_user.id
+    if not user:
+        row = ig_cache_get(sc)
+        user = (row or {}).get("username", "")
+    res = await bookmark_toggle(str(uid), sc, user, _caption_plain(sc))
+    if not res.get("ok"):
+        await callback.answer("❌ Не удалось сохранить", show_alert=True)
+        return
+    await callback.answer("🔖 Добавлено в закладки (/ig_saved)" if res["saved"] else "Убрано из закладок")
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=_patch_act_buttons(callback.message.reply_markup, sc, user, uid))
+    except Exception:
+        pass
+
+
+_BM_PAGE = 8
+
+
+def _bm_view(uid: str, page: int):
+    total = ig_bm_count(uid)
+    if not total:
+        return ("🔖 <b>Закладки</b>\n\nПока пусто. Под постами жми «📑 В закладки».", None)
+    pages = max(1, (total + _BM_PAGE - 1) // _BM_PAGE)
+    page = max(0, min(page, pages - 1))
+    items = ig_bm_list(uid, page * _BM_PAGE, _BM_PAGE)
+    rows = []
+    for it in items:
+        label = f"@{it['username']} · " if it["username"] else ""
+        label += (it["caption"] or it["shortcode"])[:30]
+        rows.append([
+            InlineKeyboardButton(text=label[:48], callback_data=f"ig_bmo:{it['shortcode']}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"ig_bmd:{it['shortcode']}:{page}"),
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"ig_bml:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data=f"ig_bml:{page}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"ig_bml:{page + 1}"))
+    rows.append(nav)
+    return (f"🔖 <b>Закладки</b> · {total}\nТап по посту — открыть, 🗑 — убрать.",
+            InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+async def cmd_ig_saved(message: types.Message):
+    text, kb = _bm_view(str(message.from_user.id), 0)
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def callback_ig_bm_list(callback: types.CallbackQuery):
+    page = int(callback.data.split(":", 1)[1] or 0)
+    text, kb = _bm_view(str(callback.from_user.id), page)
+    await callback.answer()
+    try:
+        if callback.message.text and callback.message.text.startswith("🔖"):
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        else:                                            # нажали из карточки профиля — новым сообщением
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
+
+
+async def callback_ig_bm_open(callback: types.CallbackQuery):
+    sc = callback.data.split(":", 1)[1]
+    await callback.answer("⏳ Открываю...")
+    ok = False
+    try:
+        ok = await _send_ig_media(callback.message, f"https://www.instagram.com/p/{sc}/")
+    except Exception as e:
+        logger.warning(f"bookmark open {sc}: {e}")
+    if not ok:
+        await callback.message.answer(
+            f"❌ Не удалось достать пост (удалён или аккаунт закрыт).\nhttps://www.instagram.com/p/{sc}/")
+
+
+async def callback_ig_bm_del(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    sc, page = parts[1], int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    ig_bm_del(str(callback.from_user.id), sc)
+    await callback.answer("Убрано")
+    text, kb = _bm_view(str(callback.from_user.id), page)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass
+
+
+
 def register_ig_handlers(dp: Dispatcher):
     """Зарегистрировать все Instagram-хендлеры в диспетчере."""
     init_ig_db()
@@ -3998,6 +4387,16 @@ def register_ig_handlers(dp: Dispatcher):
     dp.callback_query.register(callback_ig_related,         F.data.startswith("ig_related:"))
     dp.callback_query.register(callback_ig_sub_filter,      F.data.startswith("ig_sf:"))
     dp.callback_query.register(callback_ig_sub_filter_menu, F.data.startswith("ig_sfm:"))
+
+    # подписка бота на аккаунты, лайки, закладки
+    dp.message.register(cmd_ig_saved,                    Command("ig_saved"))
+    dp.callback_query.register(callback_ig_follow,       F.data.startswith("ig_fl:"))
+    dp.callback_query.register(callback_ig_follow_confirm, F.data.startswith("ig_flc:"))
+    dp.callback_query.register(callback_ig_like,         F.data.startswith("ig_lk:"))
+    dp.callback_query.register(callback_ig_bookmark,     F.data.startswith("ig_bm:"))
+    dp.callback_query.register(callback_ig_bm_list,      F.data.startswith("ig_bml:"))
+    dp.callback_query.register(callback_ig_bm_open,      F.data.startswith("ig_bmo:"))
+    dp.callback_query.register(callback_ig_bm_del,       F.data.startswith("ig_bmd:"))
 
     dp.message.register(cmd_ig_refresh,          Command("ig_refresh"))
     dp.callback_query.register(callback_ig_retry,          F.data.startswith("ig_retry:"))

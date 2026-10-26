@@ -551,6 +551,27 @@ class _AccountPool:
         self._current = best
         return best
 
+    def _select_among(self, logins: set, prio: int) -> Optional[int]:
+        """Выбор аккаунта ТОЛЬКО из logins (например, тех, кто подписан на приватный профиль)."""
+        now = time.time()
+        idxs = [i for i, (l, _) in enumerate(self._accounts)
+                if l in logins and i < len(self._clients) and self._clients[i] is not None]
+        if not idxs:
+            return None
+        ok = [i for i in idxs if self._usable(i, now)]
+        if ok:
+            cur = self._current % max(len(self._clients), 1)
+            return cur if cur in ok else ok[0]
+        if prio >= PRIO_BG:
+            return None
+        alive = [i for i in idxs if self._accounts[i][0] not in self._known_dead] or idxs
+        return min(alive, key=lambda k: self._rate_limited_until.get(k, 0))
+
+    def live_logins(self) -> list[str]:
+        """Логины живых (не мёртвых) аккаунтов пула."""
+        return [l for i, (l, _) in enumerate(self._accounts)
+                if i < len(self._clients) and self._clients[i] is not None and l not in self._known_dead]
+
     def _rotate_from(self, cur: int) -> bool:
         """Перейти на следующий годный аккаунт (≠ cur). True — нашли другой."""
         n = len(self._clients)
@@ -720,7 +741,8 @@ class _AccountPool:
 
     # ── выполнение запроса с ротацией ────────────────────────────────────────
 
-    async def run(self, fn, *args, retries: int | None = None, prio: int | None = None, **kwargs):
+    async def run(self, fn, *args, retries: int | None = None, prio: int | None = None,
+                  only: set | None = None, **kwargs):
         """
         Запустить fn(client, *args, **kwargs) в executor.
 
@@ -753,9 +775,10 @@ class _AccountPool:
                 async with self._gate.hold(prio):
                     # аккаунт выбираем ПОСЛЕ получения гейта: пока ждали очередь,
                     # другой запрос мог получить 429 и провести ротацию
-                    idx = self._select_idx(prio)
+                    idx = self._select_among(only, prio) if only else self._select_idx(prio)
                     if idx is None:
-                        logger.warning("[pool] нет доступных аккаунтов (все в 429/мертвы) — запрос пропущен")
+                        logger.warning("[pool] нет доступных аккаунтов (все в 429/мертвы"
+                                       + (f" или нет среди {sorted(only)}" if only else "") + ") — запрос пропущен")
                         return None
                     cl = self._clients[idx]
 
@@ -1834,10 +1857,13 @@ async def search_accounts(query: str, limit: int = 8) -> list[dict] | None:
 async def get_stories(username: str) -> list:
     """Получить активные истории пользователя."""
     info = await get_user_info(username)
-    if not info or info.get("is_private"):
+    if not info:
+        return []
+    only = _access(username, info)
+    if only is False:
         return []
 
-    user_id = info.get("id", "")
+    user_id = _pk_for(username, info)
     if not user_id:
         return []
 
@@ -1845,7 +1871,7 @@ async def get_stories(username: str) -> list:
         return cl.user_stories(int(user_id))
 
     try:
-        items = await _POOL.run(_fetch)
+        items = await _POOL.run(_fetch, only=only)
         if not items:
             return []
         stories = [_story_to_dict(s) for s in items]
@@ -1853,6 +1879,7 @@ async def get_stories(username: str) -> list:
         logger.info(f"✅ get_stories @{username}: {len(stories)} шт.")
         return stories
     except PrivateAccount:
+        _follow_lost(username, only)
         return []
     except Exception as e:
         logger.error(f"get_stories @{username}: {e}")
@@ -1873,10 +1900,13 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     info = await get_user_info(username)
     if not info:
         return {"posts": [], "next_cursor": "", "has_more": False}
-    if info.get("is_private"):
+    only = _access(username, info)
+    if only is False:
         return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
 
-    user_id = info.get("id", "")
+    user_id = _pk_for(username, info)
+    if not user_id:
+        return {"posts": [], "next_cursor": "", "has_more": False}
     offset = int(after_cursor) if after_cursor.isdigit() else 0
     need = offset + 10
 
@@ -1900,8 +1930,9 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
                 return [_media_to_post(m) for m in medias if m], nxt
 
             try:
-                res = await _POOL.run(_fetch)
+                res = await _POOL.run(_fetch, only=only)
             except PrivateAccount:
+                _follow_lost(username, only)
                 return {"posts": [], "next_cursor": "", "has_more": False, "private": True}
             except Exception as ex:
                 logger.error(f"get_posts @{username}: {ex}")
@@ -1958,17 +1989,21 @@ async def get_latest_posts(username: str, amount: int | None = None) -> list | N
         return ent[1]
 
     info = await get_user_info(username)
-    if not info or info.get("is_private") or not info.get("id"):
+    if not info:
         return None
-    user_id = info["id"]
+    only = _access(username, info)
+    user_id = _pk_for(username, info)
+    if only is False or not user_id:
+        return None
 
     def _fetch(cl: Client):
         medias = cl.user_medias(int(user_id), amount=amount)
         return [_media_to_post(m) for m in medias if m]
 
     try:
-        posts = await _POOL.run(_fetch)
+        posts = await _POOL.run(_fetch, only=only)
     except PrivateAccount:
+        _follow_lost(username, only)
         return None
     except Exception as e:
         logger.error(f"get_latest_posts @{username}: {e}")
@@ -2100,6 +2135,14 @@ async def get_media_by_url(url: str) -> dict | None:
             return post
     except Exception as e:
         logger.warning(f"get_media_by_url {url[:80]}: {e}")
+    fl = ig_follow_any_logins()
+    if fl:
+        try:
+            post = await _POOL.run(_fetch, only=fl)
+            if post and post.get("media"):
+                return post
+        except Exception as e:
+            logger.info(f"get_media_by_url (через подписанные акки) {url[:80]}: {e}")
     if IG_YTDLP_FIRST:
         return None
     return await _media_fallback(url)
@@ -2129,9 +2172,12 @@ async def get_story_by_url(url: str) -> dict | None:
 async def get_highlights(username: str) -> list[dict]:
     """Список хайлайтов: [{pk, title, count}]."""
     info = await get_user_info(username)
-    if not info or info.get("is_private") or not info.get("id"):
+    if not info:
         return []
-    uid = info["id"]
+    only = _access(username, info)
+    uid = _pk_for(username, info)
+    if only is False or not uid:
+        return []
 
     def _fetch(cl: Client):
         out = []
@@ -2146,7 +2192,7 @@ async def get_highlights(username: str) -> list[dict]:
         return out
 
     try:
-        res = await _POOL.run(_fetch)
+        res = await _POOL.run(_fetch, only=only)
     except Exception as e:
         logger.warning(f"get_highlights @{username}: {e}")
         return []
@@ -2267,6 +2313,34 @@ def init_ig_db():
         login   TEXT PRIMARY KEY,
         data    TEXT NOT NULL,
         updated REAL NOT NULL
+    )""")
+    # Подписки донор-аккаунтов бота на профили (нужны для приватных)
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_follows (
+        ig_username  TEXT NOT NULL,
+        login        TEXT NOT NULL,
+        pk           TEXT DEFAULT '',
+        status       TEXT NOT NULL,          -- pending | following | lost
+        requested_by TEXT DEFAULT '',
+        ts           REAL DEFAULT 0,
+        PRIMARY KEY (ig_username, login)
+    )""")
+    # Закладки пользователей бота
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_bookmarks (
+        user_id   TEXT NOT NULL,
+        shortcode TEXT NOT NULL,
+        username  TEXT DEFAULT '',
+        caption   TEXT DEFAULT '',
+        created   REAL NOT NULL,
+        PRIMARY KEY (user_id, shortcode)
+    )""")
+    # Журнал действий донор-аккаунтов (для дневных лимитов) и кто лайкнул пост
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL, shortcode TEXT DEFAULT '', login TEXT DEFAULT '',
+        user_id TEXT DEFAULT '', ts REAL NOT NULL
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS ig_likes (
+        shortcode TEXT PRIMARY KEY, login TEXT NOT NULL, ts REAL NOT NULL
     )""")
     conn.commit()
     conn.close()
@@ -2630,3 +2704,449 @@ def ig_set_filter(user_id: str, ig_username: str, sub_type: str, f: str) -> None
         conn.commit()
     finally:
         conn.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ПОДПИСКА БОТА НА АККАУНТЫ (приватные и обычные), ЛАЙКИ, ЗАКЛАДКИ
+# ══════════════════════════════════════════════════════════════════════════════
+# Подписывается не «бот», а его донор-аккаунты. Приватный профиль виден только тому
+# донору, чью заявку владелец одобрил, поэтому запросы к такому профилю идут через
+# pool.run(..., only={логины}) — ротация не должна уводить запрос на аккаунт без доступа.
+IG_FOLLOW_ALL      = os.getenv("IG_FOLLOW_ALL", "0") == "1"      # на обычные тоже подписывать всеми донорами
+IG_FOLLOW_PER_DAY  = int(os.getenv("IG_FOLLOW_PER_DAY", "25"))   # подписок в сутки на ОДИН донор
+IG_LIKE_PER_DAY    = int(os.getenv("IG_LIKE_PER_DAY", "120"))    # лайков в сутки на ОДИН донор
+IG_BOOKMARK_ON_IG  = os.getenv("IG_BOOKMARK_ON_IG", "0") == "1"  # дублировать закладку в «Сохранённое» донора
+
+
+def _norm_u(u: str) -> str:
+    return (u or "").lower().strip().strip("@").strip()
+
+
+def _dbx():
+    return sqlite3.connect(IG_DB)
+
+
+# ── подписки доноров ─────────────────────────────────────────────────────────
+
+def ig_follow_rows(username: str) -> list[dict]:
+    conn = _dbx()
+    try:
+        rs = conn.execute("SELECT login, pk, status, requested_by, ts FROM ig_follows WHERE ig_username=?",
+                          (_norm_u(username),)).fetchall()
+    finally:
+        conn.close()
+    return [{"login": r[0], "pk": r[1], "status": r[2], "requested_by": r[3], "ts": r[4]} for r in rs]
+
+
+def ig_follow_state(username: str) -> str:
+    """none | pending | following"""
+    st = {r["status"] for r in ig_follow_rows(username)}
+    return "following" if "following" in st else ("pending" if "pending" in st else "none")
+
+
+def ig_follow_logins(username: str, status: str = "following") -> list[str]:
+    return [r["login"] for r in ig_follow_rows(username) if r["status"] == status]
+
+
+def ig_follow_any_logins() -> set:
+    conn = _dbx()
+    try:
+        rs = conn.execute("SELECT DISTINCT login FROM ig_follows WHERE status='following'").fetchall()
+    finally:
+        conn.close()
+    return {r[0] for r in rs}
+
+
+def ig_follow_set(username: str, login: str, status: str, pk: str = "", by: str = "") -> None:
+    conn = _dbx()
+    try:
+        old = conn.execute("SELECT pk, requested_by FROM ig_follows WHERE ig_username=? AND login=?",
+                           (_norm_u(username), login)).fetchone()
+        pk = pk or (old[0] if old else "")
+        by = by or (old[1] if old else "")
+        conn.execute("INSERT OR REPLACE INTO ig_follows (ig_username, login, pk, status, requested_by, ts) "
+                     "VALUES (?,?,?,?,?,?)", (_norm_u(username), login, pk, status, by, time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ig_follow_del(username: str, login: str | None = None) -> None:
+    conn = _dbx()
+    try:
+        if login:
+            conn.execute("DELETE FROM ig_follows WHERE ig_username=? AND login=?", (_norm_u(username), login))
+        else:
+            conn.execute("DELETE FROM ig_follows WHERE ig_username=?", (_norm_u(username),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _follow_lost(username: str, only) -> None:
+    """Приватный профиль перестал отвечать подписанному донору — подписку сняли."""
+    if not only:
+        return
+    for lg in only:
+        try:
+            ig_follow_set(username, lg, "lost")
+        except Exception:
+            pass
+    _ucache_drop_quiet(username)
+    logger.warning(f"[follow] @{username}: доступ потерян у {sorted(only)}")
+
+
+def _ucache_drop_quiet(username: str) -> None:
+    try:
+        _USER_CACHE.pop(_norm_u(username), None)
+    except Exception:
+        pass
+
+
+def _access(username: str, info: dict | None):
+    """None — подойдёт любой донор; set(логины) — только они; False — приватный, доступа нет."""
+    if not info or not info.get("is_private"):
+        return None
+    lg = ig_follow_logins(username, "following")
+    return set(lg) if lg else False
+
+
+def _pk_for(username: str, info: dict | None) -> str:
+    pk = str((info or {}).get("id") or "")
+    if pk:
+        return pk
+    for r in ig_follow_rows(username):
+        if r.get("pk"):
+            return r["pk"]
+    return ""
+
+
+# ── журнал действий / лимиты ─────────────────────────────────────────────────
+
+def ig_act_log(action: str, shortcode: str = "", login: str = "", user_id: str = "") -> None:
+    conn = _dbx()
+    try:
+        conn.execute("INSERT INTO ig_actions (action, shortcode, login, user_id, ts) VALUES (?,?,?,?,?)",
+                     (action, shortcode, login, str(user_id), time.time()))
+        conn.execute("DELETE FROM ig_actions WHERE ts < ?", (time.time() - 3 * 86400,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ig_act_count(action: str, since: float, login: str | None = None) -> int:
+    conn = _dbx()
+    try:
+        if login:
+            r = conn.execute("SELECT COUNT(*) FROM ig_actions WHERE action=? AND ts>=? AND login=?",
+                             (action, since, login)).fetchone()
+        else:
+            r = conn.execute("SELECT COUNT(*) FROM ig_actions WHERE action=? AND ts>=?", (action, since)).fetchone()
+    finally:
+        conn.close()
+    return int(r[0] if r else 0)
+
+
+# ── закладки ─────────────────────────────────────────────────────────────────
+
+def ig_bm_has(user_id: str, shortcode: str) -> bool:
+    conn = _dbx()
+    try:
+        return conn.execute("SELECT 1 FROM ig_bookmarks WHERE user_id=? AND shortcode=?",
+                            (str(user_id), shortcode)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def ig_bm_add(user_id: str, shortcode: str, username: str = "", caption: str = "") -> None:
+    conn = _dbx()
+    try:
+        conn.execute("INSERT OR REPLACE INTO ig_bookmarks (user_id, shortcode, username, caption, created) "
+                     "VALUES (?,?,?,?,?)", (str(user_id), shortcode, _norm_u(username), caption[:200], time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ig_bm_del(user_id: str, shortcode: str) -> None:
+    conn = _dbx()
+    try:
+        conn.execute("DELETE FROM ig_bookmarks WHERE user_id=? AND shortcode=?", (str(user_id), shortcode))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ig_bm_count(user_id: str) -> int:
+    conn = _dbx()
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM ig_bookmarks WHERE user_id=?", (str(user_id),)).fetchone()[0])
+    finally:
+        conn.close()
+
+
+def ig_bm_list(user_id: str, offset: int = 0, limit: int = 8) -> list[dict]:
+    conn = _dbx()
+    try:
+        rs = conn.execute("SELECT shortcode, username, caption, created FROM ig_bookmarks WHERE user_id=? "
+                          "ORDER BY created DESC LIMIT ? OFFSET ?", (str(user_id), limit, offset)).fetchall()
+    finally:
+        conn.close()
+    return [{"shortcode": r[0], "username": r[1], "caption": r[2], "created": r[3]} for r in rs]
+
+
+# ── лайки ────────────────────────────────────────────────────────────────────
+
+def ig_like_get(shortcode: str) -> str | None:
+    conn = _dbx()
+    try:
+        r = conn.execute("SELECT login FROM ig_likes WHERE shortcode=?", (shortcode,)).fetchone()
+    finally:
+        conn.close()
+    return r[0] if r else None
+
+
+def _ig_like_put(shortcode: str, login: str | None) -> None:
+    conn = _dbx()
+    try:
+        if login:
+            conn.execute("INSERT OR REPLACE INTO ig_likes (shortcode, login, ts) VALUES (?,?,?)",
+                         (shortcode, login, time.time()))
+        else:
+            conn.execute("DELETE FROM ig_likes WHERE shortcode=?", (shortcode,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ── операции в Instagram ─────────────────────────────────────────────────────
+
+def _rel_status(cl, pk: str, private: bool, followed_ok: bool | None = None) -> str:
+    """Реальный статус подписки: following / pending / '' (нет)."""
+    try:
+        fr = cl.user_friendship_v1(int(pk))
+        if getattr(fr, "following", False):
+            return "following"
+        if getattr(fr, "outgoing_request", False):
+            return "pending"
+        return ""
+    except Exception as e:
+        logger.info(f"[follow] friendship_v1 {pk}: {e}")
+        if followed_ok is None:
+            return ""
+        return "following" if followed_ok and not private else ("pending" if private else ("following" if followed_ok else ""))
+
+
+async def follow_user(username: str, requested_by: str = "") -> dict:
+    """
+    Подписать донор-аккаунты на профиль.
+    Приватный → со ВСЕХ живых доноров (иначе после ротации доступ пропадёт), обычный →
+    с одного (все — если IG_FOLLOW_ALL=1). Приватный вернёт status='pending' до одобрения.
+    """
+    username = _norm_u(username)
+    status, info = await get_user_status(username, force=True)
+    if status == "notfound":
+        return {"ok": False, "error": "notfound"}
+    if not info:
+        return {"ok": False, "error": "unavailable"}
+    pk = _pk_for(username, info)
+    if not pk:
+        return {"ok": False, "error": "nopk"}
+    private = bool(info.get("is_private"))
+
+    await _POOL._ensure_init()
+    live = _POOL.live_logins()
+    if not live:
+        return {"ok": False, "error": "nodonors"}
+    if private or IG_FOLLOW_ALL:
+        logins = list(live)
+    else:
+        cur = _POOL._accounts[_POOL._current % len(_POOL._accounts)][0] if _POOL._accounts else live[0]
+        logins = [cur if cur in live else live[0]]
+
+    since = time.time() - 86400
+    done: dict[str, str] = {}
+    errors: list[str] = []
+    skipped_limit = 0
+    for lg in logins:
+        if ig_act_count("follow", since, lg) >= IG_FOLLOW_PER_DAY:
+            skipped_limit += 1
+            continue
+
+        def _do(cl, _pk=pk, _priv=private):
+            ok = cl.user_follow(int(_pk))
+            return _rel_status(cl, _pk, _priv, bool(ok))
+
+        try:
+            st = await _POOL.run(_do, only={lg})
+        except Exception as e:
+            errors.append(f"{lg}: {type(e).__name__}: {e}"[:200])
+            continue
+        if st in ("following", "pending"):
+            ig_follow_set(username, lg, st, pk=pk, by=requested_by)
+            ig_act_log("follow", username, lg, requested_by)
+            done[lg] = st
+        else:
+            errors.append(f"{lg}: Instagram не подтвердил подписку")
+
+    if not done:
+        return {"ok": False, "error": "limit" if skipped_limit == len(logins) else "failed", "errors": errors}
+    best = "following" if "following" in done.values() else "pending"
+    _ucache_drop_quiet(username)
+    return {"ok": True, "status": best, "logins": done, "private": private, "errors": errors}
+
+
+async def unfollow_user(username: str) -> dict:
+    username = _norm_u(username)
+    rows = [r for r in ig_follow_rows(username)]
+    if not rows:
+        return {"ok": True, "removed": 0}
+    removed, errors = 0, []
+    for r in rows:
+        pk = r.get("pk")
+        if not pk:
+            ig_follow_del(username, r["login"])
+            removed += 1
+            continue
+
+        def _do(cl, _pk=pk):
+            return cl.user_unfollow(int(_pk))
+
+        try:
+            res = await _POOL.run(_do, only={r["login"]})
+        except Exception as e:
+            errors.append(f"{r['login']}: {e}"[:200])
+            continue
+        if res is None:
+            errors.append(f"{r['login']}: нет ответа")
+            continue
+        ig_follow_del(username, r["login"])
+        removed += 1
+    _ucache_drop_quiet(username)
+    return {"ok": removed > 0, "removed": removed, "errors": errors}
+
+
+async def refresh_pending_follows() -> list[dict]:
+    """
+    Проверить заявки «pending»: одобрили → following, отклонили/отозвали → удаляем.
+    Возвращает изменения [{username, login, new, requested_by}].
+    """
+    conn = _dbx()
+    try:
+        rows = conn.execute("SELECT ig_username, login, pk, requested_by FROM ig_follows "
+                            "WHERE status='pending'").fetchall()
+    finally:
+        conn.close()
+    changes: list[dict] = []
+    for uname, lg, pk, by in rows:
+        if not pk:
+            continue
+
+        def _do(cl, _pk=pk):
+            fr = cl.user_friendship_v1(int(_pk))
+            if getattr(fr, "following", False):
+                return "following"
+            if getattr(fr, "outgoing_request", False):
+                return "pending"
+            return "declined"
+
+        try:
+            st = await _POOL.run(_do, only={lg})
+        except Exception as e:
+            logger.info(f"[follow] проверка заявки @{uname}/{lg}: {e}")
+            continue
+        if st == "following":
+            ig_follow_set(uname, lg, "following")
+            changes.append({"username": uname, "login": lg, "new": "following", "requested_by": by})
+        elif st == "declined":
+            ig_follow_del(uname, lg)
+            changes.append({"username": uname, "login": lg, "new": "declined", "requested_by": by})
+    if changes:
+        for ch in changes:
+            _ucache_drop_quiet(ch["username"])
+    return changes
+
+
+async def _only_for_owner(username: str) -> tuple[set | None, str]:
+    """Для действий над постом: (набор доноров | None=любой, ошибка)."""
+    username = _norm_u(username)
+    if not username:
+        return None, ""
+    info = await get_user_info(username)
+    only = _access(username, info)
+    if only is False:
+        return None, "private"
+    return only, ""
+
+
+def _mid(cl, shortcode: str) -> str:
+    return cl.media_id(cl.media_pk_from_code(shortcode))
+
+
+async def like_toggle(shortcode: str, username: str = "", user_id: str = "") -> dict:
+    """Поставить/снять лайк доноров. Лайк виден в Instagram от имени донор-аккаунта."""
+    if not shortcode:
+        return {"ok": False, "error": "nocode"}
+    cur = ig_like_get(shortcode)
+    if cur:
+        def _un(cl):
+            return cl.media_unlike(_mid(cl, shortcode))
+        try:
+            r = await _POOL.run(_un, only={cur})
+        except Exception as e:
+            logger.warning(f"unlike {shortcode}: {e}")
+            return {"ok": False, "error": "failed"}
+        if r is None:
+            return {"ok": False, "error": "failed"}
+        _ig_like_put(shortcode, None)
+        ig_act_log("unlike", shortcode, cur, user_id)
+        return {"ok": True, "liked": False}
+
+    only, err = await _only_for_owner(username)
+    if err:
+        return {"ok": False, "error": err}
+    await _POOL._ensure_init()
+    live = _POOL.live_logins()
+    pool = [l for l in live if (not only or l in only)]
+    since = time.time() - 86400
+    pool = [l for l in pool if ig_act_count("like", since, l) < IG_LIKE_PER_DAY]
+    if not pool:
+        return {"ok": False, "error": "limit"}
+
+    def _do(cl):
+        ok = cl.media_like(_mid(cl, shortcode))
+        return (bool(ok), _acc_login(cl))
+
+    try:
+        r = await _POOL.run(_do, only=set(pool))
+    except Exception as e:
+        logger.warning(f"like {shortcode}: {e}")
+        return {"ok": False, "error": "failed"}
+    if not r or not r[0]:
+        return {"ok": False, "error": "failed"}
+    _ig_like_put(shortcode, r[1])
+    ig_act_log("like", shortcode, r[1], user_id)
+    return {"ok": True, "liked": True}
+
+
+async def bookmark_toggle(user_id: str, shortcode: str, username: str = "", caption: str = "") -> dict:
+    """Закладка в боте (у каждого пользователя своя). Опционально дублируется в «Сохранённое» донора."""
+    if not shortcode:
+        return {"ok": False, "error": "nocode"}
+    if ig_bm_has(user_id, shortcode):
+        ig_bm_del(user_id, shortcode)
+        saved = False
+    else:
+        ig_bm_add(user_id, shortcode, username, caption)
+        saved = True
+    if IG_BOOKMARK_ON_IG:
+        try:
+            only, err = await _only_for_owner(username)
+            if not err:
+                def _do(cl):
+                    mid = _mid(cl, shortcode)
+                    return cl.media_save(mid) if saved else cl.media_unsave(mid)
+                await _POOL.run(_do, only=only)
+        except Exception as e:
+            logger.info(f"bookmark mirror {shortcode}: {e}")
+    return {"ok": True, "saved": saved}
