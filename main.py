@@ -89,6 +89,7 @@ from film_handler import register_film_handlers
 from freebies import register_freebies_handlers, check_freebies
 from music_links import register_music_link_handlers
 from vision_handlers import register_vision_handlers
+from random18_handler import register_random18_handlers
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -299,6 +300,7 @@ async def main():
     register_cases_handlers(dp)
     register_places_handlers(dp)
     register_film_handlers(dp)
+    register_random18_handlers(dp)
     register_freebies_handlers(dp)
     register_music_link_handlers(dp)
     register_vision_handlers(dp)
