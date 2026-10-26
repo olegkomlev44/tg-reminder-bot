@@ -27,9 +27,13 @@ cases_game.py — 🎰 КЕЙС-КЛУБ: игра с кейсами, монет
 """
 
 import asyncio
+import bisect
 import html
+import json
 import logging
+import math
 import os
+import random
 import re
 import secrets
 import sqlite3
@@ -75,7 +79,9 @@ ANIM_TIMEOUT = 45.0         # анимация дольше — прерывае
 ADMIN_USERNAME = "BFF_Oleg"
 ADMIN_IDS = {891298064} | {int(x) for x in re.split(r"[,\s]+", os.getenv("CASES_ADMIN_IDS", "")) if x.strip().lstrip("-").isdigit()}
 COMMANDS = {"menu": ("case", "cases"), "daily": ("daily",), "inv": ("inv", "inventory"), "top": ("ctop",),
-            "give": ("give",), "trade": ("trade",), "admin": ("cadmin",)}
+            "give": ("give",), "trade": ("trade",), "admin": ("cadmin",),
+            "quests": ("quests", "quest"), "market": ("market",), "games": ("games",), "spin": ("spin",),
+            "pass": ("pass",), "album": ("album",)}
 
 # ── Каталог ───────────────────────────────────────────────────────────────────
 RARITY = {
@@ -234,6 +240,8 @@ def item_info(key: str) -> dict:
             return {"name": f"Кубок сезона {season} · {place} место", "price": p, "rarity": r, "cat": "trophy"}
         except (ValueError, KeyError):
             pass
+    if key.startswith("pass:"):                        # награда премиум-пропуска: pass:<сезон>
+        return {"name": f"Награда пропуска сезона {key.split(':')[1]}", "price": 2000, "rarity": "epic", "cat": "trophy"}
     return {"name": "Неизвестный предмет", "price": 0, "rarity": "junk", "cat": "?"}
 
 
@@ -287,6 +295,13 @@ _NEW_USER_COLS = {
     "bstreak_best": "INTEGER DEFAULT 0", "trades": "INTEGER DEFAULT 0", "gifts": "INTEGER DEFAULT 0",
     "bailouts": "INTEGER DEFAULT 0", "best_sale": "INTEGER DEFAULT 0", "seasons_top": "INTEGER DEFAULT 0",
     "seasons_win": "INTEGER DEFAULT 0",
+    # v5: уровни, билеты, спин, квесты, рынок, игры, альбом, пропуск
+    "xp": "INTEGER DEFAULT 0", "tickets": "INTEGER DEFAULT 0", "spin_n": "INTEGER DEFAULT 1", "spin_ts": "REAL DEFAULT 0",
+    "quests_done": "INTEGER DEFAULT 0", "market_sales": "INTEGER DEFAULT 0", "market_buys": "INTEGER DEFAULT 0",
+    "game_plays": "INTEGER DEFAULT 0", "game_wins": "INTEGER DEFAULT 0", "best_mines": "INTEGER DEFAULT 0",
+    "best_crash": "INTEGER DEFAULT 0", "spin_jp": "INTEGER DEFAULT 0", "pass_prem": "INTEGER DEFAULT 0",
+    "pass_max": "INTEGER DEFAULT 0", "col_done": "INTEGER DEFAULT 0",
+    "xp_day": "TEXT DEFAULT ''", "xp_social": "INTEGER DEFAULT 0",
 }
 
 
@@ -296,11 +311,31 @@ CREATE TABLE IF NOT EXISTS admin_log(id INTEGER PRIMARY KEY AUTOINCREMENT, admin
 """
 
 
+_SCHEMA_V5 = """
+CREATE TABLE IF NOT EXISTS quests(user_id INTEGER, period TEXT, pkey TEXT, idx INTEGER, qid TEXT, event TEXT, target INTEGER,
+  progress INTEGER DEFAULT 0, coins INTEGER, xp INTEGER, tickets INTEGER, claimed INTEGER DEFAULT 0,
+  PRIMARY KEY(user_id, period, pkey, idx));
+CREATE TABLE IF NOT EXISTS season_xp(season INTEGER, user_id INTEGER, xp INTEGER DEFAULT 0, PRIMARY KEY(season, user_id));
+CREATE TABLE IF NOT EXISTS market(id INTEGER PRIMARY KEY AUTOINCREMENT, seller INTEGER, seller_name TEXT, item TEXT,
+  price INTEGER, created REAL, status TEXT, buyer INTEGER, closed REAL);
+CREATE INDEX IF NOT EXISTS market_status ON market(status, created);
+CREATE INDEX IF NOT EXISTS market_seller ON market(seller, status);
+CREATE TABLE IF NOT EXISTS album(user_id INTEGER, item TEXT, first_at REAL, PRIMARY KEY(user_id, item));
+CREATE TABLE IF NOT EXISTS col_claims(user_id INTEGER, col TEXT, claimed_at REAL, PRIMARY KEY(user_id, col));
+CREATE TABLE IF NOT EXISTS pass_claims(user_id INTEGER, season INTEGER, tier INTEGER, track TEXT, claimed_at REAL,
+  PRIMARY KEY(user_id, season, tier, track));
+CREATE TABLE IF NOT EXISTS pass_premium(user_id INTEGER, season INTEGER, bought_at REAL, PRIMARY KEY(user_id, season));
+CREATE TABLE IF NOT EXISTS game_state(user_id INTEGER PRIMARY KEY, game TEXT, bet INTEGER, data TEXT, started REAL);
+"""
+
+
 def _migrate(conn: sqlite3.Connection):
     have = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
     for col, decl in _NEW_USER_COLS.items():
         if col not in have:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} {decl}")
+    if "xp" not in have:                  # старым игрокам — опыт по прошлой активности, чтобы они не начинали с нуля
+        conn.execute("UPDATE users SET xp = MIN(30000, opened*12 + bw*35 + up_try*10 + contracts*15 + trades*20 + gifts*8)")
 
 
 def _db() -> sqlite3.Connection:
@@ -311,6 +346,10 @@ def _db() -> sqlite3.Connection:
         _conn.executescript(_SCHEMA)
         _migrate(_conn)
         _conn.executescript(_SCHEMA_ADMIN)
+        had_album = _conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='album'").fetchone()
+        _conn.executescript(_SCHEMA_V5)
+        if not had_album:                 # альбом старых игроков = то, что лежит у них в инвентаре сейчас
+            _conn.execute("INSERT OR IGNORE INTO album(user_id,item,first_at) SELECT user_id,item,got_at FROM inventory")
     return _conn
 
 
@@ -342,11 +381,12 @@ def _ensure(c, uid: int, name: str | None = None, now: float | None = None) -> d
 
 
 def _inv_stats(c, uid: int) -> tuple[int, int]:
+    """(предметов в инвентаре; стоимость инвентаря + предметов, выставленных на рынок — они «заморожены», но твои)"""
     cnt = val = 0
     for r in c.execute("SELECT item, COUNT(*) n FROM inventory WHERE user_id=? GROUP BY item", (uid,)):
         cnt += r["n"]
         val += r["n"] * item_info(r["item"])["price"]
-    return cnt, val
+    return cnt, val + _market_escrow(c, uid)
 
 
 def _day(ts: float) -> str:
@@ -378,9 +418,12 @@ def get_profile(uid: int, name: str | None = None, now: float | None = None, use
             c.execute("UPDATE battles SET status='expired' WHERE id=?", (b["id"],))
             c.execute("UPDATE users SET coins=coins+? WHERE user_id=?", (b["price"], uid))
             refunded += b["price"]
+        _market_expire(c, now)
+        _game_cleanup(c, uid, now)
         u = _ensure(c, uid)
         cnt, val = _inv_stats(c, uid)
-    u.update(inv_count=cnt, inv_value=val, networth=u["coins"] + val, refunded=refunded)
+        lots = c.execute("SELECT COUNT(*) n FROM market WHERE seller=? AND status='open'", (uid,)).fetchone()["n"]
+    u.update(inv_count=cnt, inv_value=val, networth=u["coins"] + val, refunded=refunded, level=level_of(u["xp"]), lots=lots)
     return u
 
 
@@ -404,6 +447,7 @@ def claim_daily(uid: int, now: float | None = None) -> dict:
         streak = u["streak"] + 1 if u["last_daily"] == yesterday else 1
         amount = DAILY_BASE + DAILY_STEP * min(streak - 1, DAILY_STREAK_MAX)
         c.execute("UPDATE users SET coins=coins+?, last_daily=?, streak=? WHERE user_id=?", (amount, today, streak, uid))
+        _emit(c, uid, "daily", 1, 0, now)
         _check_ach(c, uid, now)
     return {"ok": True, "amount": amount, "streak": streak}
 
@@ -426,6 +470,7 @@ def maybe_bailout(uid: int, now: float | None = None) -> dict:
 
 def _record_drop(c, uid: int, case_key: str, item: str, now: float) -> int:
     cur = c.execute("INSERT INTO inventory(user_id,item,case_key,got_at) VALUES(?,?,?,?)", (uid, item, case_key, now))
+    c.execute("INSERT OR IGNORE INTO album(user_id,item,first_at) VALUES(?,?,?)", (uid, item, now))
     return cur.lastrowid
 
 
@@ -463,6 +508,7 @@ def open_case(uid: int, case_key: str, times: int = 1, now: float | None = None,
             item = roll_item(case_key)
             drops.append((item, _record_drop(c, uid, case_key, item, now)))
             _update_best(c, uid, item)
+        _emit(c, uid, "open", times, case["price"], now)
         _check_ach(c, uid, now)
         coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
     return {"ok": True, "drops": drops, "coins": coins, "cost": price}
@@ -477,6 +523,7 @@ def sell_item(uid: int, inv_id: int) -> dict:
         _drop_inv(c, inv_id)
         c.execute("UPDATE users SET coins=coins+?, earned=earned+?, best_sale=MAX(best_sale, ?) WHERE user_id=?",
                   (price, price, price, uid))
+        _emit(c, uid, "sell", 1, price)
         _check_ach(c, uid)
         coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
     return {"ok": True, "price": price, "item": row["item"], "coins": coins}
@@ -505,6 +552,7 @@ def sell_bulk(uid: int, mode: str) -> dict:
             _drop_inv(c, r["id"])
         if total:
             c.execute("UPDATE users SET coins=coins+?, earned=earned+? WHERE user_id=?", (total, total, uid))
+            _emit(c, uid, "sell", len(rows), total)
             _check_ach(c, uid)
         coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
     return {"ok": True, "count": len(rows), "total": total, "coins": coins}
@@ -602,6 +650,10 @@ def accept_battle(bid: str, opp: int, opp_name: str, now: float | None = None) -
                       "WHERE user_id=?", (winner,))
             c.execute("UPDATE users SET bl=bl+1, bstreak=0 WHERE user_id=?", (loser,))
         c.execute("UPDATE battles SET status='done' WHERE id=?", (bid,))
+        _emit(c, a, "battle", 1, price, now)
+        _emit(c, opp, "battle", 1, price, now)
+        if winner is not None:
+            _emit(c, winner, "battle_win", 1, price, now)
         _check_ach(c, a, now)
         _check_ach(c, opp, now)
     return {"ok": True, "case": ck, "price": price, "a": a, "a_name": b["creator_name"], "a_item": ia,
@@ -634,7 +686,8 @@ def _drop_inv(c, inv_id: int):
 
 
 def _is_trophy(item: str) -> bool:
-    return item.startswith("trophy:")
+    """Кубки сезона и награды пропуска — «коллекционные»: их нельзя дарить, менять, апгрейдить, вкладывать в контракт и продавать на рынке."""
+    return item.startswith(("trophy:", "pass:"))
 
 
 # ── достижения и титулы ───────────────────────────────────────────────────────
@@ -735,6 +788,9 @@ def _all_networth(c) -> dict[int, int]:
     for r in c.execute("SELECT user_id, item, COUNT(*) n FROM inventory GROUP BY user_id, item"):
         if r["user_id"] in worth:
             worth[r["user_id"]] += r["n"] * item_info(r["item"])["price"]
+    for uid_, v in _market_escrow_all(c).items():
+        if uid_ in worth:
+            worth[uid_] += v
     return worth
 
 
@@ -758,6 +814,7 @@ def _rollover(c, now: float):
     end = start + SEASON_DAYS * 86400
     if now < end:
         return
+    _pass_autoclaim(c, no, now)
     worth = _all_networth(c)
     base = {r["user_id"]: r["base"] for r in c.execute("SELECT user_id, base FROM season_snap WHERE season=?", (no,))}
     names = {r["user_id"]: r["name"] for r in c.execute("SELECT user_id, name FROM users")}
@@ -838,6 +895,7 @@ def open_free(uid: int, now: float | None = None) -> dict:
         inv_id = _record_drop(c, uid, "free", item, now)
         c.execute("UPDATE users SET last_free=?, opened=opened+1 WHERE user_id=?", (today, uid))
         _update_best(c, uid, item)
+        _emit(c, uid, "free", 1, 0, now)
         _check_ach(c, uid, now)
     return {"ok": True, "item": item, "inv_id": inv_id}
 
@@ -900,6 +958,9 @@ def upgrade_item(uid: int, inv_id: int, target: str, now: float | None = None) -
         new_id = _record_drop(c, uid, "upgrade", target, now) if success else None
         c.execute("UPDATE users SET up_try=up_try+1" + (", up_win=up_win+1" if success else "")
                   + (", lucky_up=lucky_up+1" if success and chance <= 0.10 else "") + " WHERE user_id=?", (uid,))
+        _emit(c, uid, "upgrade", 1, p0, now)
+        if success:
+            _emit(c, uid, "upgrade_win", 1, p0, now)
         _check_ach(c, uid, now)
     return {"ok": True, "success": success, "chance": chance, "r": r, "src": src, "target": target, "inv_id": new_id}
 
@@ -970,6 +1031,7 @@ def sign_contract(uid: int, now: float | None = None) -> dict:
             _drop_inv(c, row["id"])
         inv_id = _record_drop(c, uid, "contract", item, now)
         c.execute("UPDATE users SET contracts=contracts+1 WHERE user_id=?", (uid,))
+        _emit(c, uid, "contract", 1, total, now)
         _check_ach(c, uid, now)
     return {"ok": True, "n": len(rows), "total": total, "mult": mult, "item": item, "inv_id": inv_id,
             "src": [r["item"] for r in rows]}
@@ -1004,6 +1066,7 @@ def give_coins(uid: int, to: int, amount: int, now: float | None = None) -> dict
         c.execute("UPDATE users SET coins=coins-?, gifts=gifts+1 WHERE user_id=?", (amount, uid))
         c.execute("UPDATE users SET coins=coins+? WHERE user_id=?", (amount - fee, to))
         c.execute("INSERT INTO transfers(from_id,to_id,kind,value,ts) VALUES(?,?,?,?,?)", (uid, to, "coins", amount, now))
+        _emit(c, uid, "gift", 1, amount, now)
         _check_ach(c, uid, now)
         _check_ach(c, to, now)
     return {"ok": True, "amount": amount, "fee": fee, "got": amount - fee}
@@ -1027,8 +1090,10 @@ def give_item(uid: int, to: int, inv_id: int, now: float | None = None) -> dict:
             return {"ok": False, "reason": "cap", "left": max(0, left)}
         c.execute("UPDATE inventory SET user_id=? WHERE id=?", (to, inv_id))
         c.execute("DELETE FROM basket WHERE inv_id=?", (inv_id,))
+        _album_add(c, to, row["item"], now)
         c.execute("UPDATE users SET gifts=gifts+1 WHERE user_id=?", (uid,))
         c.execute("INSERT INTO transfers(from_id,to_id,kind,value,ts) VALUES(?,?,?,?,?)", (uid, to, "item", price, now))
+        _emit(c, uid, "gift", 1, price, now)
         _check_ach(c, uid, now)
     return {"ok": True, "item": row["item"], "price": price}
 
@@ -1090,6 +1155,10 @@ def accept_trade(tid: str, uid: int, now: float | None = None) -> dict:
         c.execute("DELETE FROM basket WHERE inv_id IN (?,?)", (t["a_inv"], t["b_inv"]))
         c.execute("UPDATE users SET trades=trades+1 WHERE user_id IN (?,?)", (t["a"], t["b"]))
         c.execute("UPDATE trades SET status='done' WHERE id=?", (tid,))
+        _album_add(c, t["b"], ra["item"], now)
+        _album_add(c, t["a"], rb["item"], now)
+        _emit(c, t["a"], "trade", 1, 0, now)
+        _emit(c, t["b"], "trade", 1, 0, now)
         _check_ach(c, t["a"], now)
         _check_ach(c, t["b"], now)
     return {"ok": True, "a": t["a"], "a_name": t["a_name"], "b": t["b"], "b_name": t["b_name"],
@@ -1159,6 +1228,971 @@ def admin_grant_item(admin_id: int, target: int, item_key: str, count: int = 1, 
 def admin_log_tail(limit: int = 10) -> list[dict]:
     rows = _db().execute("SELECT * FROM admin_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  v5: уровни и опыт, квесты, мини-спин, билеты, рынок игроков, альбом, пропуск, мини-игры
+# ══════════════════════════════════════════════════════════════════════════════
+# ── уровни ────────────────────────────────────────────────────────────────────
+LEVEL_MAX = 100
+_LEVEL_TABLE = [int(60 * (l - 1) ** 1.8) for l in range(1, LEVEL_MAX + 1)]    # суммарный XP для уровня l — индекс l-1
+
+
+def level_of(xp: int) -> int:
+    return bisect.bisect_right(_LEVEL_TABLE, max(0, int(xp)))
+
+
+def level_progress(xp: int) -> tuple[int, int, int]:
+    """(уровень, XP внутри уровня, XP до следующего уровня; 0 на максимальном)"""
+    lvl = level_of(xp)
+    cur = _LEVEL_TABLE[lvl - 1]
+    return (lvl, xp - cur, 0) if lvl >= LEVEL_MAX else (lvl, xp - cur, _LEVEL_TABLE[lvl] - cur)
+
+
+def level_reward(lvl: int) -> tuple[int, int]:
+    """(монеты, билеты) за получение уровня. Суммарно дешевле, чем стоит нафармить XP кейсами — фармить невыгодно."""
+    return 30 + 15 * lvl + (200 if lvl % 10 == 0 else 0), (1 if lvl % 3 == 0 else 0)
+
+
+def max_bet(lvl: int) -> int:
+    """Лимит ставки в мини-играх растёт с уровнем."""
+    return min(GAME_MAX_BET_CAP, 1000 + 250 * lvl)
+
+
+# XP даётся за ДЕЙСТВИЯ с затратами/риском. Мини-игры XP не дают (иначе фарм мелкими ставками).
+_XP_RULES = {
+    "open": lambda n, v: n * (8 + min(40, v // 100)),
+    "free": lambda n, v: 12 * n,
+    "ticket": lambda n, v: 9 * n,
+    "daily": lambda n, v: 20,
+    "sell": lambda n, v: min(30, 2 * n),
+    "battle": lambda n, v: 15,
+    "battle_win": lambda n, v: 25,
+    "upgrade": lambda n, v: min(10, v // 10),          # XP пропорционален ценности (копеечные предметы XP не фармят)
+    "upgrade_win": lambda n, v: min(30, v // 10),
+    "contract": lambda n, v: min(15, v // 20),
+    "gift": lambda n, v: 8,
+    "trade": lambda n, v: 20,
+    "spin": lambda n, v: 10,
+    "market_list": lambda n, v: 0,                      # выставить и снять — бесплатно, поэтому XP не даём (квест — даём)
+    "market_buy": lambda n, v: 10,
+    "market_sell": lambda n, v: 15,
+}
+_EVENT_ALIAS = {"free": ("free", "open"), "ticket": ("open",)}        # события, засчитываемые в квесты
+# «социальные» события почти ничего не стоят (можно крутить с альт-аккаунтом) → суммарный XP с них ограничен за сутки
+_SOCIAL_XP = {"gift", "trade", "market_buy", "market_sell", "battle", "battle_win"}
+SOCIAL_XP_CAP = 150
+
+
+def _add_xp(c, uid: int, xp: int, now: float):
+    """+XP игроку и в XP текущего сезона; за каждый новый уровень — награда и уведомление."""
+    if xp <= 0:
+        return
+    row = c.execute("SELECT xp FROM users WHERE user_id=?", (uid,)).fetchone()
+    if row is None:
+        return
+    old = row["xp"]
+    new = old + xp
+    c.execute("UPDATE users SET xp=? WHERE user_id=?", (new, uid))
+    no = _meta_get(c, "season_no")
+    if no is not None:
+        c.execute("INSERT INTO season_xp(season,user_id,xp) VALUES(?,?,?) "
+                  "ON CONFLICT(season,user_id) DO UPDATE SET xp=xp+excluded.xp", (int(no), uid, xp))
+    lo, ln = level_of(old), level_of(new)
+    for lvl in range(lo + 1, ln + 1):
+        coins, tk = level_reward(lvl)
+        c.execute("UPDATE users SET coins=coins+?, tickets=tickets+? WHERE user_id=?", (coins, tk, uid))
+        _notice(c, uid, f"⭐ <b>Уровень {lvl}!</b> +{coins} 🪙" + (" +1 🎫" if tk else ""), now)
+    if ln > lo:
+        _quest_progress(c, uid, "levelup", ln - lo, now)
+
+
+def _emit(c, uid: int, event: str, amount: int = 1, value: int = 0, now: float | None = None):
+    """Единая точка событий: начисляет XP и двигает прогресс квестов. Вызывается внутри транзакций."""
+    now = now or time.time()
+    rule = _XP_RULES.get(event)
+    if rule:
+        xp = rule(amount, value)
+        if xp > 0 and event in _SOCIAL_XP:
+            today = _day(now)
+            u = c.execute("SELECT xp_day, xp_social FROM users WHERE user_id=?", (uid,)).fetchone()
+            if u is not None:
+                used = u["xp_social"] if u["xp_day"] == today else 0
+                xp = max(0, min(xp, SOCIAL_XP_CAP - used))
+                if xp:
+                    c.execute("UPDATE users SET xp_day=?, xp_social=? WHERE user_id=?", (today, used + xp, uid))
+        _add_xp(c, uid, xp, now)
+    for ev in _EVENT_ALIAS.get(event, (event,)):
+        _quest_progress(c, uid, ev, amount, now)
+
+
+# ── квесты ────────────────────────────────────────────────────────────────────
+def _pl(n: int, one: str, few: str, many: str) -> str:
+    n = abs(int(n))
+    if 11 <= n % 100 <= 14:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
+
+
+# (qid, событие, сложность, текст(n), [(цель, монеты, xp, билеты), ...])
+_DAILY_Q = [
+    ("d_open", "open", "easy", lambda n: f"Открой {n} {_pl(n, 'кейс', 'кейса', 'кейсов')}", [(2, 60, 20, 0), (3, 100, 30, 0), (5, 180, 50, 0)]),
+    ("d_sell", "sell", "easy", lambda n: f"Продай {n} {_pl(n, 'предмет', 'предмета', 'предметов')}", [(2, 40, 15, 0), (4, 80, 25, 0)]),
+    ("d_free", "free", "easy", lambda n: "Открой бесплатный кейс дня", [(1, 30, 10, 0)]),
+    ("d_daily", "daily", "easy", lambda n: "Забери бонус дня", [(1, 30, 10, 0)]),
+    ("d_spin", "spin", "easy", lambda n: "Крутани мини-колесо", [(1, 40, 15, 0)]),
+    ("d_battle", "battle", "mid", lambda n: "Сыграй батл", [(1, 80, 30, 0)]),
+    ("d_up", "upgrade", "mid", lambda n: "Попробуй апгрейд", [(1, 70, 25, 0)]),
+    ("d_contract", "contract", "mid", lambda n: "Подпиши контракт", [(1, 90, 30, 0)]),
+    ("d_game", "game", "mid", lambda n: f"Сыграй {n} {_pl(n, 'раунд', 'раунда', 'раундов')} в мини-играх", [(3, 60, 20, 0), (6, 110, 35, 0)]),
+    ("d_gwin", "game_win", "mid", lambda n: f"Выиграй {n} {_pl(n, 'раунд', 'раунда', 'раундов')} в мини-играх", [(2, 80, 25, 0)]),
+    ("d_blist", "market_list", "social", lambda n: "Выставь предмет на рынок", [(1, 50, 20, 0)]),
+    ("d_bbuy", "market_buy", "social", lambda n: "Купи лот на рынке", [(1, 80, 30, 0)]),
+    ("d_gift", "gift", "social", lambda n: "Сделай подарок", [(1, 60, 20, 0)]),
+    ("d_trade", "trade", "social", lambda n: "Сделай обмен с игроком", [(1, 100, 40, 0)]),
+    ("d_bwin", "battle_win", "social", lambda n: "Выиграй батл", [(1, 150, 50, 0)]),
+]
+_WEEKLY_Q = [
+    ("w_open", "open", "easy", lambda n: f"Открой {n} {_pl(n, 'кейс', 'кейса', 'кейсов')}", [(15, 400, 120, 1), (30, 800, 200, 2)]),
+    ("w_sell", "sell", "easy", lambda n: f"Продай {n} {_pl(n, 'предмет', 'предмета', 'предметов')}", [(10, 300, 80, 0), (20, 500, 120, 0)]),
+    ("w_spin", "spin", "easy", lambda n: f"Крутани мини-колесо {n} {_pl(n, 'раз', 'раза', 'раз')}", [(8, 350, 100, 1)]),
+    ("w_qd", "qdone_d", "easy", lambda n: f"Выполни {n} ежедневных заданий", [(8, 500, 150, 1)]),
+    ("w_up", "upgrade_win", "mid", lambda n: f"Успешно улучши предмет {n} {_pl(n, 'раз', 'раза', 'раз')}", [(2, 500, 150, 1)]),
+    ("w_contract", "contract", "mid", lambda n: f"Подпиши {n} {_pl(n, 'контракт', 'контракта', 'контрактов')}", [(3, 450, 120, 0)]),
+    ("w_gwin", "game_win", "mid", lambda n: f"Выиграй {n} {_pl(n, 'раунд', 'раунда', 'раундов')} в мини-играх", [(10, 400, 120, 0)]),
+    ("w_lvl", "levelup", "mid", lambda n: f"Получи {n} {_pl(n, 'уровень', 'уровня', 'уровней')}", [(2, 400, 0, 1)]),
+    ("w_bwin", "battle_win", "social", lambda n: f"Выиграй {n} {_pl(n, 'батл', 'батла', 'батлов')}", [(2, 500, 150, 1)]),
+    ("w_msell", "market_sell", "social", lambda n: f"Продай {n} {_pl(n, 'лот', 'лота', 'лотов')} на рынке", [(2, 500, 150, 1)]),
+    ("w_trade", "trade", "social", lambda n: f"Сделай {n} {_pl(n, 'обмен', 'обмена', 'обменов')}", [(2, 400, 100, 0)]),
+]
+_QTEXT = {t[0]: t[3] for t in _DAILY_Q + _WEEKLY_Q}
+_QTEXT["d_all"] = lambda n: "Все 3 задания дня"
+_QTEXT["w_all"] = lambda n: "Все 3 задания недели — сундук"
+_QCHEST = {"d": (150, 60, 1), "w": (1500, 300, 3)}      # монеты, XP, билеты за закрытие всей тройки
+
+
+def quest_text(qid: str, n: int) -> str:
+    return _QTEXT.get(qid, lambda k: qid)(n)
+
+
+def _wkey(now: float) -> str:
+    y, w, _ = datetime.fromtimestamp(now, _TZ).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def _secs_to_monday(now: float) -> int:
+    d = datetime.fromtimestamp(now, _TZ)
+    nxt = (d + timedelta(days=7 - d.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(1, int((nxt - d).total_seconds()))
+
+
+def _qkeys(now: float):
+    return (("d", _day(now)), ("w", _wkey(now)))
+
+
+def _pick_quests(uid: int, period: str, pkey: str) -> list[tuple]:
+    rnd = random.Random(f"{uid}:{period}:{pkey}")
+    pool = list(_DAILY_Q if period == "d" else _WEEKLY_Q)
+    rnd.shuffle(pool)
+    first = next(t for t in pool if t[2] == "easy")             # хотя бы одно лёгкое — день никогда не «пустой»
+    chosen, social = [first], 0
+    for t in pool:
+        if len(chosen) >= 3:
+            break
+        if t is first:
+            continue
+        if t[2] == "social":
+            if social >= 1:
+                continue
+            social += 1
+        chosen.append(t)
+    rnd.shuffle(chosen)
+    return [(t[0], t[1], *rnd.choice(t[4])) for t in chosen]    # (qid, event, target, coins, xp, tickets)
+
+
+def _ensure_quests(c, uid: int, now: float):
+    for period, pkey in _qkeys(now):
+        if c.execute("SELECT 1 FROM quests WHERE user_id=? AND period=? AND pkey=? LIMIT 1", (uid, period, pkey)).fetchone():
+            continue
+        c.execute("DELETE FROM quests WHERE user_id=? AND period=? AND pkey<>?", (uid, period, pkey))
+        for idx, (qid, ev, target, coins, xp, tk) in enumerate(_pick_quests(uid, period, pkey)):
+            c.execute("INSERT INTO quests(user_id,period,pkey,idx,qid,event,target,progress,coins,xp,tickets,claimed) "
+                      "VALUES(?,?,?,?,?,?,?,0,?,?,?,0)", (uid, period, pkey, idx, qid, ev, target, coins, xp, tk))
+        coins, xp, tk = _QCHEST[period]
+        c.execute("INSERT INTO quests(user_id,period,pkey,idx,qid,event,target,progress,coins,xp,tickets,claimed) "
+                  "VALUES(?,?,?,3,?,?,3,0,?,?,?,0)", (uid, period, pkey, f"{period}_all", "qall", coins, xp, tk))
+
+
+def _quest_progress(c, uid: int, event: str, amount: int, now: float):
+    _ensure_quests(c, uid, now)
+    for period, pkey in _qkeys(now):
+        rows = c.execute("SELECT idx, progress, target FROM quests WHERE user_id=? AND period=? AND pkey=? AND idx<3 "
+                         "AND event=? AND progress<target", (uid, period, pkey, event)).fetchall()
+        for r in rows:
+            new = min(r["target"], r["progress"] + amount)
+            c.execute("UPDATE quests SET progress=? WHERE user_id=? AND period=? AND pkey=? AND idx=?",
+                      (new, uid, period, pkey, r["idx"]))
+            if new >= r["target"]:
+                c.execute("UPDATE quests SET progress=MIN(target, progress+1) WHERE user_id=? AND period=? AND pkey=? AND idx=3",
+                          (uid, period, pkey))
+                if period == "d":
+                    _quest_progress(c, uid, "qdone_d", 1, now)      # недельное «выполни N дневных заданий»
+
+
+def quest_state(uid: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        _ensure_quests(c, uid, now)
+        out = {}
+        for period, pkey in _qkeys(now):
+            out[period] = [dict(r) for r in c.execute(
+                "SELECT * FROM quests WHERE user_id=? AND period=? AND pkey=? ORDER BY idx", (uid, period, pkey))]
+    out["d_left"], out["w_left"] = _secs_to_midnight(now), _secs_to_monday(now)
+    return out
+
+
+def quest_summary(uid: int, now: float | None = None) -> dict:
+    st = quest_state(uid, now)
+    done_d = sum(1 for q in st["d"][:3] if q["progress"] >= q["target"])
+    done_w = sum(1 for q in st["w"][:3] if q["progress"] >= q["target"])
+    ready = sum(1 for p in ("d", "w") for q in st[p] if q["progress"] >= q["target"] and not q["claimed"])
+    return {"done_d": done_d, "done_w": done_w, "ready": ready}
+
+
+def _quest_claim_row(c, uid: int, r, now: float) -> dict:
+    c.execute("UPDATE quests SET claimed=1 WHERE user_id=? AND period=? AND pkey=? AND idx=?",
+              (uid, r["period"], r["pkey"], r["idx"]))
+    c.execute("UPDATE users SET coins=coins+?, tickets=tickets+?, quests_done=quests_done+? WHERE user_id=?",
+              (r["coins"], r["tickets"], 1 if r["idx"] < 3 else 0, uid))
+    _add_xp(c, uid, r["xp"], now)
+    return {"coins": r["coins"], "xp": r["xp"], "tickets": r["tickets"]}
+
+
+def quest_claim(uid: int, period: str, idx: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        _ensure_quests(c, uid, now)
+        key = dict(_qkeys(now)).get(period)
+        r = c.execute("SELECT * FROM quests WHERE user_id=? AND period=? AND pkey=? AND idx=?", (uid, period, key, idx)).fetchone()
+        if r is None:
+            return {"ok": False, "reason": "gone"}
+        if r["progress"] < r["target"]:
+            return {"ok": False, "reason": "incomplete"}
+        if r["claimed"]:
+            return {"ok": False, "reason": "claimed"}
+        out = _quest_claim_row(c, uid, r, now)
+        _check_ach(c, uid, now)
+    return {"ok": True, **out}
+
+
+def quest_claim_all(uid: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    tot = {"coins": 0, "xp": 0, "tickets": 0, "n": 0}
+    with _tx() as c:
+        _ensure_quests(c, uid, now)
+        for period, key in _qkeys(now):
+            for r in c.execute("SELECT * FROM quests WHERE user_id=? AND period=? AND pkey=? AND progress>=target AND claimed=0 "
+                               "ORDER BY idx", (uid, period, key)).fetchall():
+                o = _quest_claim_row(c, uid, r, now)
+                tot["coins"] += o["coins"]; tot["xp"] += o["xp"]; tot["tickets"] += o["tickets"]; tot["n"] += 1
+        _check_ach(c, uid, now)
+    return {"ok": tot["n"] > 0, **tot}
+
+
+# ── мини-спин и билеты ────────────────────────────────────────────────────────
+SPIN_COOLDOWN = 6 * 3600
+SPIN_MAX = 2                  # заряды копятся, но не больше двух
+# (тип, значение, вес %). Билет = бесплатный «Стартовый» кейс.
+SPIN_PRIZES = [("coins", 10, 35.0), ("coins", 25, 28.0), ("coins", 50, 16.0), ("coins", 100, 9.0), ("ticket", 1, 6.0),
+               ("coins", 250, 3.0), ("coins", 500, 1.0), ("coins", 2000, 0.35), ("coins", 10000, 0.05), ("xp", 25, 1.6)]
+assert abs(sum(p[2] for p in SPIN_PRIZES) - 100) < 1e-9
+TICKET_CASE = "starter"
+TICKET_VALUE = CASES[TICKET_CASE]["ev"]
+SPIN_EV = sum((v if k == "coins" else TICKET_VALUE if k == "ticket" else 0) * w / 100 for k, v, w in SPIN_PRIZES)
+
+
+def _spin_accrue(n: int, ts: float, now: float) -> tuple[int, float]:
+    if ts <= 0:
+        return n, now                          # первый заход: заряд уже есть, отсчёт пошёл
+    if n >= SPIN_MAX:
+        return n, now                          # копилка полна — отсчёт стоит
+    gained = int((now - ts) // SPIN_COOLDOWN)
+    if gained <= 0:
+        return n, ts
+    n2 = min(SPIN_MAX, n + gained)
+    return n2, (now if n2 >= SPIN_MAX else ts + gained * SPIN_COOLDOWN)
+
+
+def spin_status(uid: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        u = _ensure(c, uid, None, now)
+        n, ts = _spin_accrue(u["spin_n"], u["spin_ts"], now)
+        if (n, ts) != (u["spin_n"], u["spin_ts"]):
+            c.execute("UPDATE users SET spin_n=?, spin_ts=? WHERE user_id=?", (n, ts, uid))
+    return {"charges": n, "next_in": 0 if n >= SPIN_MAX else max(0, int(ts + SPIN_COOLDOWN - now))}
+
+
+def do_spin(uid: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        u = _ensure(c, uid, None, now)
+        n, ts = _spin_accrue(u["spin_n"], u["spin_ts"], now)
+        if n < 1:
+            c.execute("UPDATE users SET spin_n=?, spin_ts=? WHERE user_id=?", (n, ts, uid))
+            return {"ok": False, "next_in": max(0, int(ts + SPIN_COOLDOWN - now))}
+        was_full = n >= SPIN_MAX
+        r = _RNG.random() * 100
+        acc, prize = 0.0, SPIN_PRIZES[-1]
+        for p in SPIN_PRIZES:
+            acc += p[2]
+            if r < acc:
+                prize = p
+                break
+        kind, val, _ = prize
+        c.execute("UPDATE users SET spin_n=?, spin_ts=? WHERE user_id=?", (n - 1, now if was_full else ts, uid))
+        if kind == "coins":
+            c.execute("UPDATE users SET coins=coins+? WHERE user_id=?", (val, uid))
+            if val >= 10000:
+                c.execute("UPDATE users SET spin_jp=spin_jp+1 WHERE user_id=?", (uid,))
+        elif kind == "ticket":
+            c.execute("UPDATE users SET tickets=tickets+? WHERE user_id=?", (val, uid))
+        _emit(c, uid, "spin", 1, 0, now)
+        if kind == "xp":
+            _add_xp(c, uid, val, now)
+        _check_ach(c, uid, now)
+        left, ts2 = n - 1, (now if was_full else ts)
+    return {"ok": True, "kind": kind, "value": val, "left": left,
+            "next_in": 0 if left >= SPIN_MAX else max(0, int(ts2 + SPIN_COOLDOWN - now))}
+
+
+def open_ticket(uid: int, now: float | None = None) -> dict:
+    """Билет открывает «Стартовый» кейс бесплатно."""
+    now = now or time.time()
+    with _tx() as c:
+        u = _ensure(c, uid, None, now)
+        if u["tickets"] < 1:
+            return {"ok": False, "reason": "none"}
+        c.execute("UPDATE users SET tickets=tickets-1, opened=opened+1 WHERE user_id=?", (uid,))
+        item = roll_item(TICKET_CASE)
+        inv_id = _record_drop(c, uid, "ticket", item, now)
+        _update_best(c, uid, item)
+        _emit(c, uid, "ticket", 1, 0, now)
+        _check_ach(c, uid, now)
+        left = u["tickets"] - 1
+    return {"ok": True, "item": item, "inv_id": inv_id, "left": left}
+
+
+# ── рынок игроков ─────────────────────────────────────────────────────────────
+MARKET_FEE = 0.05
+MARKET_TTL = 3 * 86400
+MARKET_MAX_LOTS = 10
+MARKET_PRICE_RANGE = (0.8, 1.5)        # цена лота относительно справочной (узкий коридор: рынок не должен быть обходом лимита подарков)
+MARKET_PRESETS = (0.9, 1.0, 1.1, 1.25, 1.5)
+
+
+def _market_escrow(c, uid: int) -> int:
+    return sum(item_info(r["item"])["price"] for r in
+               c.execute("SELECT item FROM market WHERE seller=? AND status='open'", (uid,)))
+
+
+def _market_escrow_all(c) -> dict[int, int]:
+    out: dict[int, int] = {}
+    for r in c.execute("SELECT seller, item FROM market WHERE status='open'"):
+        out[r["seller"]] = out.get(r["seller"], 0) + item_info(r["item"])["price"]
+    return out
+
+
+def market_price_bounds(item: str) -> tuple[int, int]:
+    base = item_info(item)["price"]
+    return max(5, int(base * MARKET_PRICE_RANGE[0])), max(5, int(base * MARKET_PRICE_RANGE[1]))
+
+
+def _market_expire(c, now: float):
+    """Просроченные лоты возвращаются продавцам."""
+    for r in c.execute("SELECT * FROM market WHERE status='open' AND created<?", (now - MARKET_TTL,)).fetchall():
+        c.execute("UPDATE market SET status='expired', closed=? WHERE id=?", (now, r["id"]))
+        _record_drop(c, r["seller"], "market", r["item"], now)
+        _notice(c, r["seller"], f"⌛ Лот истёк, предмет вернулся в инвентарь: {item_info(r['item'])['name']}", now)
+
+
+def market_list(uid: int, inv_id: int, price: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        _ensure(c, uid, None, now)
+        row = c.execute("SELECT item FROM inventory WHERE id=? AND user_id=?", (inv_id, uid)).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "gone"}
+        if _is_trophy(row["item"]):
+            return {"ok": False, "reason": "trophy"}
+        lo, hi = market_price_bounds(row["item"])
+        if not (lo <= price <= hi):
+            return {"ok": False, "reason": "price", "lo": lo, "hi": hi}
+        if c.execute("SELECT COUNT(*) n FROM market WHERE seller=? AND status='open'", (uid,)).fetchone()["n"] >= MARKET_MAX_LOTS:
+            return {"ok": False, "reason": "limit"}
+        name = c.execute("SELECT name FROM users WHERE user_id=?", (uid,)).fetchone()["name"]
+        _drop_inv(c, inv_id)                      # предмет уходит «в эскроу» — его нельзя продать/обменять, пока лот висит
+        cur = c.execute("INSERT INTO market(seller,seller_name,item,price,created,status) VALUES(?,?,?,?,?,'open')",
+                        (uid, name, row["item"], price, now))
+        _emit(c, uid, "market_list", 1, price, now)
+        _check_ach(c, uid, now)
+    return {"ok": True, "lot": cur.lastrowid, "item": row["item"], "price": price}
+
+
+def market_cancel(uid: int, lot_id: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        r = c.execute("SELECT * FROM market WHERE id=?", (lot_id,)).fetchone()
+        if r is None or r["status"] != "open":
+            return {"ok": False, "reason": "closed"}
+        if r["seller"] != uid:
+            return {"ok": False, "reason": "not_yours"}
+        c.execute("UPDATE market SET status='cancelled', closed=? WHERE id=?", (now, lot_id))
+        inv_id = _record_drop(c, uid, "market", r["item"], now)
+    return {"ok": True, "item": r["item"], "inv_id": inv_id}
+
+
+def market_buy(uid: int, lot_id: int, name: str | None = None, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        _market_expire(c, now)
+        r = c.execute("SELECT * FROM market WHERE id=?", (lot_id,)).fetchone()
+        if r is None or r["status"] != "open":
+            return {"ok": False, "reason": "closed"}
+        if r["seller"] == uid:
+            return {"ok": False, "reason": "own"}
+        u = _ensure(c, uid, name, now)
+        price = r["price"]
+        if u["coins"] < price:
+            return {"ok": False, "reason": "money", "need": price - u["coins"]}
+        base = item_info(r["item"])["price"]
+        if price != base:                          # недооценка/переплата = передача ценности → считается в суточный лимит подарков
+            giver = r["seller"] if price < base else uid
+            amt = abs(price - base)
+            left = GIVE_DAILY_CAP - _sent_last_day(c, giver, now)
+            if amt > left:
+                return {"ok": False, "reason": "cap", "left": max(0, left)}
+            c.execute("INSERT INTO transfers(from_id,to_id,kind,value,ts) VALUES(?,?,?,?,?)",
+                      (giver, uid if giver == r["seller"] else r["seller"], "market", amt, now))
+        fee = int(price * MARKET_FEE)
+        c.execute("UPDATE users SET coins=coins-? WHERE user_id=?", (price, uid))
+        c.execute("UPDATE users SET coins=coins+?, market_sales=market_sales+1 WHERE user_id=?", (price - fee, r["seller"]))
+        c.execute("UPDATE users SET market_buys=market_buys+1 WHERE user_id=?", (uid,))
+        c.execute("UPDATE market SET status='sold', buyer=?, closed=? WHERE id=?", (uid, now, lot_id))
+        inv_id = _record_drop(c, uid, "market", r["item"], now)
+        _notice(c, r["seller"], f"🏪 Твой лот продан: {item_info(r['item'])['name']} за {price:,} 🪙 "
+                                f"(на руки {price - fee:,})".replace(",", " "), now)
+        _emit(c, uid, "market_buy", 1, price, now)
+        _emit(c, r["seller"], "market_sell", 1, price, now)
+        _check_ach(c, uid, now)
+        _check_ach(c, r["seller"], now)
+    return {"ok": True, "item": r["item"], "price": price, "fee": fee, "inv_id": inv_id, "seller": r["seller"],
+            "seller_name": r["seller_name"]}
+
+
+MARKET_SORTS = {"new": ("🆕 Новые", "id DESC"), "cheap": ("💰 Дешёвые", "price ASC, id ASC"),
+                "top": ("🔥 Дорогие", "price DESC, id ASC"), "deal": ("🎯 Выгодные", None)}
+MARKET_PER_PAGE = 5
+
+
+def market_browse(sort: str, page: int, viewer: int | None = None, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        _market_expire(c, now)
+    rows = [dict(r) for r in _db().execute("SELECT * FROM market WHERE status='open'")]
+    if viewer is not None:
+        rows = [r for r in rows if r["seller"] != viewer]
+    if sort == "deal":
+        rows.sort(key=lambda r: (r["price"] / max(1, item_info(r["item"])["price"]), r["id"]))
+    elif sort == "cheap":
+        rows.sort(key=lambda r: (r["price"], r["id"]))
+    elif sort == "top":
+        rows.sort(key=lambda r: (-r["price"], r["id"]))
+    else:
+        rows.sort(key=lambda r: -r["id"])
+    pages = max(1, -(-len(rows) // MARKET_PER_PAGE))
+    page = max(0, min(page, pages - 1))
+    return {"lots": rows[page * MARKET_PER_PAGE:(page + 1) * MARKET_PER_PAGE], "page": page, "pages": pages, "total": len(rows)}
+
+
+def market_get(lot_id: int) -> dict | None:
+    r = _db().execute("SELECT * FROM market WHERE id=?", (lot_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def market_mine(uid: int) -> dict:
+    c = _db()
+    return {"open": [dict(r) for r in c.execute("SELECT * FROM market WHERE seller=? AND status='open' ORDER BY id DESC", (uid,))],
+            "sold": [dict(r) for r in c.execute("SELECT * FROM market WHERE seller=? AND status='sold' ORDER BY closed DESC LIMIT 5", (uid,))]}
+
+
+# ── альбом и коллекции ────────────────────────────────────────────────────────
+def _album_add(c, uid: int, item: str, now: float):
+    c.execute("INSERT OR IGNORE INTO album(user_id,item,first_at) VALUES(?,?,?)", (uid, item, now))
+
+
+def _by(pred) -> list[str]:
+    return [k for k, v in ITEMS.items() if pred(k, v)]
+
+
+def _keys(*ks):
+    s = set(ks)
+    return lambda k, v: k in s
+
+
+_COL_DEFS = [
+    ("ak", "🔫", "AK-47", lambda k, v: "AK-47" in v["name"]),
+    ("awp", "🎯", "AWP", lambda k, v: v["name"].startswith("AWP")),
+    ("m4", "🔫", "M4", lambda k, v: v["name"].startswith(("M4A1-S", "M4A4"))),
+    ("knife", "🔪", "Ножи и перчатки", lambda k, v: v["name"].startswith("★")),
+    ("pistol", "🔫", "Пистолеты", lambda k, v: k.startswith("cs_") and v["name"].startswith(("Glock", "USP", "Desert", "P250", "Five", "CZ75", "Tec-9", "Dual"))),
+    ("rucars", "🚙", "Народные авто", _keys("car_granta", "car_niva", "car_kopeyka", "car_logan", "car_solaris", "car_polo", "car_rapid")),
+    ("supercars", "🏎", "Суперкары и люкс-авто", _keys("car_aventador", "car_laferrari", "car_chiron", "car_urus", "car_911", "car_m5", "car_phantom", "car_g63", "car_rangerover", "car_cayenne")),
+    ("moto", "🏍", "Мото, вода, воздух", _keys("car_vespa", "car_atv", "car_ninja", "car_harley", "car_jetski", "car_boat", "car_heli", "car_ebike", "car_scooter")),
+    ("watch", "⌚", "Часы", _keys("lux_watch", "lux_awatch", "lux_rolex", "lux_omega", "lux_tag", "lux_patek", "lux_ap")),
+    ("gold", "💎", "Золото и камни", _keys("lux_gold100", "lux_gold500", "lux_bar", "lux_diamond", "lux_emerald", "lux_pink", "fash_chanel_necklace")),
+    ("estate", "🏠", "Недвижимость", _keys("lux_flat", "lux_cottage", "lux_penthouse", "lux_villa", "lux_island")),
+    ("apple", "📱", "Apple", _keys("lux_iphone", "lux_ipad", "lux_airpods", "lux_awatch", "lux_mac", "lux_macstudio", "lux_xdr", "lux_vision")),
+    ("sneakers", "👟", "Кроссовки", _keys("fash_dunk_panda", "fash_yeezy350", "fash_yeezy700", "fash_aj4", "fash_aj1_chicago", "fash_travis_aj", "fash_air_mag", "fash_aj1_dior", "fash_balenciaga", "fash_dior_b23", "fash_vans", "fash_converse", "fash_nb530", "fash_samba", "fash_puma", "fash_martens")),
+    ("brands", "👜", "Люкс-бренды", _keys("fash_birkin30", "fash_chanel_flap", "fash_lv_neverfull", "fash_hermes_scarf", "fash_gucci_belt", "fash_prada_nylon", "fash_lv_supreme_trunk", "fash_birkin_himalaya", "fash_dior_couture", "fash_moncler")),
+    ("retro", "🕹", "Ретро-консоли", _keys("game_nes_box", "game_gb_red", "game_pong", "game_pacman", "game_odyssey", "game_ps1_devkit", "game_ps_proto", "game_mario_sealed", "game_zelda_gold", "game_mario_wata")),
+    ("pokemon", "🃏", "Покемоны", _keys("game_charizard", "game_pikachu_ill", "game_poke_box", "game_poke_stickers", "game_gb_red", "game_amiibo")),
+    ("hardware", "🖥", "Железо геймера", _keys("game_rtx3060", "game_rtx4090", "game_pc_mid", "game_pc_4080", "game_oled_mon", "game_monitor144", "game_secretlab", "game_simrig", "game_valve_index", "lux_ssd", "game_ssd500")),
+    ("junk", "🗑", "Музей хлама", _keys("lux_magnet", "lux_ticket", "lux_piggy", "car_pine", "fash_socks", "game_steamkey", "game_aa", "lux_bag", "cs_p250_sand", "car_wipers")),
+    ("legends", "🔴", "Все легендарные", lambda k, v: v["rarity"] == "legend"),
+    ("mythics", "🟡", "Все мифические", lambda k, v: v["rarity"] == "mythic"),
+]
+
+
+def _nice50(x: float) -> int:
+    return int(round(x / 50.0) * 50)
+
+
+COLLECTIONS: list[dict] = []
+for _key, _icon, _name, _pred in _COL_DEFS:
+    _items = _by(_pred)
+    if len(_items) < 4:
+        raise AssertionError(f"коллекция {_key}: в ней слишком мало предметов ({len(_items)})")
+    _total = sum(ITEMS[i]["price"] for i in _items)
+    COLLECTIONS.append({"key": _key, "icon": _icon, "name": _name, "items": _items,
+                        "coins": max(200, min(20000, _nice50(0.04 * _total))),
+                        "tickets": max(1, len(_items) // 5), "xp": 100 + 10 * len(_items)})
+COL_BY_KEY = {c["key"]: c for c in COLLECTIONS}
+ALBUM_MILESTONES = [(25, 1000, 2), (50, 3000, 4), (75, 8000, 6), (100, 25000, 10)]      # % каталога → монеты, билеты
+
+
+def album_items(uid: int) -> set[str]:
+    return {r["item"] for r in _db().execute("SELECT item FROM album WHERE user_id=?", (uid,))}
+
+
+def album_state(uid: int) -> dict:
+    have = album_items(uid)
+    claimed = {r["col"] for r in _db().execute("SELECT col FROM col_claims WHERE user_id=?", (uid,))}
+    cols = []
+    for col in COLLECTIONS:
+        n = sum(1 for i in col["items"] if i in have)
+        cols.append({**col, "have": n, "total": len(col["items"]), "claimed": col["key"] in claimed,
+                     "complete": n == len(col["items"])})
+    owned_catalog = sum(1 for i in ITEMS if i in have)
+    return {"cols": cols, "have": have, "owned": owned_catalog, "total": len(ITEMS), "claimed": claimed}
+
+
+def album_claim(uid: int, col_key: str, now: float | None = None) -> dict:
+    now = now or time.time()
+    col = COL_BY_KEY.get(col_key)
+    if col is None:
+        return {"ok": False, "reason": "bad"}
+    with _tx() as c:
+        _ensure(c, uid, None, now)
+        have = {r["item"] for r in c.execute("SELECT item FROM album WHERE user_id=?", (uid,))}
+        if not all(i in have for i in col["items"]):
+            return {"ok": False, "reason": "incomplete"}
+        if c.execute("SELECT 1 FROM col_claims WHERE user_id=? AND col=?", (uid, col_key)).fetchone():
+            return {"ok": False, "reason": "claimed"}
+        c.execute("INSERT INTO col_claims VALUES(?,?,?)", (uid, col_key, now))
+        c.execute("UPDATE users SET coins=coins+?, tickets=tickets+?, col_done=col_done+1 WHERE user_id=?",
+                  (col["coins"], col["tickets"], uid))
+        _add_xp(c, uid, col["xp"], now)
+        _check_ach(c, uid, now)
+    return {"ok": True, "coins": col["coins"], "tickets": col["tickets"], "xp": col["xp"]}
+
+
+def album_milestone_claim(uid: int, pct: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    ms = next((m for m in ALBUM_MILESTONES if m[0] == pct), None)
+    if ms is None:
+        return {"ok": False, "reason": "bad"}
+    need = -(-len(ITEMS) * pct // 100)
+    with _tx() as c:
+        _ensure(c, uid, None, now)
+        owned = c.execute("SELECT COUNT(*) n FROM album WHERE user_id=? AND item IN (%s)" % ",".join("?" * len(ITEMS)),
+                          (uid, *ITEMS)).fetchone()["n"]
+        if owned < need:
+            return {"ok": False, "reason": "incomplete", "need": need, "have": owned}
+        key = f"all{pct}"
+        if c.execute("SELECT 1 FROM col_claims WHERE user_id=? AND col=?", (uid, key)).fetchone():
+            return {"ok": False, "reason": "claimed"}
+        c.execute("INSERT INTO col_claims VALUES(?,?,?)", (uid, key, now))
+        c.execute("UPDATE users SET coins=coins+?, tickets=tickets+? WHERE user_id=?", (ms[1], ms[2], uid))
+        _add_xp(c, uid, 50 + pct * 3, now)
+        _check_ach(c, uid, now)
+    return {"ok": True, "coins": ms[1], "tickets": ms[2]}
+
+
+# ── сезонный пропуск ──────────────────────────────────────────────────────────
+PASS_TIERS = 20
+PASS_XP = 150                 # XP сезона на один уровень пропуска
+PASS_PRICE = 4500
+_PASS_PREMIUM_TICKETS = {3, 6, 9, 12, 15, 18, 20}
+
+
+def pass_rewards(tier: int) -> dict:
+    return {"free": {"coins": 20 + 5 * tier, "tickets": 1 if tier % 5 == 0 else 0},
+            "prem": {"coins": 30 + 8 * tier, "tickets": 1 if tier in _PASS_PREMIUM_TICKETS else 0, "item": tier == PASS_TIERS}}
+
+
+def pass_state(uid: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        _rollover(c, now)
+        _ensure(c, uid, None, now)
+        no, start = _season_state(c, now)
+        row = c.execute("SELECT xp FROM season_xp WHERE season=? AND user_id=?", (no, uid)).fetchone()
+        xp = row["xp"] if row else 0
+        prem = c.execute("SELECT 1 FROM pass_premium WHERE user_id=? AND season=?", (uid, no)).fetchone() is not None
+        claimed = {(r["tier"], r["track"]) for r in c.execute("SELECT tier, track FROM pass_claims WHERE user_id=? AND season=?", (uid, no))}
+    tier = min(PASS_TIERS, xp // PASS_XP)
+    left = max(0, int(start + SEASON_DAYS * 86400 - now))
+    ready = sum(1 for t in range(1, tier + 1) for tr in (("free", "prem") if prem else ("free",)) if (t, tr) not in claimed)
+    return {"season": no, "xp": xp, "tier": tier, "premium": prem, "claimed": claimed, "left": left, "ready": ready,
+            "into": xp - tier * PASS_XP if tier < PASS_TIERS else 0}
+
+
+def _pass_grant(c, uid: int, season: int, now: float) -> dict:
+    """Выдаёт все ещё не полученные награды пройденных уровней. Используется и кнопкой, и автовыдачей в конце сезона."""
+    row = c.execute("SELECT xp FROM season_xp WHERE season=? AND user_id=?", (season, uid)).fetchone()
+    tier = min(PASS_TIERS, (row["xp"] if row else 0) // PASS_XP)
+    prem = c.execute("SELECT 1 FROM pass_premium WHERE user_id=? AND season=?", (uid, season)).fetchone() is not None
+    got = {"coins": 0, "tickets": 0, "items": 0, "n": 0, "tier": tier}
+    for t in range(1, tier + 1):
+        rw = pass_rewards(t)
+        for track in (("free", "prem") if prem else ("free",)):
+            if c.execute("SELECT 1 FROM pass_claims WHERE user_id=? AND season=? AND tier=? AND track=?", (uid, season, t, track)).fetchone():
+                continue
+            c.execute("INSERT INTO pass_claims VALUES(?,?,?,?,?)", (uid, season, t, track, now))
+            r = rw[track]
+            got["coins"] += r["coins"]; got["tickets"] += r["tickets"]; got["n"] += 1
+            if track == "prem" and r.get("item"):
+                _record_drop(c, uid, "pass", f"pass:{season}", now)
+                got["items"] += 1
+    if got["n"]:
+        c.execute("UPDATE users SET coins=coins+?, tickets=tickets+?, pass_max=MAX(pass_max, ?) WHERE user_id=?",
+                  (got["coins"], got["tickets"], tier, uid))
+    return got
+
+
+def pass_claim(uid: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        _rollover(c, now)
+        _ensure(c, uid, None, now)
+        no, _ = _season_state(c, now)
+        got = _pass_grant(c, uid, no, now)
+        _check_ach(c, uid, now)
+    return {"ok": got["n"] > 0, **got}
+
+
+def pass_buy(uid: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        _rollover(c, now)
+        u = _ensure(c, uid, None, now)
+        no, _ = _season_state(c, now)
+        if c.execute("SELECT 1 FROM pass_premium WHERE user_id=? AND season=?", (uid, no)).fetchone():
+            return {"ok": False, "reason": "have"}
+        if u["coins"] < PASS_PRICE:
+            return {"ok": False, "reason": "money", "need": PASS_PRICE - u["coins"]}
+        c.execute("UPDATE users SET coins=coins-?, pass_prem=pass_prem+1 WHERE user_id=?", (PASS_PRICE, uid))
+        c.execute("INSERT INTO pass_premium VALUES(?,?,?)", (uid, no, now))
+        _check_ach(c, uid, now)
+    return {"ok": True, "price": PASS_PRICE}
+
+
+def _pass_autoclaim(c, season: int, now: float):
+    """Перед закрытием сезона автоматически выдаём всё не забранное — ничего не пропадает."""
+    for r in c.execute("SELECT user_id FROM season_xp WHERE season=? AND xp>=?", (season, PASS_XP)).fetchall():
+        got = _pass_grant(c, r["user_id"], season, now)
+        if got["n"]:
+            msg = (f"⭐ Сезонный пропуск завершён: автоматически выданы награды (+{got['coins']:,} 🪙"
+                   + (f", 🎫 {got['tickets']}" if got["tickets"] else "") + ")").replace(",", " ")
+            _notice(c, r["user_id"], msg, now)
+
+
+# ── мини-игры ─────────────────────────────────────────────────────────────────
+GAME_RTP = 0.95
+GAME_MIN_BET = 10
+GAME_MAX_BET_CAP = 25000
+COIN_MULT = 1.9
+DICE_MULT = {"u": math.floor(GAME_RTP * 36 / 15 * 100) / 100, "o": math.floor(GAME_RTP * 36 / 15 * 100) / 100,
+             "s": math.floor(GAME_RTP * 6 * 100) / 100}          # меньше 7 / больше 7 / ровно 7
+MINES_N = 16
+MINES_OPTIONS = (1, 3, 5, 8)
+MINES_MAX_MULT = 500.0
+MINES_IDLE_AUTOCASH = 12 * 3600
+CRASH_RATE = 0.08
+CRASH_MAX = 1000.0
+BET_PRESETS = (10, 50, 100, 250, 500, 1000, 2500, 5000)
+
+
+def mines_mult(m: int, k: int) -> float:
+    """Множитель после k безопасных клеток: честный (1/вероятность дожить) × RTP."""
+    if k <= 0:
+        return 1.0
+    p = math.comb(MINES_N - m, k) / math.comb(MINES_N, k)
+    return min(MINES_MAX_MULT, max(1.0, math.floor(GAME_RTP / p * 100) / 100))
+
+
+def crash_point(u: float) -> float:
+    """P(краш ≥ x) = RTP / x → ожидание любой стратегии «забрать на x» = RTP."""
+    if u >= GAME_RTP or u <= 0:
+        return 1.0 if u >= GAME_RTP else CRASH_MAX
+    return min(CRASH_MAX, max(1.0, math.floor(GAME_RTP / u * 100) / 100))
+
+
+def crash_mult(elapsed: float) -> float:
+    return math.floor(math.exp(CRASH_RATE * max(0.0, elapsed)) * 100) / 100
+
+
+def _check_bet(c, uid: int, bet: int, now: float) -> dict | None:
+    u = _ensure(c, uid, None, now)
+    lim = max_bet(level_of(u["xp"]))
+    if bet < GAME_MIN_BET:
+        return {"ok": False, "reason": "min", "min": GAME_MIN_BET}
+    if bet > lim:
+        return {"ok": False, "reason": "max", "max": lim}
+    if u["coins"] < bet:
+        return {"ok": False, "reason": "money", "need": bet - u["coins"]}
+    if c.execute("SELECT 1 FROM game_state WHERE user_id=?", (uid,)).fetchone():
+        return {"ok": False, "reason": "active"}
+    return None
+
+
+def _settle(c, uid: int, bet: int, payout: int, now: float, game: str, mult: float = 0.0):
+    """Итог раунда: выплата (ставка уже списана при старте), статистика, события квестов."""
+    win = payout > bet
+    if payout:
+        c.execute("UPDATE users SET coins=coins+? WHERE user_id=?", (payout, uid))
+    c.execute("UPDATE users SET game_plays=game_plays+1, game_wins=game_wins+? WHERE user_id=?", (1 if win else 0, uid))
+    if game == "mines" and win:
+        c.execute("UPDATE users SET best_mines=MAX(best_mines, ?) WHERE user_id=?", (int(mult * 100), uid))
+    if game == "crash" and win:
+        c.execute("UPDATE users SET best_crash=MAX(best_crash, ?) WHERE user_id=?", (int(mult * 100), uid))
+    _emit(c, uid, "game", 1, bet, now)
+    if win:
+        _emit(c, uid, "game_win", 1, bet, now)
+    _check_ach(c, uid, now)
+
+
+def coin_flip(uid: int, bet: int, side: str, now: float | None = None) -> dict:
+    now = now or time.time()
+    if side not in ("h", "t"):
+        return {"ok": False, "reason": "bad"}
+    with _tx() as c:
+        err = _check_bet(c, uid, bet, now)
+        if err:
+            return err
+        c.execute("UPDATE users SET coins=coins-? WHERE user_id=?", (bet, uid))
+        res = _RNG.choice(("h", "t"))
+        payout = int(bet * COIN_MULT) if res == side else 0
+        _settle(c, uid, bet, payout, now, "coin", COIN_MULT)
+        coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
+    return {"ok": True, "result": res, "win": payout > 0, "payout": payout, "bet": bet, "coins": coins}
+
+
+def dice_roll(uid: int, bet: int, mode: str, now: float | None = None) -> dict:
+    now = now or time.time()
+    if mode not in DICE_MULT:
+        return {"ok": False, "reason": "bad"}
+    with _tx() as c:
+        err = _check_bet(c, uid, bet, now)
+        if err:
+            return err
+        c.execute("UPDATE users SET coins=coins-? WHERE user_id=?", (bet, uid))
+        d1, d2 = _RNG.randint(1, 6), _RNG.randint(1, 6)
+        s = d1 + d2
+        win = (mode == "u" and s < 7) or (mode == "o" and s > 7) or (mode == "s" and s == 7)
+        payout = int(bet * DICE_MULT[mode]) if win else 0
+        _settle(c, uid, bet, payout, now, "dice", DICE_MULT[mode])
+        coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
+    return {"ok": True, "dice": (d1, d2), "sum": s, "win": win, "payout": payout, "bet": bet, "mult": DICE_MULT[mode], "coins": coins}
+
+
+def game_active(uid: int) -> dict | None:
+    r = _db().execute("SELECT * FROM game_state WHERE user_id=?", (uid,)).fetchone()
+    if r is None:
+        return None
+    d = dict(r)
+    d["data"] = json.loads(d["data"])
+    return d
+
+
+def _game_set(c, uid: int, game: str, bet: int, data: dict, now: float):
+    c.execute("INSERT OR REPLACE INTO game_state(user_id,game,bet,data,started) VALUES(?,?,?,?,?)",
+              (uid, game, bet, json.dumps(data), now))
+
+
+def mines_start(uid: int, bet: int, m: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    if m not in MINES_OPTIONS:
+        return {"ok": False, "reason": "bad"}
+    with _tx() as c:
+        err = _check_bet(c, uid, bet, now)
+        if err:
+            return err
+        c.execute("UPDATE users SET coins=coins-? WHERE user_id=?", (bet, uid))
+        mines = sorted(_RNG.sample(range(MINES_N), m))
+        _game_set(c, uid, "mines", bet, {"m": m, "mines": mines, "open": []}, now)
+        coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
+    return {"ok": True, "bet": bet, "m": m, "coins": coins}
+
+
+def mines_pick(uid: int, cell: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        g = c.execute("SELECT * FROM game_state WHERE user_id=? AND game='mines'", (uid,)).fetchone()
+        if g is None:
+            return {"ok": False, "reason": "none"}
+        d, bet = json.loads(g["data"]), g["bet"]
+        if not (0 <= cell < MINES_N) or cell in d["open"]:
+            return {"ok": False, "reason": "bad", "state": d, "bet": bet}
+        if cell in d["mines"]:
+            c.execute("DELETE FROM game_state WHERE user_id=?", (uid,))
+            _settle(c, uid, bet, 0, now, "mines")
+            return {"ok": True, "boom": True, "state": d, "bet": bet, "cell": cell}
+        d["open"].append(cell)
+        k = len(d["open"])
+        mult = mines_mult(d["m"], k)
+        if k == MINES_N - d["m"]:                          # открыл все безопасные клетки — авто-выплата
+            payout = int(bet * mult)
+            c.execute("DELETE FROM game_state WHERE user_id=?", (uid,))
+            _settle(c, uid, bet, payout, now, "mines", mult)
+            return {"ok": True, "boom": False, "done": True, "payout": payout, "mult": mult, "state": d, "bet": bet}
+        _game_set(c, uid, "mines", bet, d, g["started"])
+    return {"ok": True, "boom": False, "done": False, "mult": mult, "state": d, "bet": bet}
+
+
+def mines_cash(uid: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        g = c.execute("SELECT * FROM game_state WHERE user_id=? AND game='mines'", (uid,)).fetchone()
+        if g is None:
+            return {"ok": False, "reason": "none"}
+        d, bet = json.loads(g["data"]), g["bet"]
+        k = len(d["open"])
+        if k == 0:
+            return {"ok": False, "reason": "empty", "state": d, "bet": bet}
+        mult = mines_mult(d["m"], k)
+        payout = int(bet * mult)
+        c.execute("DELETE FROM game_state WHERE user_id=?", (uid,))
+        _settle(c, uid, bet, payout, now, "mines", mult)
+        coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
+    return {"ok": True, "payout": payout, "mult": mult, "state": d, "bet": bet, "coins": coins}
+
+
+def crash_start(uid: int, bet: int, now: float | None = None) -> dict:
+    now = now or time.time()
+    with _tx() as c:
+        err = _check_bet(c, uid, bet, now)
+        if err:
+            return err
+        c.execute("UPDATE users SET coins=coins-? WHERE user_id=?", (bet, uid))
+        cp = crash_point(_RNG.random())
+        _game_set(c, uid, "crash", bet, {"cp": cp}, now)
+        coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
+    return {"ok": True, "bet": bet, "coins": coins, "started": now}
+
+
+def crash_status(uid: int, now: float | None = None) -> dict | None:
+    now = now or time.time()
+    g = game_active(uid)
+    if g is None or g["game"] != "crash":
+        return None
+    mult = crash_mult(now - g["started"])
+    return {"bet": g["bet"], "mult": mult, "busted": mult >= g["data"]["cp"], "cp": g["data"]["cp"], "started": g["started"]}
+
+
+def crash_cash(uid: int, now: float | None = None) -> dict:
+    """Забрать выигрыш: множитель считается по ВРЕМЕНИ на сервере в момент нажатия (кнопка могла «отстать»)."""
+    now = now or time.time()
+    with _tx() as c:
+        g = c.execute("SELECT * FROM game_state WHERE user_id=? AND game='crash'", (uid,)).fetchone()
+        if g is None:
+            return {"ok": False, "reason": "none"}
+        cp, bet = json.loads(g["data"])["cp"], g["bet"]
+        mult = crash_mult(now - g["started"])
+        c.execute("DELETE FROM game_state WHERE user_id=?", (uid,))
+        if mult >= cp:
+            _settle(c, uid, bet, 0, now, "crash")
+            return {"ok": True, "bust": True, "cp": cp, "bet": bet}
+        payout = int(bet * mult)
+        _settle(c, uid, bet, payout, now, "crash", mult)
+        coins = c.execute("SELECT coins FROM users WHERE user_id=?", (uid,)).fetchone()["coins"]
+    return {"ok": True, "bust": False, "mult": mult, "payout": payout, "cp": cp, "bet": bet, "coins": coins}
+
+
+def crash_settle_bust(uid: int, now: float | None = None) -> dict | None:
+    """Вызывается циклом анимации (или при возвращении игрока): если раунд уже разбился — фиксируем проигрыш."""
+    now = now or time.time()
+    with _tx() as c:
+        g = c.execute("SELECT * FROM game_state WHERE user_id=? AND game='crash'", (uid,)).fetchone()
+        if g is None:
+            return None
+        cp, bet = json.loads(g["data"])["cp"], g["bet"]
+        if crash_mult(now - g["started"]) < cp:
+            return None
+        c.execute("DELETE FROM game_state WHERE user_id=?", (uid,))
+        _settle(c, uid, bet, 0, now, "crash")
+    return {"cp": cp, "bet": bet}
+
+
+def _game_cleanup(c, uid: int, now: float):
+    """Брошенные раунды: краш давно разбился — проигрыш; мины простояли 12 ч — авто-выплата по текущему множителю."""
+    g = c.execute("SELECT * FROM game_state WHERE user_id=?", (uid,)).fetchone()
+    if g is None:
+        return
+    d, bet = json.loads(g["data"]), g["bet"]
+    if g["game"] == "crash":
+        if crash_mult(now - g["started"]) >= d["cp"]:
+            c.execute("DELETE FROM game_state WHERE user_id=?", (uid,))
+            _settle(c, uid, bet, 0, now, "crash")
+            _notice(c, uid, f"🚀 Раунд краша завершился на ×{d['cp']:.2f} — ставка {bet:,} 🪙 проиграна".replace(",", " "), now)
+    elif g["game"] == "mines" and now - g["started"] > MINES_IDLE_AUTOCASH:
+        k = len(d["open"])
+        payout = int(bet * mines_mult(d["m"], k)) if k else bet
+        c.execute("DELETE FROM game_state WHERE user_id=?", (uid,))
+        _settle(c, uid, bet, payout, now, "mines", mines_mult(d["m"], k))
+        _notice(c, uid, f"💣 Брошенная партия в «Мины» закрыта автоматически: выплата {payout:,} 🪙".replace(",", " "), now)
+
+
+# ── достижения нового блока ───────────────────────────────────────────────────
+ACH.update({
+    "quest_10": ("📋", "Исполнитель", "забрать награду за 10 заданий", lambda u, x: u["quests_done"] >= 10),
+    "quest_100": ("🗂", "Трудяга", "забрать награду за 100 заданий", lambda u, x: u["quests_done"] >= 100),
+    "lvl_10": ("⭐", "Десятка", "достичь 10 уровня", lambda u, x: level_of(u["xp"]) >= 10),
+    "lvl_25": ("🌟", "Ветеран клуба", "достичь 25 уровня", lambda u, x: level_of(u["xp"]) >= 25),
+    "lvl_50": ("💫", "Легенда клуба", "достичь 50 уровня", lambda u, x: level_of(u["xp"]) >= 50),
+    "market_1": ("🏪", "Торговец", "продать первый лот на рынке", lambda u, x: u["market_sales"] >= 1),
+    "market_25": ("🧳", "Купец", "продать 25 лотов на рынке", lambda u, x: u["market_sales"] >= 25),
+    "col_1": ("📚", "Коллекционер", "собрать первый набор в альбоме", lambda u, x: u["col_done"] >= 1),
+    "col_5": ("🗃", "Куратор", "собрать 5 наборов", lambda u, x: u["col_done"] >= 5),
+    "col_all": ("🏛", "Хранитель музея", "собрать все наборы альбома", lambda u, x: u["col_done"] >= len(COLLECTIONS)),
+    "game_50": ("🎲", "Азартный", "сыграть 50 раундов в мини-играх", lambda u, x: u["game_plays"] >= 50),
+    "mines_x10": ("💣", "Сапёр", "забрать ×10 и больше в «Минах»", lambda u, x: u["best_mines"] >= 1000),
+    "crash_x5": ("🚀", "Ракетчик", "забрать ×5 и больше в «Краше»", lambda u, x: u["best_crash"] >= 500),
+    "spin_jp": ("🎰", "Джекпот колеса", "выиграть главный приз мини-спина", lambda u, x: u["spin_jp"] >= 1),
+    "pass_prem": ("💎", "Премиум-игрок", "купить премиум сезонного пропуска", lambda u, x: u["pass_prem"] >= 1),
+    "pass_20": ("🏅", "Покоритель пропуска", "пройти все 20 уровней пропуска", lambda u, x: u["pass_max"] >= PASS_TIERS),
+})
 
 
 def get_inv_item(uid: int, inv_id: int) -> str | None:
@@ -1498,48 +2532,6 @@ def _with_notices(uid: int, text: str) -> str:
 
 
 # ── экраны ────────────────────────────────────────────────────────────────────
-def menu_screen(uid: int, name: str, notice: str = "") -> tuple[str, Kb]:
-    p = get_profile(uid, name)
-    notes = [notice] if notice else []
-    if p["refunded"]:
-        notes.append(f"↩️ Батл никто не принял — ставка <b>{_fmt(p['refunded'])}</b> 🪙 возвращена")
-    b = maybe_bailout(uid)
-    if b["given"]:
-        notes.append(f"🆘 Ты был на нуле — держи пособие <b>+{BAILOUT}</b> 🪙")
-        p = get_profile(uid, name)
-    elif b.get("broke"):
-        notes.append(f"🆘 Ты на нуле. Пособие через <b>{_human(b['wait'])}</b> — или забери бонус дня")
-    pn = pop_notices(uid)
-    if pn:
-        notes.append(pn)
-    lb = leaderboard(None)
-    rank = next((d["rank"] for d in lb if d["user_id"] == uid), len(lb))
-    ds, fs = daily_status(uid), free_status(uid)
-    se = season_info()
-    sg = season_growth(uid)
-    text = (
-        "🎰 <b>КЕЙС-КЛУБ</b>\n"
-        f"👤 {_e(name)}{_tags(uid, p['title'])}\n\n"
-        f"🪙 Баланс: <b>{_fmt(p['coins'])}</b>\n"
-        f"🎒 Инвентарь: {p['inv_count']} шт. на {_fmt(p['inv_value'])} 🪙\n"
-        f"📈 Капитал: <b>{_fmt(p['networth'])}</b> 🪙 · место <b>#{rank}</b> из {len(lb)}\n"
-        f"📅 Сезон {se['no']}: ещё {_human_long(se['left'])} · твой прирост <b>{'+' if sg >= 0 else '−'}{_fmt(abs(sg))}</b>\n\n"
-        + ("🎁 <b>Бонус дня готов!</b>" if ds["ready"] else f"🎁 Бонус дня через {_human(ds['wait'])}")
-        + (f" (серия {ds['streak']} дн.)" if ds["streak"] else "")
-        + "\n" + ("🎟 <b>Бесплатный кейс готов!</b>" if fs["ready"] else f"🎟 Бесплатный кейс через {_human(fs['wait'])}")
-        + ("\n\n" + "\n".join(notes) if notes else "")
-    )
-    kb = _kb([
-        [("📦 Кейсы", f"cs:cases:{uid}"), ("🎒 Инвентарь", f"cs:inv:{uid}:0")],
-        [("🎟 Бесплатный ✅" if fs["ready"] else "🎟 Бесплатный ⏳", f"cs:free:{uid}"),
-         ("🎁 Бонус дня ✅" if ds["ready"] else "🎁 Бонус дня ⏳", f"cs:daily:{uid}")],
-        [("🚀 Апгрейд", f"cs:up:{uid}:0"), ("🧾 Контракт", f"cs:ct:{uid}")],
-        [("⚔️ Батл", f"cs:battle:{uid}"), ("🏆 Топ", f"cs:top:{uid}:all")],
-        [("🏅 Достижения", f"cs:ach:{uid}"), ("📊 Профиль", f"cs:prof:{uid}")],
-    ])
-    return text, kb
-
-
 def cases_screen(uid: int) -> tuple[str, Kb]:
     p = get_profile(uid)
     fs = free_status(uid)
@@ -1637,27 +2629,6 @@ def top_screen(uid: int, mode: str = "all", chat_id: int | None = None) -> tuple
     tabs = [("🌍 Все", "all"), ("💬 Чат", "chat"), ("📅 Сезон", "season")]
     row = [(f"✔️ {t}" if m == mode else t, f"cs:top:{uid}:{m}") for t, m in tabs]
     return note + "\n".join(lines), _kb([row, [("🏠 Меню", f"cs:menu:{uid}")]])
-
-
-def profile_screen(uid: int, name: str) -> tuple[str, Kb]:
-    p = get_profile(uid, name)
-    best = (f"{_it(p['best_item'])} — {_fmt(p['best_price'])} 🪙" if p["best_item"] else "—")
-    have = get_achievements(uid)
-    text = (
-        f"📊 <b>ПРОФИЛЬ</b> · {_e(name)}{_tags(uid, p['title'])}\n\n"
-        f"🪙 Баланс: <b>{_fmt(p['coins'])}</b>\n"
-        f"📈 Капитал: <b>{_fmt(p['networth'])}</b> 🪙\n"
-        f"📦 Открыто кейсов: {p['opened']}\n"
-        f"💸 Потрачено: {_fmt(p['spent'])} · 💰 Продано на: {_fmt(p['earned'])}\n"
-        f"🏅 Лучший дроп: {best}\n"
-        f"⚔️ Батлы: {p['bw']} побед / {p['bl']} поражений (лучшая серия {p['bstreak_best']})\n"
-        f"🚀 Апгрейды: {p['up_win']} из {p['up_try']} успешных · 🧾 контрактов: {p['contracts']}\n"
-        f"🤝 Обменов: {p['trades']} · 🎁 подарков: {p['gifts']}\n"
-        f"🏅 Достижения: {len(have)}/{len(ACH)} · 🔥 серия бонуса: {p['streak']} дн.\n\n"
-        f"<i>Бонус дня {DAILY_BASE}–{DAILY_BASE + DAILY_STEP * DAILY_STREAK_MAX} 🪙, "
-        f"пособие {BAILOUT} 🪙 если на нуле (раз в {BAILOUT_COOLDOWN // 3600} ч)</i>"
-    )
-    return text, _kb([[("🏅 Достижения", f"cs:ach:{uid}"), ("🏠 Меню", f"cs:menu:{uid}")]])
 
 
 def battle_pick_screen(uid: int) -> tuple[str, Kb]:
@@ -2344,6 +3315,8 @@ async def _dispatch(cb: types.CallbackQuery):
         t, k = trade_theirs_screen(uid, int(parts[3]), int(parts[4]), int(parts[5]))
     elif act == "trc":
         return await _do_trade_create(cb, uid, int(parts[3]), int(parts[4]), int(parts[5]))
+    elif act in _XACTS:
+        return await _dispatch_x(cb, act, uid, name, parts)
     else:
         await cb.answer("Неизвестная кнопка", show_alert=True)
         return
@@ -2526,9 +3499,914 @@ async def cmd_cadmin(message: types.Message):
     await say(_admin_help())
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  v5 UI: меню, квесты, мини-спин, билеты, рынок, альбом, мини-игры, сезонный пропуск
+# ══════════════════════════════════════════════════════════════════════════════
+def _bar(cur: int, total: int, width: int = 10) -> str:
+    if total <= 0:
+        return "▰" * width
+    f = max(0, min(width, int(width * cur / total)))
+    return "▰" * f + "▱" * (width - f)
+
+
+def _prize_label(kind: str, val: int) -> str:
+    if kind == "ticket":
+        return "🎫 билет на «Стартовый» кейс"
+    if kind == "xp":
+        return f"⭐ {val} XP"
+    emoji = "🎰" if val >= 10000 else "💎" if val >= 2000 else "💰" if val >= 250 else "🪙"
+    return f"{emoji} {_fmt(val)} монет"
+
+
+def _reward_txt(coins: int, xp: int = 0, tickets: int = 0) -> str:
+    return f"+{_fmt(coins)}🪙" + (f" +{xp}XP" if xp else "") + (f" +{tickets}🎫" if tickets else "")
+
+
+# ── меню и профиль ────────────────────────────────────────────────────────────
+def menu_screen(uid: int, name: str, notice: str = "") -> tuple[str, Kb]:
+    p = get_profile(uid, name)
+    notes = [notice] if notice else []
+    if p["refunded"]:
+        notes.append(f"↩️ Батл никто не принял — ставка <b>{_fmt(p['refunded'])}</b> 🪙 возвращена")
+    b = maybe_bailout(uid)
+    if b["given"]:
+        notes.append(f"🆘 Ты был на нуле — держи пособие <b>+{BAILOUT}</b> 🪙")
+        p = get_profile(uid, name)
+    elif b.get("broke"):
+        notes.append(f"🆘 Ты на нуле. Пособие через <b>{_human(b['wait'])}</b> — или забери бонус дня")
+    pn = pop_notices(uid)
+    if pn:
+        notes.append(pn)
+    lb = leaderboard(None)
+    rank = next((d["rank"] for d in lb if d["user_id"] == uid), len(lb))
+    ds, fs = daily_status(uid), free_status(uid)
+    se = season_info()
+    sg = season_growth(uid)
+    sp, qs, ps = spin_status(uid), quest_summary(uid), pass_state(uid)
+    lvl, into, need = level_progress(p["xp"])
+    text = (
+        "🎰 <b>КЕЙС-КЛУБ</b>\n"
+        f"👤 {_e(name)}{_tags(uid, p['title'])}\n\n"
+        f"🪙 Баланс: <b>{_fmt(p['coins'])}</b>" + (f" · 🎫 билетов: <b>{p['tickets']}</b>" if p["tickets"] else "") + "\n"
+        f"🎒 Инвентарь: {p['inv_count']} шт. на {_fmt(p['inv_value'])} 🪙" + (f" · 📌 лотов: {p['lots']}" if p["lots"] else "") + "\n"
+        f"📈 Капитал: <b>{_fmt(p['networth'])}</b> 🪙 · место <b>#{rank}</b> из {len(lb)}\n"
+        f"⭐ Уровень <b>{lvl}</b> · " + (f"{into}/{need} XP {_bar(into, need)}" if need else "максимум") + "\n"
+        f"📅 Сезон {se['no']}: ещё {_human_long(se['left'])} · прирост <b>{'+' if sg >= 0 else '−'}{_fmt(abs(sg))}</b>\n\n"
+        + ("🎁 <b>Бонус дня готов!</b>" if ds["ready"] else f"🎁 Бонус дня через {_human(ds['wait'])}")
+        + (f" (серия {ds['streak']} дн.)" if ds["streak"] else "")
+        + "\n" + ("🎟 <b>Бесплатный кейс готов!</b>" if fs["ready"] else f"🎟 Бесплатный кейс через {_human(fs['wait'])}")
+        + "\n" + (f"🎡 <b>Мини-спин готов</b> (зарядов: {sp['charges']})" if sp["charges"] else f"🎡 Мини-спин через {_human(sp['next_in'])}")
+        + f"\n📋 Квесты: дня {qs['done_d']}/3 · недели {qs['done_w']}/3" + (f" · <b>🎁 наград: {qs['ready']}</b>" if qs["ready"] else "")
+        + ("\n\n" + "\n".join(notes) if notes else "")
+    )
+    rows = [
+        [("📦 Кейсы", f"cs:cases:{uid}"), ("🎒 Инвентарь", f"cs:inv:{uid}:0")],
+        [("🎟 Бесплатный ✅" if fs["ready"] else "🎟 Бесплатный ⏳", f"cs:free:{uid}"),
+         ("🎁 Бонус дня ✅" if ds["ready"] else "🎁 Бонус дня ⏳", f"cs:daily:{uid}")],
+        [(f"🎡 Спин ✅×{sp['charges']}" if sp["charges"] else "🎡 Спин ⏳", f"cs:sp:{uid}"),
+         (f"📋 Квесты{' 🎁' + str(qs['ready']) if qs['ready'] else ''}", f"cs:qs:{uid}")],
+        [("🚀 Апгрейд", f"cs:up:{uid}:0"), ("🧾 Контракт", f"cs:ct:{uid}")],
+        [("🏪 Рынок", f"cs:mk:{uid}:new:0"), ("📚 Альбом", f"cs:al:{uid}:0")],
+        [("🎮 Игры", f"cs:gm:{uid}"), (f"⭐ Пропуск {ps['tier']}/{PASS_TIERS}{' 🎁' if ps['ready'] else ''}", f"cs:ps:{uid}")],
+        [("⚔️ Батл", f"cs:battle:{uid}"), ("🏆 Топ", f"cs:top:{uid}:all")],
+        [("🏅 Достижения", f"cs:ach:{uid}"), ("📊 Профиль", f"cs:prof:{uid}")],
+    ]
+    if p["tickets"] > 0:
+        rows.insert(2, [(f"🎫 Открыть по билету ({p['tickets']})", f"cs:tk:{uid}")])
+    return text, _kb(rows)
+
+
+def profile_screen(uid: int, name: str) -> tuple[str, Kb]:
+    p = get_profile(uid, name)
+    best = (f"{_it(p['best_item'])} — {_fmt(p['best_price'])} 🪙" if p["best_item"] else "—")
+    have = get_achievements(uid)
+    lvl, into, need = level_progress(p["xp"])
+    text = (
+        f"📊 <b>ПРОФИЛЬ</b> · {_e(name)}{_tags(uid, p['title'])}\n\n"
+        f"⭐ Уровень <b>{lvl}</b> · " + (f"{into}/{need} XP {_bar(into, need)}" if need else "максимум") + "\n"
+        f"🎮 Лимит ставки в мини-играх: {_fmt(max_bet(lvl))} 🪙 (растёт с уровнем)\n"
+        f"🪙 Баланс: <b>{_fmt(p['coins'])}</b> · 🎫 билетов: {p['tickets']}\n"
+        f"📈 Капитал: <b>{_fmt(p['networth'])}</b> 🪙\n"
+        f"📦 Открыто кейсов: {p['opened']}\n"
+        f"💸 Потрачено: {_fmt(p['spent'])} · 💰 Продано на: {_fmt(p['earned'])}\n"
+        f"🏅 Лучший дроп: {best}\n"
+        f"⚔️ Батлы: {p['bw']} побед / {p['bl']} поражений (лучшая серия {p['bstreak_best']})\n"
+        f"🚀 Апгрейды: {p['up_win']} из {p['up_try']} успешных · 🧾 контрактов: {p['contracts']}\n"
+        f"🤝 Обменов: {p['trades']} · 🎁 подарков: {p['gifts']}\n"
+        f"🏪 Рынок: продано {p['market_sales']}, куплено {p['market_buys']}\n"
+        f"🎲 Мини-игры: {p['game_plays']} раундов, {p['game_wins']} побед · 📋 заданий: {p['quests_done']}\n"
+        f"🏅 Достижения: {len(have)}/{len(ACH)} · 🔥 серия бонуса: {p['streak']} дн.\n\n"
+        f"<i>Бонус дня {DAILY_BASE}–{DAILY_BASE + DAILY_STEP * DAILY_STREAK_MAX} 🪙, "
+        f"пособие {BAILOUT} 🪙 если на нуле (раз в {BAILOUT_COOLDOWN // 3600} ч)</i>"
+    )
+    return text, _kb([[("🏅 Достижения", f"cs:ach:{uid}"), ("🏠 Меню", f"cs:menu:{uid}")]])
+
+
+# ── квесты ────────────────────────────────────────────────────────────────────
+def quests_screen(uid: int, notice: str = "") -> tuple[str, Kb]:
+    st = quest_state(uid)
+    lines = [notice + "\n" if notice else "", "📋 <b>КВЕСТЫ</b>"]
+    btns = []
+    for period, title, left in (("d", "Сегодня", st["d_left"]), ("w", "Неделя", st["w_left"])):
+        lines.append(f"\n<b>{title}</b> · осталось {_human_long(left)}")
+        for q in st[period]:
+            done = q["progress"] >= q["target"]
+            mark = "✅" if q["claimed"] else "🎁" if done else "▫️"
+            txt = quest_text(q["qid"], q["target"])
+            rew = _reward_txt(q["coins"], q["xp"], q["tickets"])
+            lines.append(f"{mark} {'🎯 <b>' + txt + '</b>' if q['idx'] == 3 else txt} — {q['progress']}/{q['target']} · {rew}")
+            if done and not q["claimed"]:
+                btns.append((f"🎁 {txt[:30]}", f"cs:qc:{uid}:{period}:{q['idx']}"))
+    rows = [[b] for b in btns[:6]]
+    if len(btns) > 1:
+        rows.insert(0, [(f"🎁 Забрать всё ({len(btns)})", f"cs:qca:{uid}")])
+    rows.append([("🔄 Обновить", f"cs:qs:{uid}"), ("🏠 Меню", f"cs:menu:{uid}")])
+    return "\n".join(lines).strip("\n"), _kb(rows)
+
+
+async def _do_quest_claim(cb, uid: int, period: str, idx: int):
+    r = quest_claim(uid, period, idx)
+    if not r["ok"]:
+        await cb.answer({"incomplete": "Задание ещё не выполнено", "claimed": "Награда уже получена"}.get(r["reason"], "Задание устарело"),
+                        show_alert=True)
+        t, k = quests_screen(uid)
+        await _edit(cb.message, t, k)
+        return
+    await cb.answer("Награда получена!")
+    t, k = quests_screen(uid, f"🎁 Получено: {_reward_txt(r['coins'], r['xp'], r['tickets'])}")
+    await _edit(cb.message, _with_notices(uid, t), k)
+
+
+async def _do_quest_claim_all(cb, uid: int):
+    r = quest_claim_all(uid)
+    if not r["ok"]:
+        await cb.answer("Пока нечего забирать", show_alert=True)
+        return
+    await cb.answer(f"+{r['coins']} 🪙")
+    t, k = quests_screen(uid, f"🎁 Получено за {r['n']} зад.: {_reward_txt(r['coins'], r['xp'], r['tickets'])}")
+    await _edit(cb.message, _with_notices(uid, t), k)
+
+
+# ── мини-спин и билеты ────────────────────────────────────────────────────────
+def spin_screen(uid: int, notice: str = "") -> tuple[str, Kb]:
+    s = spin_status(uid)
+    lines = [notice + "\n" if notice else "", "🎡 <b>МИНИ-СПИН</b>",
+             f"Заряды: <b>{s['charges']}</b>/{SPIN_MAX} · новый заряд каждые {SPIN_COOLDOWN // 3600} ч"
+             + ("" if s["charges"] >= SPIN_MAX else f" (следующий через {_human(s['next_in'])})"), "", "🎁 Призы:"]
+    for kind, val, w in SPIN_PRIZES:
+        lines.append(f"{_prize_label(kind, val)} — {w:g}%")
+    lines.append(f"\n<i>В среднем ≈ {SPIN_EV:.0f} 🪙 за спин. Заряды копятся (до {SPIN_MAX}).</i>")
+    btn = ("🎡 Крутить!", f"cs:spgo:{uid}") if s["charges"] else (f"⏳ Через {_human(s['next_in'])}", f"cs:sp:{uid}")
+    return "\n".join(x for x in lines if x != ""), _kb([[btn], [("📋 Квесты", f"cs:qs:{uid}"), ("🏠 Меню", f"cs:menu:{uid}")]])
+
+
+async def _anim_spin(msg, kind: str, val: int):
+    pool = ["🪙", "💰", "🎫", "⭐", "💎", "🪙", "🎰", "🪙"]
+    for k in range(7):
+        row = " ".join(_RNG.choice(pool) for _ in range(5))
+        await _frame(msg, f"🎡 <b>МИНИ-СПИН</b>\n\n{row}\n          🔼\n\n<i>{'◐◓◑◒'[k % 4]} крутится…</i>")
+        await asyncio.sleep(0.5 + 0.1 * k)
+
+
+async def _do_spin(cb, uid: int, name: str):
+    if uid in _BUSY:
+        await cb.answer("Погоди, ещё идёт действие 🎰")
+        return
+    get_profile(uid, name)
+    r = do_spin(uid)
+    if not r["ok"]:
+        await cb.answer(f"Заряда пока нет. Следующий через {_human(r['next_in'])}", show_alert=True)
+        return
+    await cb.answer()
+    _BUSY.add(uid)
+    try:
+        try:
+            await asyncio.wait_for(_anim_spin(cb.message, r["kind"], r["value"]), ANIM_TIMEOUT)
+        except Exception:
+            logger.exception("анимация спина упала")
+        big = r["kind"] == "coins" and r["value"] >= 2000
+        t, k = spin_screen(uid, f"{'🎉🎉 <b>ДЖЕКПОТ!</b> 🎉🎉' if big else '🎉 Выпало:'} {_prize_label(r['kind'], r['value'])}")
+        await _edit(cb.message, _with_notices(uid, t), k)
+    finally:
+        _BUSY.discard(uid)
+
+
+def ticket_drop_screen(uid: int, item: str, inv_id: int, left: int) -> tuple[str, Kb]:
+    i = item_info(item)
+    text = (f"🎫 <b>Билет → «{CASES[TICKET_CASE]['name']}»</b>\n\n{_BANNER[i['rarity']]}\n\n{_it(item)}\n"
+            f"💰 {_fmt(i['price'])} 🪙 · билетов осталось: {left}")
+    rows = [[(f"💰 Продать за {_fmt(i['price'])}", f"cs:sell:{uid}:{inv_id}:0:-1")]]
+    if left:
+        rows.append([(f"🎫 Ещё по билету ({left})", f"cs:tk:{uid}")])
+    rows += [[("📦 Кейсы", f"cs:cases:{uid}"), ("🎒 Инвентарь", f"cs:inv:{uid}:0")], [("🏠 Меню", f"cs:menu:{uid}")]]
+    return _with_notices(uid, text), _kb(rows)
+
+
+async def _do_ticket(cb, uid: int, name: str):
+    if uid in _BUSY:
+        await cb.answer("Погоди, кейс ещё открывается 🎰")
+        return
+    get_profile(uid, name)
+    r = open_ticket(uid)
+    if not r["ok"]:
+        await cb.answer("Билетов нет. Их дают за квесты, уровни, спин и пропуск", show_alert=True)
+        return
+    await cb.answer()
+    _BUSY.add(uid)
+    try:
+        try:
+            await asyncio.wait_for(_anim_open(cb.message, TICKET_CASE, r["item"]), ANIM_TIMEOUT)
+        except Exception:
+            logger.exception("анимация билета упала")
+        t, k = ticket_drop_screen(uid, r["item"], r["inv_id"], r["left"])
+        await _edit(cb.message, t, k)
+    finally:
+        _BUSY.discard(uid)
+
+
+# ── рынок игроков ─────────────────────────────────────────────────────────────
+def market_screen(uid: int, sort: str = "new", page: int = 0, notice: str = "") -> tuple[str, Kb]:
+    if sort not in MARKET_SORTS:
+        sort = "new"
+    b = market_browse(sort, page, viewer=uid)
+    lines = [notice + "\n" if notice else "",
+             f"🏪 <b>РЫНОК</b> · {MARKET_SORTS[sort][0]} · лотов: {b['total']} · стр. {b['page'] + 1}/{b['pages']}"]
+    buy = []
+    for n, lot in enumerate(b["lots"], 1):
+        base = max(1, item_info(lot["item"])["price"])
+        lines.append(f"{n}. {_it(lot['item'])} — <b>{_fmt(lot['price'])}</b> 🪙 <i>(×{lot['price'] / base:.2f} к справочной)</i> · {_e(_cut_name(lot['seller_name'] or '?', 14))}")
+        buy.append((f"🛒 {n}", f"cs:mkb:{uid}:{lot['id']}:0"))
+    if not b["lots"]:
+        lines.append("Пока пусто. Выстави что-нибудь первым 👇")
+    lines.append(f"\n<i>Комиссия {round(MARKET_FEE * 100)}% с продавца · лот живёт {MARKET_TTL // 86400} дня · цена от ×{MARKET_PRICE_RANGE[0]:g} до ×{MARKET_PRICE_RANGE[1]:g} справочной</i>")
+    rows = [[(("✔️ " if k == sort else "") + t, f"cs:mk:{uid}:{k}:0") for k, (t, _) in MARKET_SORTS.items()][:4]]
+    if buy:
+        rows.append(buy)
+    nav = []
+    if b["page"] > 0:
+        nav.append(("◀️", f"cs:mk:{uid}:{sort}:{b['page'] - 1}"))
+    nav.append((f"{b['page'] + 1}/{b['pages']}", f"cs:mk:{uid}:{sort}:{b['page']}"))
+    if b["page"] < b["pages"] - 1:
+        nav.append(("▶️", f"cs:mk:{uid}:{sort}:{b['page'] + 1}"))
+    rows.append(nav)
+    rows.append([("📦 Выставить предмет", f"cs:mkl:{uid}:0"), ("🗂 Мои лоты", f"cs:mkm:{uid}")])
+    rows.append([("🏠 Меню", f"cs:menu:{uid}")])
+    return "\n".join(lines).strip("\n"), _kb(rows)
+
+
+def market_pick_screen(uid: int, page: int = 0) -> tuple[str, Kb]:
+    return _pick_screen(uid, page, "🏪 <b>Выставить на рынок</b>: выбери предмет", lambda i, pg: f"cs:mki:{uid}:{i}",
+                        lambda pg: f"cs:mkl:{uid}:{pg}", f"cs:mk:{uid}:new:0",
+                        footer="<i>Пока предмет на рынке, он «заморожен», но учитывается в капитале.</i>",
+                        empty="🎒 Нечего выставлять")
+
+
+def market_price_screen(uid: int, inv_id: int) -> tuple[str, Kb]:
+    item = get_inv_item(uid, inv_id)
+    if item is None:
+        return "Этого предмета уже нет в инвентаре.", _kb([[("🏪 Рынок", f"cs:mk:{uid}:new:0")]])
+    lo, hi = market_price_bounds(item)
+    base = item_info(item)["price"]
+    rows, lines = [], [f"🏪 <b>Цена лота</b>\n{_it(item)} · справочная {_fmt(base)} 🪙\n",
+                       f"Допустимо: {_fmt(lo)} — {_fmt(hi)} 🪙. Тебе придёт цена минус {round(MARKET_FEE * 100)}%."]
+    for i, m in enumerate(MARKET_PRESETS):
+        price = max(lo, min(hi, round(base * m)))
+        lines.append(f"×{m:g} → <b>{_fmt(price)}</b> 🪙 (получишь {_fmt(price - int(price * MARKET_FEE))})")
+        rows.append([(f"×{m:g} · {_fmt(price)} 🪙", f"cs:mkp:{uid}:{inv_id}:{i}")])
+    rows.append([("⬅️ Другой предмет", f"cs:mkl:{uid}:0")])
+    return "\n".join(lines), _kb(rows)
+
+
+def market_mine_screen(uid: int, notice: str = "") -> tuple[str, Kb]:
+    m = market_mine(uid)
+    lines = [notice + "\n" if notice else "", f"🗂 <b>МОИ ЛОТЫ</b> · {len(m['open'])}/{MARKET_MAX_LOTS}"]
+    rows = []
+    for n, lot in enumerate(m["open"], 1):
+        left = max(0, int(lot["created"] + MARKET_TTL - time.time()))
+        lines.append(f"{n}. {_it(lot['item'])} — {_fmt(lot['price'])} 🪙 · ещё {_human_long(left)}")
+        rows.append([(f"❌ Снять №{n}", f"cs:mkx:{uid}:{lot['id']}")])
+    if not m["open"]:
+        lines.append("Активных лотов нет.")
+    if m["sold"]:
+        lines.append("\n💰 Недавно продано:")
+        for lot in m["sold"]:
+            lines.append(f"• {_it(lot['item'])} — {_fmt(lot['price'])} 🪙")
+    rows.append([("📦 Выставить ещё", f"cs:mkl:{uid}:0"), ("🏪 Рынок", f"cs:mk:{uid}:new:0")])
+    rows.append([("🏠 Меню", f"cs:menu:{uid}")])
+    return "\n".join(x for x in lines if x != ""), _kb(rows)
+
+
+_MK_ERR = {"closed": "Этот лот уже продан или снят", "own": "Свой лот купить нельзя 😄", "gone": "Предмета уже нет в инвентаре",
+           "trophy": "Кубки и награды пропуска продавать нельзя", "limit": f"Не больше {MARKET_MAX_LOTS} лотов одновременно",
+           "cap": "Лимит передачи ценности на сутки исчерпан — цена лота слишком сильно отличается от справочной"}
+
+
+async def _do_market_buy(cb, uid: int, name: str, lot_id: int, ok: int):
+    lot = market_get(lot_id)
+    if lot is None or lot["status"] != "open":
+        await cb.answer(_MK_ERR["closed"], show_alert=True)
+        t, k = market_screen(uid)
+        await _edit(cb.message, t, k)
+        return
+    if lot["seller"] == uid:
+        await cb.answer(_MK_ERR["own"], show_alert=True)
+        return
+    if not ok:
+        await cb.answer()
+        base = item_info(lot["item"])["price"]
+        await _edit(cb.message, f"🛒 Купить {_it(lot['item'])} за <b>{_fmt(lot['price'])}</b> 🪙?\n"
+                                f"Справочная цена {_fmt(base)} 🪙 (×{lot['price'] / max(1, base):.2f}). Продавец: {_e(lot['seller_name'] or '?')}",
+                    _kb([[("✅ Купить", f"cs:mkb:{uid}:{lot_id}:1"), ("❌ Отмена", f"cs:mk:{uid}:new:0")]]))
+        return
+    r = market_buy(uid, lot_id, name)
+    if not r["ok"]:
+        await cb.answer(_MK_ERR.get(r["reason"]) or f"Не хватает {_fmt(r.get('need', 0))} 🪙", show_alert=True)
+        return
+    await cb.answer("Куплено!")
+    t, k = market_screen(uid, "new", 0, f"✅ Куплено: {_it(r['item'])} за <b>{_fmt(r['price'])}</b> 🪙")
+    await _edit(cb.message, _with_notices(uid, t), k)
+
+
+async def _do_market_list(cb, uid: int, inv_id: int, idx: int):
+    item = get_inv_item(uid, inv_id)
+    if item is None or not (0 <= idx < len(MARKET_PRESETS)):
+        await cb.answer(_MK_ERR["gone"], show_alert=True)
+        return
+    lo, hi = market_price_bounds(item)
+    price = max(lo, min(hi, round(item_info(item)["price"] * MARKET_PRESETS[idx])))
+    r = market_list(uid, inv_id, price)
+    if not r["ok"]:
+        await cb.answer(_MK_ERR.get(r["reason"], "Не получилось"), show_alert=True)
+        return
+    await cb.answer("Лот выставлен")
+    t, k = market_mine_screen(uid, f"✅ Выставлено: {_it(item)} за <b>{_fmt(price)}</b> 🪙")
+    await _edit(cb.message, _with_notices(uid, t), k)
+
+
+async def _do_market_cancel(cb, uid: int, lot_id: int):
+    r = market_cancel(uid, lot_id)
+    if not r["ok"]:
+        await cb.answer(_MK_ERR["closed"], show_alert=True)
+    else:
+        await cb.answer("Лот снят — предмет вернулся в инвентарь")
+    t, k = market_mine_screen(uid)
+    await _edit(cb.message, t, k)
+
+
+# ── альбом ────────────────────────────────────────────────────────────────────
+ALBUM_PER_PAGE = 8
+
+
+def album_screen(uid: int, page: int = 0, notice: str = "") -> tuple[str, Kb]:
+    st = album_state(uid)
+    cols = st["cols"]
+    pages = max(1, -(-len(cols) // ALBUM_PER_PAGE))
+    page = max(0, min(page, pages - 1))
+    lines = [notice + "\n" if notice else "", "📚 <b>АЛЬБОМ</b>",
+             f"Открыто предметов: <b>{st['owned']}/{st['total']}</b> {_bar(st['owned'], st['total'])}",
+             "<i>предмет засчитывается, как только он хоть раз побывал у тебя — продавать дубли и экспонаты можно</i>", ""]
+    ms_btns = []
+    for pct, coins, tk in ALBUM_MILESTONES:
+        need = -(-st["total"] * pct // 100)
+        key = f"all{pct}"
+        if key in st["claimed"]:
+            lines.append(f"✅ {pct}% каталога — получено")
+        elif st["owned"] >= need:
+            lines.append(f"🎁 {pct}% каталога — забери {_reward_txt(coins, 0, tk)}")
+            ms_btns.append((f"🎁 {pct}% → +{_fmt(coins)}🪙", f"cs:alm:{uid}:{pct}"))
+        else:
+            lines.append(f"🔒 {pct}% каталога ({st['owned']}/{need}) · {_reward_txt(coins, 0, tk)}")
+    lines.append("\n<b>Наборы:</b>")
+    btns = []
+    for col in cols[page * ALBUM_PER_PAGE:(page + 1) * ALBUM_PER_PAGE]:
+        mark = "✅" if col["claimed"] else "🎁" if col["complete"] else "▫️"
+        lines.append(f"{mark} {col['icon']} {col['name']} — {col['have']}/{col['total']}")
+        btns.append((f"{mark} {col['icon']} {col['name']} {col['have']}/{col['total']}"[:40], f"cs:als:{uid}:{col['key']}"))
+    rows = [[b] for b in ms_btns] + [btns[i:i + 2] for i in range(0, len(btns), 2)]
+    nav = []
+    if page > 0:
+        nav.append(("◀️", f"cs:al:{uid}:{page - 1}"))
+    nav.append((f"{page + 1}/{pages}", f"cs:al:{uid}:{page}"))
+    if page < pages - 1:
+        nav.append(("▶️", f"cs:al:{uid}:{page + 1}"))
+    rows.append(nav)
+    rows.append([("🏪 Рынок", f"cs:mk:{uid}:new:0"), ("🏠 Меню", f"cs:menu:{uid}")])
+    return "\n".join(lines).strip("\n"), _kb(rows)
+
+
+def album_set_screen(uid: int, col_key: str, notice: str = "") -> tuple[str, Kb]:
+    col = next((c for c in album_state(uid)["cols"] if c["key"] == col_key), None)
+    if col is None:
+        return "Такого набора нет.", _kb([[("📚 Альбом", f"cs:al:{uid}:0")]])
+    have = album_items(uid)
+    lines = [notice + "\n" if notice else "", f"{col['icon']} <b>{col['name']}</b> — {col['have']}/{col['total']} {_bar(col['have'], col['total'])}",
+             f"Награда: {_reward_txt(col['coins'], col['xp'], col['tickets'])}", ""]
+    for i in sorted(col["items"], key=lambda k: item_info(k)["price"]):
+        lines.append(f"{'✅' if i in have else '⬜'} {_it(i)} — {_fmt(item_info(i)['price'])} 🪙")
+    rows = []
+    if col["claimed"]:
+        lines.append("\n✅ Награда за набор получена")
+    elif col["complete"]:
+        rows.append([("🎁 Забрать награду", f"cs:alc:{uid}:{col_key}")])
+    else:
+        lines.append(f"\n<i>Не хватает: {col['total'] - col['have']}. Ищи на рынке, в обмене и в кейсах.</i>")
+    rows.append([("🏪 Рынок", f"cs:mk:{uid}:new:0"), ("📚 Альбом", f"cs:al:{uid}:0")])
+    return "\n".join(lines).strip("\n"), _kb(rows)
+
+
+async def _do_album_claim(cb, uid: int, col_key: str):
+    r = album_claim(uid, col_key)
+    if not r["ok"]:
+        await cb.answer({"incomplete": "Набор ещё не собран", "claimed": "Награда уже получена"}.get(r["reason"], "Не получилось"), show_alert=True)
+        t, k = album_set_screen(uid, col_key)
+        await _edit(cb.message, t, k)
+        return
+    await cb.answer("Набор собран!")
+    t, k = album_set_screen(uid, col_key, f"🎉 Набор собран! {_reward_txt(r['coins'], r['xp'], r['tickets'])}")
+    await _edit(cb.message, _with_notices(uid, t), k)
+
+
+async def _do_album_milestone(cb, uid: int, pct: int):
+    r = album_milestone_claim(uid, pct)
+    if not r["ok"]:
+        await cb.answer({"incomplete": "Ещё не набрано", "claimed": "Награда уже получена"}.get(r["reason"], "Не получилось"), show_alert=True)
+        return
+    await cb.answer(f"+{_fmt(r['coins'])} 🪙")
+    t, k = album_screen(uid, 0, f"🎉 {pct}% каталога! {_reward_txt(r['coins'], 0, r['tickets'])}")
+    await _edit(cb.message, _with_notices(uid, t), k)
+
+
+# ── мини-игры ─────────────────────────────────────────────────────────────────
+GAMES = {"coin": ("🪙", "Орёл или решка"), "dice": ("🎲", "Кубик"), "mines": ("💣", "Мины"), "crash": ("🚀", "Краш")}
+GAME_HELP = {
+    "coin": f"Угадай сторону монеты — выплата <b>×{COIN_MULT}</b>.",
+    "dice": f"Бросаем две кости. «Меньше 7» и «Больше 7» — <b>×{DICE_MULT['u']}</b>, «Ровно 7» — <b>×{DICE_MULT['s']}</b>.",
+    "mines": f"Поле {MINES_N} клеток, часть — мины. Каждая безопасная клетка растит множитель; забери выигрыш до взрыва. Больше мин — быстрее рост.",
+    "crash": "Ракета набирает множитель. Успей нажать «Забрать» до краша — иначе ставка сгорит. Краш может случиться сразу.",
+}
+CRASH_TICK = 1.4
+_CRASH_TASKS: set = set()
+_DICE_FACES = "⚀⚁⚂⚃⚄⚅"
+
+
+def _game_err(r: dict) -> str:
+    return {"min": f"Минимальная ставка — {GAME_MIN_BET} 🪙",
+            "max": f"Максимум на твоём уровне — {_fmt(r.get('max', 0))} 🪙 (лимит растёт с уровнем)",
+            "money": f"Не хватает {_fmt(r.get('need', 0))} 🪙", "active": "У тебя уже идёт партия — сначала закончи её",
+            "bad": "Неверные параметры"}.get(r.get("reason"), "Не получилось")
+
+
+def games_hub_screen(uid: int, notice: str = "") -> tuple[str, Kb]:
+    p = get_profile(uid)
+    lvl = level_of(p["xp"])
+    act = game_active(uid)
+    lines = [notice + "\n" if notice else "", "🎮 <b>МИНИ-ИГРЫ</b>",
+             f"🪙 Баланс: <b>{_fmt(p['coins'])}</b> · ставка {GAME_MIN_BET}–{_fmt(max_bet(lvl))} 🪙 (лимит растёт с уровнем)",
+             f"Возврат ≈ {round(GAME_RTP * 100)}% — игровые монеты, вывода нет. Играй для удовольствия 🙂", ""]
+    for k, (ic, nm) in GAMES.items():
+        lines.append(f"{ic} <b>{nm}</b> — {GAME_HELP[k]}")
+    rows = []
+    if act:
+        ic, nm = GAMES[act["game"]]
+        lines.append(f"\n▶️ <b>Идёт партия:</b> {ic} {nm}, ставка {_fmt(act['bet'])} 🪙")
+        rows.append([(f"▶️ Продолжить: {ic} {nm}", f"cs:gmr:{uid}")])
+    rows.append([(f"{ic} {nm}", f"cs:gmg:{uid}:{k}") for k, (ic, nm) in list(GAMES.items())[:2]])
+    rows.append([(f"{ic} {nm}", f"cs:gmg:{uid}:{k}") for k, (ic, nm) in list(GAMES.items())[2:]])
+    rows.append([("📋 Квесты", f"cs:qs:{uid}"), ("🏠 Меню", f"cs:menu:{uid}")])
+    return "\n".join(x for x in lines if x != ""), _kb(rows)
+
+
+def game_bet_screen(uid: int, game: str, notice: str = "") -> tuple[str, Kb]:
+    p = get_profile(uid)
+    lim = min(max_bet(level_of(p["xp"])), p["coins"])
+    ic, nm = GAMES[game]
+    lines = [notice + "\n" if notice else "", f"{ic} <b>{nm}</b>", GAME_HELP[game],
+             f"\n🪙 Баланс: <b>{_fmt(p['coins'])}</b> · выбери ставку:"]
+    bets = [b for b in BET_PRESETS if GAME_MIN_BET <= b <= lim]
+    if lim >= GAME_MIN_BET and lim not in bets:
+        bets.append(lim)
+    btns = [((f"Макс {_fmt(b)}" if b == lim and b not in BET_PRESETS else _fmt(b)), f"cs:gmb:{uid}:{game}:{b}") for b in bets]
+    if not btns:
+        lines.append("\n⚠️ Не хватает монет даже на минимальную ставку.")
+    rows = [btns[i:i + 4] for i in range(0, len(btns), 4)]
+    rows.append([("🎮 Игры", f"cs:gm:{uid}"), ("🏠 Меню", f"cs:menu:{uid}")])
+    return "\n".join(x for x in lines if x != ""), _kb(rows)
+
+
+def game_options_screen(uid: int, game: str, bet: int) -> tuple[str, Kb]:
+    ic, nm = GAMES[game]
+    head = f"{ic} <b>{nm}</b> · ставка <b>{_fmt(bet)}</b> 🪙\n"
+    if game == "coin":
+        rows = [[("🦅 Орёл", f"cs:gmcoin:{uid}:{bet}:h"), ("🌕 Решка", f"cs:gmcoin:{uid}:{bet}:t")]]
+        text = head + f"Выплата при угадывании: <b>{_fmt(int(bet * COIN_MULT))}</b> 🪙"
+    elif game == "dice":
+        rows = [[(f"📉 Меньше 7 ×{DICE_MULT['u']}", f"cs:gmdice:{uid}:{bet}:u")],
+                [(f"🎯 Ровно 7 ×{DICE_MULT['s']}", f"cs:gmdice:{uid}:{bet}:s")],
+                [(f"📈 Больше 7 ×{DICE_MULT['o']}", f"cs:gmdice:{uid}:{bet}:o")]]
+        text = head + "Что выпадет на двух костях?"
+    elif game == "mines":
+        rows = [[(f"{m} 💣 · первая клетка ×{mines_mult(m, 1):.2f}", f"cs:gmmine:{uid}:{bet}:{m}")] for m in MINES_OPTIONS]
+        text = head + f"Сколько мин на поле {MINES_N} клеток? Чем больше мин — тем быстрее растёт множитель."
+    else:
+        rows = [[("🚀 Старт!", f"cs:gmcrash:{uid}:{bet}")]]
+        text = head + "Ракета стартует сразу после нажатия. Нажми «Забрать» вовремя!"
+    rows.append([("💱 Другая ставка", f"cs:gmg:{uid}:{game}"), ("🎮 Игры", f"cs:gm:{uid}")])
+    return text, _kb(rows)
+
+
+def game_result_screen(uid: int, game: str, bet: int, body: str, coins: int) -> tuple[str, Kb]:
+    ic, nm = GAMES[game]
+    text = f"{ic} <b>{nm}</b> · ставка {_fmt(bet)} 🪙\n\n{body}\n\n🪙 Баланс: <b>{_fmt(coins)}</b>"
+    p = get_profile(uid)
+    rows = []
+    if p["coins"] >= bet:
+        rows.append([(f"🔁 Ещё раз · {_fmt(bet)}🪙", f"cs:gmb:{uid}:{game}:{bet}")])
+    rows.append([("💱 Другая ставка", f"cs:gmg:{uid}:{game}"), ("🎮 Игры", f"cs:gm:{uid}")])
+    rows.append([("🏠 Меню", f"cs:menu:{uid}")])
+    return _with_notices(uid, text), _kb(rows)
+
+
+async def _do_coin(cb, uid: int, name: str, bet: int, side: str):
+    if uid in _BUSY:
+        await cb.answer("Погоди, раунд ещё идёт 🎰")
+        return
+    get_profile(uid, name)
+    r = coin_flip(uid, bet, side)
+    if not r["ok"]:
+        await cb.answer(_game_err(r), show_alert=True)
+        return
+    await cb.answer()
+    _BUSY.add(uid)
+    try:
+        for k in range(3):
+            await _frame(cb.message, f"🪙 <b>Орёл или решка</b> · ставка {_fmt(bet)} 🪙\n\n{'🪙🌕🦅'[k % 3]} подбрасываем…")
+            await asyncio.sleep(0.6)
+        res = "🦅 Орёл" if r["result"] == "h" else "🌕 Решка"
+        body = (f"{res} — 🟢 <b>ВЫИГРЫШ!</b> +{_fmt(r['payout'])} 🪙 (×{COIN_MULT})" if r["win"]
+                else f"{res} — 🔴 не угадал, ставка проиграна")
+        t, k = game_result_screen(uid, "coin", bet, body, r["coins"])
+        await _edit(cb.message, t, k)
+    finally:
+        _BUSY.discard(uid)
+
+
+async def _do_dice(cb, uid: int, name: str, bet: int, mode: str):
+    if uid in _BUSY:
+        await cb.answer("Погоди, раунд ещё идёт 🎰")
+        return
+    get_profile(uid, name)
+    r = dice_roll(uid, bet, mode)
+    if not r["ok"]:
+        await cb.answer(_game_err(r), show_alert=True)
+        return
+    await cb.answer()
+    _BUSY.add(uid)
+    try:
+        for k in range(3):
+            await _frame(cb.message, f"🎲 <b>Кубик</b> · ставка {_fmt(bet)} 🪙\n\n{_RNG.choice(_DICE_FACES)} {_RNG.choice(_DICE_FACES)}  бросаем…")
+            await asyncio.sleep(0.6)
+        d1, d2 = r["dice"]
+        pick = {"u": "меньше 7", "s": "ровно 7", "o": "больше 7"}[mode]
+        faces = f"{_DICE_FACES[d1 - 1]} {_DICE_FACES[d2 - 1]} = <b>{r['sum']}</b>"
+        body = (f"{faces}\nТы ставил: {pick} — 🟢 <b>ВЫИГРЫШ!</b> +{_fmt(r['payout'])} 🪙 (×{r['mult']})" if r["win"]
+                else f"{faces}\nТы ставил: {pick} — 🔴 мимо, ставка проиграна")
+        t, k = game_result_screen(uid, "dice", bet, body, r["coins"])
+        await _edit(cb.message, t, k)
+    finally:
+        _BUSY.discard(uid)
+
+
+def mines_screen(uid: int, notice: str = "", reveal: dict | None = None) -> tuple[str, Kb]:
+    """Игровое поле. reveal — состояние завершённой партии (показываем все мины)."""
+    if reveal is None:
+        g = game_active(uid)
+        if g is None or g["game"] != "mines":
+            return games_hub_screen(uid, "Активной партии нет.")
+        d, bet = g["data"], g["bet"]
+    else:
+        d, bet = reveal["state"], reveal["bet"]
+    k, m = len(d["open"]), d["m"]
+    mult = mines_mult(m, k)
+    rows = []
+    for r in range(4):
+        row = []
+        for ccol in range(4):
+            i = r * 4 + ccol
+            if i in d["open"]:
+                row.append(("💎", f"cs:gmx:{uid}"))
+            elif reveal is not None:
+                row.append(("💣" if i in d["mines"] else "▫️", f"cs:gmx:{uid}"))
+            else:
+                row.append(("⬜", f"cs:gmcell:{uid}:{i}"))
+        rows.append(row)
+    head = f"💣 <b>МИНЫ</b> · ставка <b>{_fmt(bet)}</b> 🪙 · мин: {m}\n"
+    if reveal is None:
+        nxt = mines_mult(m, k + 1) if k < MINES_N - m else mult
+        text = (head + f"Открыто: <b>{k}</b>/{MINES_N - m} · множитель <b>×{mult:.2f}</b> → {_fmt(int(bet * mult))} 🪙\n"
+                f"Следующая клетка: ×{nxt:.2f}" + (f"\n\n{notice}" if notice else ""))
+        rows.append([(f"💰 Забрать ×{mult:.2f} ({_fmt(int(bet * mult))}🪙)" if k else "👆 Выбери клетку", f"cs:gmout:{uid}" if k else f"cs:gmx:{uid}")])
+    else:
+        text = head + (notice or "")
+        rows.append([(f"🔁 Ещё раз · {_fmt(bet)}🪙", f"cs:gmb:{uid}:mines:{bet}"), ("🎮 Игры", f"cs:gm:{uid}")])
+    return text, _kb(rows)
+
+
+async def _do_mines_start(cb, uid: int, name: str, bet: int, m: int):
+    get_profile(uid, name)
+    r = mines_start(uid, bet, m)
+    if not r["ok"]:
+        await cb.answer(_game_err(r), show_alert=True)
+        return
+    await cb.answer("Партия началась")
+    t, k = mines_screen(uid)
+    await _edit(cb.message, t, k)
+
+
+async def _do_mines_cell(cb, uid: int, cell: int):
+    r = mines_pick(uid, cell)
+    if not r["ok"]:
+        await cb.answer("Эта клетка уже открыта" if r["reason"] == "bad" else "Активной партии нет", show_alert=True)
+        t, k = mines_screen(uid)
+        await _edit(cb.message, t, k)
+        return
+    await cb.answer()
+    if r["boom"]:
+        t, k = mines_screen(uid, f"💥 <b>БАХ!</b> Мина! Ставка {_fmt(r['bet'])} 🪙 проиграна.", reveal={"state": r["state"], "bet": r["bet"]})
+        await _edit(cb.message, _with_notices(uid, t), k)
+    elif r["done"]:
+        t, k = mines_screen(uid, f"🏆 <b>Все безопасные клетки открыты!</b> ×{r['mult']:.2f} → +{_fmt(r['payout'])} 🪙",
+                            reveal={"state": r["state"], "bet": r["bet"]})
+        await _edit(cb.message, _with_notices(uid, t), k)
+    else:
+        t, k = mines_screen(uid)
+        await _edit(cb.message, t, k)
+
+
+def crash_play_screen(uid: int, bet: int, mult: float) -> tuple[str, Kb]:
+    text = (f"🚀 <b>КРАШ</b> · ставка <b>{_fmt(bet)}</b> 🪙\n\n"
+            f"Множитель: <b>×{mult:.2f}</b> → {_fmt(int(bet * mult))} 🪙\n\n"
+            "<i>Жми «Забрать», пока ракета не разбилась! Выплата считается по моменту нажатия.</i>")
+    return text, _kb([[(f"💰 Забрать ×{mult:.2f}", f"cs:gmout:{uid}")]])
+
+
+async def _crash_loop(msg, uid: int):
+    """Обновляет множитель, пока раунд жив; при краше фиксирует проигрыш. Кадры — по возможности (флуд-защита)."""
+    try:
+        while True:
+            await asyncio.sleep(CRASH_TICK)
+            st = crash_status(uid)
+            if st is None:
+                return
+            if st["busted"]:
+                r = crash_settle_bust(uid)
+                if r:
+                    t, k = game_result_screen(uid, "crash", r["bet"], f"💥 <b>КРАШ на ×{r['cp']:.2f}!</b> Ты не успел — ставка проиграна.",
+                                              get_profile(uid)["coins"])
+                    await _edit(msg, t, k)
+                return
+            t, k = crash_play_screen(uid, st["bet"], st["mult"])
+            await _edit(msg, t, k, final=False)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("цикл краша упал")
+
+
+async def _do_crash_start(cb, uid: int, name: str, bet: int):
+    get_profile(uid, name)
+    r = crash_start(uid, bet)
+    if not r["ok"]:
+        await cb.answer(_game_err(r), show_alert=True)
+        return
+    await cb.answer("🚀 Взлетаем!")
+    t, k = crash_play_screen(uid, bet, 1.0)
+    await _edit(cb.message, t, k)
+    task = asyncio.create_task(_crash_loop(cb.message, uid))
+    _CRASH_TASKS.add(task)
+    task.add_done_callback(_CRASH_TASKS.discard)
+
+
+async def _do_game_out(cb, uid: int):
+    g = game_active(uid)
+    if g is None:
+        await cb.answer("Активной партии нет", show_alert=True)
+        t, k = games_hub_screen(uid)
+        await _edit(cb.message, t, k)
+        return
+    if g["game"] == "mines":
+        r = mines_cash(uid)
+        if not r["ok"]:
+            await cb.answer("Сначала открой хотя бы одну клетку", show_alert=True)
+            return
+        await cb.answer(f"+{_fmt(r['payout'])} 🪙")
+        t, k = mines_screen(uid, f"💰 Забрано <b>×{r['mult']:.2f}</b> → <b>+{_fmt(r['payout'])}</b> 🪙", reveal={"state": r["state"], "bet": r["bet"]})
+        await _edit(cb.message, _with_notices(uid, t), k)
+        return
+    r = crash_cash(uid)
+    if not r["ok"]:
+        await cb.answer("Раунд уже закончен", show_alert=True)
+        return
+    await cb.answer("Забрано!" if not r["bust"] else "Не успел…")
+    if r["bust"]:
+        body = f"💥 <b>КРАШ на ×{r['cp']:.2f}!</b> Ты не успел — ставка проиграна."
+        coins = get_profile(uid)["coins"]
+    else:
+        body = f"💰 Забрал на <b>×{r['mult']:.2f}</b> (краш был бы на ×{r['cp']:.2f}) → <b>+{_fmt(r['payout'])}</b> 🪙"
+        coins = r["coins"]
+    t, k = game_result_screen(uid, "crash", r["bet"], body, coins)
+    await _edit(cb.message, t, k)
+
+
+async def _do_game_resume(cb, uid: int):
+    g = game_active(uid)
+    await cb.answer()
+    if g is None:
+        t, k = games_hub_screen(uid, "Активной партии нет.")
+    elif g["game"] == "mines":
+        t, k = mines_screen(uid)
+    else:
+        st = crash_status(uid)
+        if st is None or st["busted"]:
+            r = crash_settle_bust(uid)
+            t, k = games_hub_screen(uid, "🚀 Раунд краша уже закончился — ставка проиграна." if r else "")
+        else:
+            t, k = crash_play_screen(uid, st["bet"], st["mult"])
+            await _edit(cb.message, t, k)
+            task = asyncio.create_task(_crash_loop(cb.message, uid))
+            _CRASH_TASKS.add(task)
+            task.add_done_callback(_CRASH_TASKS.discard)
+            return
+    await _edit(cb.message, t, k)
+
+
+# ── сезонный пропуск ──────────────────────────────────────────────────────────
+def pass_screen(uid: int, notice: str = "") -> tuple[str, Kb]:
+    st = pass_state(uid)
+    lines = [notice + "\n" if notice else "", f"⭐ <b>СЕЗОННЫЙ ПРОПУСК</b> · сезон {st['season']} · осталось {_human_long(st['left'])}",
+             f"Уровень пропуска: <b>{st['tier']}/{PASS_TIERS}</b> " + (_bar(st["into"], PASS_XP) + f" · ещё {PASS_XP - st['into']} XP до следующего" if st["tier"] < PASS_TIERS else "— максимум"),
+             f"XP сезона: {_fmt(st['xp'])} (+{PASS_XP} XP = новый уровень; XP дают открытия, батлы, апгрейды, обмены и квесты)",
+             "💎 Премиум: " + ("<b>активен</b>" if st["premium"] else f"не куплен — {_fmt(PASS_PRICE)} 🪙 (в сумме награды премиума щедрее бесплатных в ~3 раза + предмет на 20 уровне)"), ""]
+    for t in range(1, PASS_TIERS + 1):
+        rw = pass_rewards(t)
+        free_claimed, prem_claimed = (t, "free") in st["claimed"], (t, "prem") in st["claimed"]
+        reached = t <= st["tier"]
+        done = free_claimed and (prem_claimed or not st["premium"])
+        mark = "✅" if (reached and done) else "🎁" if reached else "🔒"
+        f, p = rw["free"], rw["prem"]
+        lines.append(f"{mark} {t:>2} · 🆓 +{f['coins']}🪙{' +🎫' if f['tickets'] else ''} · 💎 +{p['coins']}🪙{' +🎫' if p['tickets'] else ''}{' +🎁 предмет' if p['item'] else ''}")
+    rows = []
+    if st["ready"]:
+        rows.append([(f"🎁 Забрать всё ({st['ready']})", f"cs:psc:{uid}")])
+    if not st["premium"]:
+        rows.append([(f"💎 Премиум · {_fmt(PASS_PRICE)}🪙", f"cs:psb:{uid}:0")])
+    rows.append([("📋 Квесты", f"cs:qs:{uid}"), ("🏠 Меню", f"cs:menu:{uid}")])
+    return "\n".join(x for x in lines if x != ""), _kb(rows)
+
+
+async def _do_pass_claim(cb, uid: int):
+    r = pass_claim(uid)
+    if not r["ok"]:
+        await cb.answer("Пока нечего забирать", show_alert=True)
+        return
+    await cb.answer(f"+{_fmt(r['coins'])} 🪙")
+    t, k = pass_screen(uid, f"🎁 Получено: +{_fmt(r['coins'])} 🪙" + (f" +{r['tickets']}🎫" if r["tickets"] else "")
+                       + (" + предмет в инвентарь" if r["items"] else ""))
+    await _edit(cb.message, _with_notices(uid, t), k)
+
+
+async def _do_pass_buy(cb, uid: int, ok: int):
+    if not ok:
+        await cb.answer()
+        await _edit(cb.message, f"💎 Купить премиум сезонного пропуска за <b>{_fmt(PASS_PRICE)}</b> 🪙?\n"
+                                "Откроются премиум-награды всех уровней (в том числе уже пройденных) и предмет на 20 уровне.",
+                    _kb([[("✅ Купить", f"cs:psb:{uid}:1"), ("❌ Отмена", f"cs:ps:{uid}")]]))
+        return
+    r = pass_buy(uid)
+    if not r["ok"]:
+        await cb.answer("Премиум уже куплен" if r["reason"] == "have" else f"Не хватает {_fmt(r.get('need', 0))} 🪙", show_alert=True)
+        return
+    await cb.answer("Премиум куплен!")
+    t, k = pass_screen(uid, "💎 Премиум активирован!")
+    await _edit(cb.message, _with_notices(uid, t), k)
+
+
+# ── диспетчер новых кнопок и команды ──────────────────────────────────────────
+_XACTS = {"qs", "qc", "qca", "sp", "spgo", "tk", "mk", "mkb", "mkl", "mki", "mkp", "mkm", "mkx", "al", "als", "alc", "alm",
+          "gm", "gmg", "gmb", "gmcoin", "gmdice", "gmmine", "gmcell", "gmcrash", "gmout", "gmr", "gmx", "ps", "psc", "psb"}
+
+
+async def _dispatch_x(cb, act: str, uid: int, name: str, parts: list[str]):
+    msg = cb.message
+    t = k = None
+    if act == "qs":
+        await cb.answer()
+        t, k = quests_screen(uid)
+    elif act == "qc":
+        return await _do_quest_claim(cb, uid, parts[3], int(parts[4]))
+    elif act == "qca":
+        return await _do_quest_claim_all(cb, uid)
+    elif act == "sp":
+        await cb.answer()
+        t, k = spin_screen(uid)
+    elif act == "spgo":
+        return await _do_spin(cb, uid, name)
+    elif act == "tk":
+        return await _do_ticket(cb, uid, name)
+    elif act == "mk":
+        await cb.answer()
+        t, k = market_screen(uid, parts[3], int(parts[4]))
+    elif act == "mkb":
+        return await _do_market_buy(cb, uid, name, int(parts[3]), int(parts[4]))
+    elif act == "mkl":
+        await cb.answer()
+        t, k = market_pick_screen(uid, int(parts[3]))
+    elif act == "mki":
+        await cb.answer()
+        t, k = market_price_screen(uid, int(parts[3]))
+    elif act == "mkp":
+        return await _do_market_list(cb, uid, int(parts[3]), int(parts[4]))
+    elif act == "mkm":
+        await cb.answer()
+        t, k = market_mine_screen(uid)
+    elif act == "mkx":
+        return await _do_market_cancel(cb, uid, int(parts[3]))
+    elif act == "al":
+        await cb.answer()
+        t, k = album_screen(uid, int(parts[3]))
+    elif act == "als":
+        await cb.answer()
+        t, k = album_set_screen(uid, parts[3])
+    elif act == "alc":
+        return await _do_album_claim(cb, uid, parts[3])
+    elif act == "alm":
+        return await _do_album_milestone(cb, uid, int(parts[3]))
+    elif act == "gm":
+        await cb.answer()
+        t, k = games_hub_screen(uid)
+    elif act == "gmg":
+        if parts[3] not in GAMES:
+            await cb.answer("Нет такой игры", show_alert=True)
+            return
+        await cb.answer()
+        t, k = game_bet_screen(uid, parts[3])
+    elif act == "gmb":
+        if parts[3] not in GAMES:
+            await cb.answer("Нет такой игры", show_alert=True)
+            return
+        if game_active(uid):
+            await cb.answer("У тебя уже идёт партия — сначала закончи её", show_alert=True)
+            return
+        await cb.answer()
+        t, k = game_options_screen(uid, parts[3], int(parts[4]))
+    elif act == "gmcoin":
+        return await _do_coin(cb, uid, name, int(parts[3]), parts[4])
+    elif act == "gmdice":
+        return await _do_dice(cb, uid, name, int(parts[3]), parts[4])
+    elif act == "gmmine":
+        return await _do_mines_start(cb, uid, name, int(parts[3]), int(parts[4]))
+    elif act == "gmcell":
+        return await _do_mines_cell(cb, uid, int(parts[3]))
+    elif act == "gmcrash":
+        return await _do_crash_start(cb, uid, name, int(parts[3]))
+    elif act == "gmout":
+        return await _do_game_out(cb, uid)
+    elif act == "gmr":
+        return await _do_game_resume(cb, uid)
+    elif act == "gmx":
+        await cb.answer()
+        return
+    elif act == "ps":
+        await cb.answer()
+        t, k = pass_screen(uid)
+    elif act == "psc":
+        return await _do_pass_claim(cb, uid)
+    elif act == "psb":
+        return await _do_pass_buy(cb, uid, int(parts[3]))
+    await _edit(msg, t, k)
+
+
+def _screen_cmd(builder):
+    async def handler(message: types.Message):
+        if not message.from_user:
+            return
+        uid, name = _touch(message.from_user, message.chat.id)
+        text, kb = builder(uid, name)
+        await message.answer(_with_notices(uid, text), parse_mode="HTML", reply_markup=kb)
+    return handler
+
+
+cmd_quests = _screen_cmd(lambda uid, name: quests_screen(uid))
+cmd_market = _screen_cmd(lambda uid, name: market_screen(uid))
+cmd_games = _screen_cmd(lambda uid, name: games_hub_screen(uid))
+cmd_spin = _screen_cmd(lambda uid, name: spin_screen(uid))
+cmd_pass = _screen_cmd(lambda uid, name: pass_screen(uid))
+cmd_album = _screen_cmd(lambda uid, name: album_screen(uid))
+
+
 CASES_HELP = ("🎰 <b>кейс-клуб</b>\n/case — меню: кейсы, инвентарь, бонус, апгрейд, контракты, топ, батлы\n"
               "/daily — бонус · /inv — инвентарь · /ctop — топ (в группе — по чату)\n"
-              "/give 500 и /trade — ответом на сообщение игрока: подарок и обмен")
+              "/give 500 и /trade — ответом на сообщение игрока: подарок и обмен\n"
+              "/quests · /spin · /market · /album · /games · /pass — быстрые переходы")
 
 
 def register_cases_handlers(dp):
@@ -2540,5 +4418,8 @@ def register_cases_handlers(dp):
     dp.message.register(cmd_give, Command(*COMMANDS["give"]))
     dp.message.register(cmd_trade, Command(*COMMANDS["trade"]))
     dp.message.register(cmd_cadmin, Command(*COMMANDS["admin"]))
+    for key, fn in (("quests", cmd_quests), ("market", cmd_market), ("games", cmd_games), ("spin", cmd_spin),
+                    ("pass", cmd_pass), ("album", cmd_album)):
+        dp.message.register(fn, Command(*COMMANDS[key]))
     dp.callback_query.register(on_callback, F.data.startswith("cs:"))
     logger.info("🎰 cases_game зарегистрирован (/case, /daily, /inv, /ctop, /give, /trade), БД: %s", _DB_PATH)

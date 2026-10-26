@@ -7,7 +7,7 @@ main.py — точка входа бота. Только импорты, рег�
   vision_handlers.py — вопросы реплаем по фото/PDF/видео, мемы «сделай мем про…», /tr, /explain
   fun_handlers.py    — /pick, /who (жребий с анимацией, подиум, inline «p:»), /roll, /coin
   pick_cards.py      — картинки для /pick: диплом (PNG) и колесо фортуны (GIF)
-  cases_game.py      — кейс-клуб: /case, /daily, /inv, /ctop, /give, /trade, /cadmin (админ)
+  cases_game.py      — кейс-клуб: /case, /daily, /inv, /ctop, /give, /trade, /quests, /spin, /market, /album, /games, /pass, /cadmin (админ)
   edit_guard.py      — безопасные правки сообщений: анимации не виснут при флуд-лимитах Telegram
   places_handlers.py — /nearby и геопозиция: кафе, аптеки, магазины
   film_handler.py    — /film через TMDB
@@ -142,7 +142,8 @@ async def cmd_help(message: types.Message) -> None:
         "inline: <code>@бот p: кофе, чай</code>\n\n"
         "🎰 <b>кейс-клуб</b>\n"
         "/case — кейсы, апгрейд, контракты, батлы, достижения · /daily — бонус · /inv · /ctop — топ (в группе — по чату)\n"
-        "/give 500 и /trade — ответом на сообщение игрока: подарок и обмен\n\n"
+        "/give 500 и /trade — ответом на сообщение игрока: подарок и обмен\n"
+        "/quests — квесты · /spin — мини-спин · /market — рынок игроков · /album — коллекции · /games — мини-игры · /pass — сезонный пропуск\n\n"
         "📍 <b>рядом</b>\n"
         "/nearby — кафе, аптеки, магазины (скинь геопозицию или адрес)\n\n"
         "🍿 <b>фильмы и сериалы</b>\n"
