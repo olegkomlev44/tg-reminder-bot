@@ -2,6 +2,7 @@
 from datetime import datetime
 from urllib.parse import parse_qsl
 from aiohttp import web, WSMsgType
+from ig_webapp import setup_ig_webapp_routes
 from PIL import Image, ImageDraw, ImageFont
 from music_engine import music_engine, add_id3_tags, check_yt_dlp_freshness, yt_dlp_maintenance_loop
 from db import (
@@ -261,6 +262,7 @@ RATE_LIMIT_RULES = [
     ("/api/lyrics/translate", 15, 60),
     ("/api/lyrics", 30, 60),
     ("/api/users/search", 20, 60),
+    ("/ig-app/api/", 60, 60),
 ]
 
 
@@ -2055,6 +2057,9 @@ async def start_web_server():
     # Уведомления
     app.router.add_get("/api/notifications", api_notifications_get)
     app.router.add_post("/api/notifications/read", api_notifications_read)
+
+    # Мини-апп «Лента» Instagram-бота (страница /ig-app, API /ig-app/api/*, превью /ig-app/thumb/*)
+    setup_ig_webapp_routes(app)
     app.router.add_options("/{path_info:.*}", lambda r: cors(web.Response()))
 
 

@@ -27,6 +27,7 @@ from io import BytesIO
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.types import (
+    WebAppInfo,
     InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile, InputMediaPhoto, InputMediaVideo, InputMediaDocument,
     InlineQueryResultArticle, InlineQueryResultCachedPhoto, InlineQueryResultCachedVideo,
@@ -64,6 +65,7 @@ from instagram_viewer import (
     ig_follow_rows, ig_follow_state, ig_follow_logins, ig_like_get, ig_bm_has, ig_bm_count, ig_bm_list, ig_bm_del,
     ig_all_subscriptions as _ig_all_subs_for_follow,
     follow_user, unfollow_user, refresh_pending_follows, like_toggle, bookmark_toggle,
+    set_action_block_callback, ig_blocks_all, ig_block_clear, ig_blocked_logins,
 )
 
 logger = logging.getLogger(__name__)
@@ -505,9 +507,16 @@ def _fid_of(msg) -> dict | None:
     """{kind, file_id} из отправленного сообщения (для кэша)."""
     try:
         if getattr(msg, "video", None):
-            return {"kind": "video", "file_id": msg.video.file_id}
+            d = {"kind": "video", "file_id": msg.video.file_id}
+            th = getattr(msg.video, "thumbnail", None) or getattr(msg.video, "thumb", None)
+            if th:
+                d["thumb"] = th.file_id            # превью для мини-аппы «Лента»
+            return d
         if getattr(msg, "photo", None):
-            return {"kind": "photo", "file_id": msg.photo[-1].file_id}
+            d = {"kind": "photo", "file_id": msg.photo[-1].file_id}
+            if len(msg.photo) > 1:
+                d["thumb"] = msg.photo[1].file_id  # ~320px — для сетки хватает и грузится быстро
+            return d
     except Exception:
         pass
     return None
@@ -714,6 +723,10 @@ def _profile_keyboard(ig_username: str, user_id: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text=_follow_label(ig_username), callback_data=f"ig_fl:{ig_username}"),
             InlineKeyboardButton(text="🔖 Закладки", callback_data="ig_bml:0"),
+        ],
+        [
+            InlineKeyboardButton(text="👥 Похожие", callback_data=f"ig_sim:{ig_username}"),
+            InlineKeyboardButton(text="📦 Архив", callback_data=f"ig_dmp:{ig_username}"),
         ],
         [
             InlineKeyboardButton(text="🖼 Скачать аватарку", callback_data=f"ig_avdl:{ig_username}"),
@@ -4029,6 +4042,77 @@ _ACT_HITS: dict[str, _deque] = {}
 _FOLLOW_TASK = {"started": False}
 
 
+def _left_txt(until) -> str:
+    """«через ~5 ч» / «через ~40 мин»"""
+    try:
+        sec = max(0, float(until) - time.time())
+    except Exception:
+        return "позже"
+    return f"через ~{sec / 3600:.0f} ч" if sec >= 5400 else f"через ~{max(1, round(sec / 60))} мин"
+
+
+async def _notify_admins_action_block(login: str, until: float, hours: float, reason: str) -> None:
+    """Донор получил блок действий — лайки/подписки с него отключены, просмотры работают."""
+    if not _BOT_REF:
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="▶️ Снять паузу", callback_data=f"ig_blk:{login}"),
+        InlineKeyboardButton(text="📋 Паузы", callback_data="ig_blk:list"),
+    ]])
+    text = (f"⏸ <b>Пауза действий у донора</b> <code>{_htmlmod.escape(login)}</code>\n\n"
+            f"Instagram ограничил лайки/подписки. Они отключены для этого аккаунта на "
+            f"<b>{hours:.0f} ч</b> ({_left_txt(until)}), просмотры продолжают работать.\n"
+            f"<i>{_htmlmod.escape(reason)[:200]}</i>\n\n"
+            f"Совет: снизь IG_FOLLOW_PER_DAY / IG_LIKE_PER_DAY и не снимай паузу раньше срока.")
+    for uid in _get_admin_ids():
+        try:
+            await _BOT_REF.send_message(uid, text, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            logger.warning(f"_notify_admins_action_block {uid}: {e}")
+
+
+def _blocks_view():
+    rows = [b for b in ig_blocks_all() if b["until"] > time.time()]
+    if not rows:
+        return "✅ Пауз нет — все доноры могут лайкать и подписываться.", None
+    lines = ["⏸ <b>Паузы доноров</b>"]
+    btns = []
+    for b in rows:
+        lines.append(f"• <code>{_htmlmod.escape(b['login'])}</code> — {_left_txt(b['until'])} (страйк {b['strikes']})")
+        btns.append([InlineKeyboardButton(text=f"▶️ {b['login']}", callback_data=f"ig_blk:{b['login']}")])
+    btns.append([InlineKeyboardButton(text="▶️ Снять все", callback_data="ig_blk:all")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=btns)
+
+
+async def cmd_ig_blocks(message: types.Message):
+    admins = _get_admin_ids()
+    if admins and message.from_user.id not in admins:
+        await message.answer("⛔ Команда доступна только администратору.")
+        return
+    text, kb = _blocks_view()
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def callback_ig_blk(callback: types.CallbackQuery):
+    admins = _get_admin_ids()
+    if admins and callback.from_user.id not in admins:
+        await callback.answer("Только админ", show_alert=True)
+        return
+    arg = callback.data.split(":", 1)[1]
+    if arg == "list":
+        pass
+    elif arg == "all":
+        ig_block_clear(None)
+    else:
+        ig_block_clear(arg)
+    await callback.answer("Готово" if arg != "list" else "")
+    text, kb = _blocks_view()
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
 def _rate_ok(uid, kind: str, limit: int) -> bool:
     key = f"{kind}:{uid}"
     dq = _ACT_HITS.setdefault(key, _deque())
@@ -4159,6 +4243,8 @@ async def callback_ig_follow(callback: types.CallbackQuery):
             "nopk":        "❌ Не удалось определить аккаунт (нет id). Открой профиль ещё раз и повтори.",
             "nodonors":    "❌ Нет живых аккаунтов-доноров (проверь /ig_status).",
             "limit":       "⛔ Дневной лимит подписок исчерпан — это защита доноров от бана.",
+            "blocked":     f"⏸ Подписки на паузе: Instagram ограничил действия аккаунтов-доноров. "
+                           f"Снова доступны {_left_txt(res.get('until'))}.",
         }.get(err, "❌ Instagram не принял подписку (возможен лимит/проверка). Подробности — в логах.")
         await callback.message.answer(text)
         for e in (res.get("errors") or [])[:3]:
@@ -4235,6 +4321,8 @@ async def callback_ig_like(callback: types.CallbackQuery):
         msg = {
             "private": "🔒 Аккаунт приватный, а бот на него не подписан",
             "limit":   "⛔ Дневной лимит лайков исчерпан",
+            "blocked": f"⏸ Лайки на паузе: Instagram ограничил действия аккаунта-донора. "
+                       f"Вернутся примерно {_left_txt(res.get('until'))}.",
         }.get(res.get("error"), "❌ Instagram не принял лайк")
         await callback.answer(msg, show_alert=True)
         return
@@ -4285,7 +4373,8 @@ _BM_PAGE = 8
 def _bm_view(uid: str, page: int):
     total = ig_bm_count(uid)
     if not total:
-        return ("🔖 <b>Закладки</b>\n\nПока пусто. Под постами жми «📑 В закладки».", None)
+        return ("🔖 <b>Закладки</b>\n\nПока пусто. Под постами жми «📑 В закладки».\n"
+                "Поиск по постам: <code>/ig_search слово</code>", None)
     pages = max(1, (total + _BM_PAGE - 1) // _BM_PAGE)
     page = max(0, min(page, pages - 1))
     items = ig_bm_list(uid, page * _BM_PAGE, _BM_PAGE)
@@ -4304,7 +4393,9 @@ def _bm_view(uid: str, page: int):
     if page < pages - 1:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"ig_bml:{page + 1}"))
     rows.append(nav)
-    return (f"🔖 <b>Закладки</b> · {total}\nТап по посту — открыть, 🗑 — убрать.",
+    if os.getenv("IG_WEBAPP_URL", "").startswith("https://"):
+        rows.append([InlineKeyboardButton(text="🖼 Открыть ленту", web_app=WebAppInfo(url=os.getenv("IG_WEBAPP_URL")))])
+    return (f"🔖 <b>Закладки</b> · {total}\nТап по посту — открыть, 🗑 — убрать.\nПоиск: <code>/ig_search слово</code>",
             InlineKeyboardMarkup(inline_keyboard=rows))
 
 
@@ -4358,6 +4449,7 @@ def register_ig_handlers(dp: Dispatcher):
 
     # Регистрируем callback для алертов при смерти сессии
     set_session_dead_callback(_notify_admins_session_dead)
+    set_action_block_callback(_notify_admins_action_block)
 
     dp.message.register(cmd_ig, Command(commands=["ig", "instagram", "insta"]))
     dp.message.register(cmd_ig_subs,    Command("ig_subs"))
@@ -4390,6 +4482,8 @@ def register_ig_handlers(dp: Dispatcher):
 
     # подписка бота на аккаунты, лайки, закладки
     dp.message.register(cmd_ig_saved,                    Command("ig_saved"))
+    dp.message.register(cmd_ig_blocks,                   Command("ig_blocks"))
+    dp.callback_query.register(callback_ig_blk,          F.data.startswith("ig_blk:"))
     dp.callback_query.register(callback_ig_follow,       F.data.startswith("ig_fl:"))
     dp.callback_query.register(callback_ig_follow_confirm, F.data.startswith("ig_flc:"))
     dp.callback_query.register(callback_ig_like,         F.data.startswith("ig_lk:"))

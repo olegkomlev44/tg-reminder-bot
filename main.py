@@ -39,6 +39,9 @@ from instagram_handlers import (
     inline_instagram, parse_ig_inline,
 )
 from media_downloader import register_media_handlers
+from backup import register_backup_handlers, backup_task
+from ig_extras import register_ig_extras, ig_topics_task
+from ig_webapp import set_webapp_bot, start_ig_webapp_standalone
 from feed_handlers import register_feed_handlers
 
 # ── Хэндлеры из модулей ───────────────────────────────────────────────────────
@@ -89,7 +92,6 @@ from film_handler import register_film_handlers
 from freebies import register_freebies_handlers, check_freebies
 from music_links import register_music_link_handlers
 from vision_handlers import register_vision_handlers
-from random18_handler import register_random18_handlers
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -180,11 +182,15 @@ async def main():
 
     bot = Bot(token=TOKEN)
     _set_bot_ref(bot)
+    set_webapp_bot(bot)
+    await start_ig_webapp_standalone()
     await bot.delete_webhook(drop_pending_updates=True)
     dp  = Dispatcher(storage=MemoryStorage())
 
     # ── Сторонние роутеры ─────────────────────────────────────────────────────
     register_ig_handlers(dp)
+    register_backup_handlers(dp)
+    register_ig_extras(dp)
     register_feed_handlers(dp)
     register_anixart_handlers(dp)
     await anixart_startup_selftest()
@@ -300,7 +306,6 @@ async def main():
     register_cases_handlers(dp)
     register_places_handlers(dp)
     register_film_handlers(dp)
-    register_random18_handlers(dp)
     register_freebies_handlers(dp)
     register_music_link_handlers(dp)
     register_vision_handlers(dp)
@@ -328,6 +333,8 @@ async def main():
     scheduler.start()
 
     asyncio.create_task(ig_checker_task(bot))
+    asyncio.create_task(backup_task(bot))
+    asyncio.create_task(ig_topics_task(bot))
     asyncio.create_task(ig_session_health_task(bot))
     asyncio.create_task(_webhook_janitor(bot))
 
