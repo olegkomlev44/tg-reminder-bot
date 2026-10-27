@@ -2726,6 +2726,110 @@ def _dbx():
     return sqlite3.connect(IG_DB)
 
 
+# ── ПАУЗА ДЕЙСТВИЙ ДОНОРА (action block) ─────────────────────────────────────
+# Когда Instagram режет лайки/подписки у донора («feedback_required», «Action Blocked»),
+# мы НЕ долбим дальше (это продлевает блок), а ставим донора на паузу только для действий.
+# Просмотры/истории/посты продолжают работать. Каждый повторный блок — пауза дольше.
+IG_BLOCK_HOURS        = float(os.getenv("IG_BLOCK_HOURS", "12"))        # первая пауза, ч
+IG_BLOCK_MAX_HOURS    = float(os.getenv("IG_BLOCK_MAX_HOURS", "72"))    # потолок паузы, ч
+IG_BLOCK_STRIKE_RESET = float(os.getenv("IG_BLOCK_STRIKE_RESET_DAYS", "7")) * 86400
+
+_on_action_block: Optional[Callable] = None
+
+
+def set_action_block_callback(cb: Callable) -> None:
+    """Регистрирует async callback(login, until, hours, reason) — вызывается при новой паузе донора."""
+    global _on_action_block
+    _on_action_block = cb
+
+
+def _blk_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(IG_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS ig_action_blocks (
+        login   TEXT PRIMARY KEY,
+        until   REAL NOT NULL DEFAULT 0,
+        strikes INTEGER NOT NULL DEFAULT 0,
+        reason  TEXT DEFAULT '',
+        ts      REAL NOT NULL DEFAULT 0
+    )""")
+    return conn
+
+
+_BLOCK_MARKERS = ("feedback_required", "action blocked", "action_blocked",
+                  "we restrict certain activity", "temporarily blocked")
+
+
+def _is_action_block(exc: Exception) -> bool:
+    """Это блок действий (лайк/подписка), а не 429 и не протухшая сессия."""
+    name = type(exc).__name__
+    if name in ("PleaseWaitFewMinutes", "RateLimitError", "LoginRequired"):
+        return False
+    if name == "FeedbackRequired":
+        return True
+    low = str(exc).lower()
+    return any(m in low for m in _BLOCK_MARKERS)
+
+
+def ig_blocks_all() -> list[dict]:
+    """Все записи пауз (в т.ч. истёкшие — фильтруй по b['until'] > time.time())."""
+    conn = _blk_conn()
+    try:
+        rows = conn.execute("SELECT login, until, strikes, reason, ts FROM ig_action_blocks "
+                            "ORDER BY until DESC").fetchall()
+    finally:
+        conn.close()
+    return [{"login": r[0], "until": float(r[1]), "strikes": int(r[2]),
+             "reason": r[3] or "", "ts": float(r[4])} for r in rows]
+
+
+def ig_blocked_map() -> dict[str, float]:
+    """{login: until} только для действующих пауз."""
+    now = time.time()
+    return {b["login"]: b["until"] for b in ig_blocks_all() if b["until"] > now}
+
+
+def ig_blocked_logins() -> set:
+    return set(ig_blocked_map())
+
+
+def ig_block_clear(login: str | None = None) -> None:
+    """Снять паузу у одного донора (или у всех, если login=None). Страйки сохраняются."""
+    conn = _blk_conn()
+    try:
+        if login:
+            conn.execute("UPDATE ig_action_blocks SET until=0 WHERE login=?", (login,))
+        else:
+            conn.execute("UPDATE ig_action_blocks SET until=0")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _note_action_block(login: str, reason: str = "") -> float:
+    """Поставить донора на паузу действий. Возвращает timestamp конца паузы."""
+    now = time.time()
+    conn = _blk_conn()
+    try:
+        r = conn.execute("SELECT until, strikes, ts FROM ig_action_blocks WHERE login=?", (login,)).fetchone()
+        if r and float(r[0]) > now:
+            return float(r[0])          # уже на паузе — не удлиняем и не алертим повторно
+        strikes = int(r[1]) + 1 if (r and now - float(r[2]) < IG_BLOCK_STRIKE_RESET) else 1
+        hours = min(IG_BLOCK_HOURS * (2 ** (strikes - 1)), IG_BLOCK_MAX_HOURS)
+        until = now + hours * 3600
+        conn.execute("INSERT OR REPLACE INTO ig_action_blocks (login, until, strikes, reason, ts) "
+                     "VALUES (?,?,?,?,?)", (login, until, strikes, (reason or "")[:300], now))
+        conn.commit()
+    finally:
+        conn.close()
+    logger.warning(f"[action-block] @{login}: пауза действий {hours:.0f} ч (страйк {strikes}): {reason[:150]}")
+    if _on_action_block:
+        try:
+            asyncio.ensure_future(_on_action_block(login, until, hours, reason or ""))
+        except Exception:
+            pass
+    return until
+
+
 # ── подписки доноров ─────────────────────────────────────────────────────────
 
 def ig_follow_rows(username: str) -> list[dict]:
@@ -2955,9 +3059,13 @@ async def follow_user(username: str, requested_by: str = "") -> dict:
     private = bool(info.get("is_private"))
 
     await _POOL._ensure_init()
-    live = _POOL.live_logins()
-    if not live:
+    live_all = _POOL.live_logins()
+    if not live_all:
         return {"ok": False, "error": "nodonors"}
+    blocked = ig_blocked_map()
+    live = [l for l in live_all if l not in blocked]
+    if not live:
+        return {"ok": False, "error": "blocked", "until": min(blocked[l] for l in live_all)}
     if private or IG_FOLLOW_ALL:
         logins = list(live)
     else:
@@ -2968,19 +3076,30 @@ async def follow_user(username: str, requested_by: str = "") -> dict:
     done: dict[str, str] = {}
     errors: list[str] = []
     skipped_limit = 0
+    block_until: float | None = None
     for lg in logins:
         if ig_act_count("follow", since, lg) >= IG_FOLLOW_PER_DAY:
             skipped_limit += 1
             continue
 
         def _do(cl, _pk=pk, _priv=private):
-            ok = cl.user_follow(int(_pk))
+            try:
+                ok = cl.user_follow(int(_pk))
+            except Exception as e:
+                if _is_action_block(e):
+                    return ("__block__", str(e))
+                raise
             return _rel_status(cl, _pk, _priv, bool(ok))
 
         try:
             st = await _POOL.run(_do, only={lg})
         except Exception as e:
             errors.append(f"{lg}: {type(e).__name__}: {e}"[:200])
+            continue
+        if isinstance(st, tuple) and st and st[0] == "__block__":
+            u = _note_action_block(lg, st[1])
+            block_until = u if block_until is None else min(block_until, u)
+            errors.append(f"{lg}: блок действий")
             continue
         if st in ("following", "pending"):
             ig_follow_set(username, lg, st, pk=pk, by=requested_by)
@@ -2990,6 +3109,8 @@ async def follow_user(username: str, requested_by: str = "") -> dict:
             errors.append(f"{lg}: Instagram не подтвердил подписку")
 
     if not done:
+        if block_until is not None:
+            return {"ok": False, "error": "blocked", "until": block_until, "errors": errors}
         return {"ok": False, "error": "limit" if skipped_limit == len(logins) else "failed", "errors": errors}
     best = "following" if "following" in done.values() else "pending"
     _ucache_drop_quiet(username)
@@ -3089,13 +3210,24 @@ async def like_toggle(shortcode: str, username: str = "", user_id: str = "") -> 
         return {"ok": False, "error": "nocode"}
     cur = ig_like_get(shortcode)
     if cur:
+        bm = ig_blocked_map()
+        if cur in bm:
+            return {"ok": False, "error": "blocked", "until": bm[cur]}
+
         def _un(cl):
-            return cl.media_unlike(_mid(cl, shortcode))
+            try:
+                return cl.media_unlike(_mid(cl, shortcode))
+            except Exception as e:
+                if _is_action_block(e):
+                    return ("__block__", str(e))
+                raise
         try:
             r = await _POOL.run(_un, only={cur})
         except Exception as e:
             logger.warning(f"unlike {shortcode}: {e}")
             return {"ok": False, "error": "failed"}
+        if isinstance(r, tuple) and r and r[0] == "__block__":
+            return {"ok": False, "error": "blocked", "until": _note_action_block(cur, r[1])}
         if r is None:
             return {"ok": False, "error": "failed"}
         _ig_like_put(shortcode, None)
@@ -3107,14 +3239,23 @@ async def like_toggle(shortcode: str, username: str = "", user_id: str = "") -> 
         return {"ok": False, "error": err}
     await _POOL._ensure_init()
     live = _POOL.live_logins()
-    pool = [l for l in live if (not only or l in only)]
+    pool0 = [l for l in live if (not only or l in only)]
+    bm = ig_blocked_map()
+    pool1 = [l for l in pool0 if l not in bm]
+    if pool0 and not pool1:
+        return {"ok": False, "error": "blocked", "until": min(bm[l] for l in pool0)}
     since = time.time() - 86400
-    pool = [l for l in pool if ig_act_count("like", since, l) < IG_LIKE_PER_DAY]
+    pool = [l for l in pool1 if ig_act_count("like", since, l) < IG_LIKE_PER_DAY]
     if not pool:
         return {"ok": False, "error": "limit"}
 
     def _do(cl):
-        ok = cl.media_like(_mid(cl, shortcode))
+        try:
+            ok = cl.media_like(_mid(cl, shortcode))
+        except Exception as e:
+            if _is_action_block(e):
+                return ("__block__", _acc_login(cl), str(e))
+            raise
         return (bool(ok), _acc_login(cl))
 
     try:
@@ -3122,6 +3263,8 @@ async def like_toggle(shortcode: str, username: str = "", user_id: str = "") -> 
     except Exception as e:
         logger.warning(f"like {shortcode}: {e}")
         return {"ok": False, "error": "failed"}
+    if r and r[0] == "__block__":
+        return {"ok": False, "error": "blocked", "until": _note_action_block(r[1], r[2])}
     if not r or not r[0]:
         return {"ok": False, "error": "failed"}
     _ig_like_put(shortcode, r[1])
