@@ -204,6 +204,7 @@ async def _notify_admins_session_dead(ig_login: str) -> None:
 class IGStates(StatesGroup):
     waiting_username = State()
     waiting_cookies  = State()
+    waiting_new_login = State()
 
 
 # ── ВСПОМОГАТЕЛЬНЫЕ ───────────────────────────────────────────────────────────
@@ -3297,7 +3298,11 @@ async def cmd_ig_refresh(message: types.Message, state: FSMContext):
     accounts = [login for login, _ in _POOL._accounts]
 
     if not accounts:
-        await message.answer("❌ Нет настроенных аккаунтов (IG_ACCOUNTS не задан).")
+        await message.answer(
+            "❌ В пуле нет аккаунтов. Добавь первый прямо из бота:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="ig_acc:add")]]),
+        )
         return
 
     statuses = get_sessions_status()
@@ -3314,6 +3319,7 @@ async def cmd_ig_refresh(message: types.Message, state: FSMContext):
             callback_data=f"ig_refresh_pick:{acc}"
         )])
 
+    buttons.append([InlineKeyboardButton(text="➕ Добавить / 🗑 удалить аккаунт", callback_data="ig_acc:list")])
     await message.answer(
         "🔄 <b>Обновление кук Instagram</b>\n\n"
         "Выбери аккаунт:\n"
@@ -3377,10 +3383,156 @@ async def callback_ig_refresh_cancel(callback: types.CallbackQuery, state: FSMCo
         pass
 
 
+# ── /ig_accounts — ручное добавление и удаление доноров ──────────────────────
+
+def _acc_admin_ok(uid: int) -> bool:
+    """Для добавления/удаления аккаунтов админ должен быть задан явно (IG_ADMIN_IDS)."""
+    return uid in _get_admin_ids()
+
+
+def _acc_list_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    from instagram_viewer import ig_blocked_map
+    statuses = get_sessions_status()
+    try:
+        blocked = ig_blocked_map()
+    except Exception:
+        blocked = {}
+    lines = [f"👥 <b>Аккаунты-доноры</b> ({len(statuses)})", ""]
+    if note:
+        lines += [note, ""]
+    if not statuses:
+        lines.append("Пул пуст. Нажми «Добавить аккаунт».")
+    btns = []
+    for s in statuses:
+        broken = (not s["alive"]) or s.get("dead")
+        icon = "💀" if broken else "✅"
+        extra = f" · ⏸ пауза действий {_left_txt(blocked[s['login']])}" if s["login"] in blocked else ""
+        cur = " 👈" if s.get("is_current") else ""
+        lines.append(f"{icon} <code>{_htmlmod.escape(s['login'])}</code>{cur} · запросов: {s['requests']}{extra}")
+        btns.append([
+            InlineKeyboardButton(text=f"🔄 {s['login']}", callback_data=f"ig_refresh_pick:{s['login']}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"ig_acc:del:{s['login']}"),
+        ])
+    btns.append([InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="ig_acc:add")])
+    btns.append([InlineKeyboardButton(text="🔃 Обновить список", callback_data="ig_acc:list")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=btns)
+
+
+async def cmd_ig_accounts(message: types.Message):
+    """/ig_accounts — список доноров, добавить новый, удалить существующий."""
+    if not _acc_admin_ok(message.from_user.id):
+        await message.answer("⛔ Только для администратора (нужен IG_ADMIN_IDS).")
+        return
+    text, kb = _acc_list_view()
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def callback_ig_acc(callback: types.CallbackQuery, state: FSMContext):
+    if not _acc_admin_ok(callback.from_user.id):
+        await callback.answer("⛔ Только админ (IG_ADMIN_IDS)", show_alert=True)
+        return
+    from instagram_viewer import _POOL
+
+    parts = callback.data.split(":", 2)
+    act = parts[1] if len(parts) > 1 else "list"
+    arg = parts[2] if len(parts) > 2 else ""
+
+    async def _show(text: str, kb: InlineKeyboardMarkup):
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+    if act == "list":
+        if await state.get_state() == IGStates.waiting_new_login.state:
+            await state.clear()
+        await callback.answer()
+        text, kb = _acc_list_view()
+        await _show(text, kb)
+
+    elif act == "add":
+        await state.set_state(IGStates.waiting_new_login)
+        await callback.answer()
+        await _show(
+            "➕ <b>Новый аккаунт-донор</b>\n\n"
+            "Пришли его <b>логин</b> (username), например <code>my_account</code>.\n"
+            "Следом попрошу куки — как в /ig_refresh.",
+            InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="ig_acc:list")]]),
+        )
+
+    elif act == "del":
+        if _POOL._idx_of(arg) is None:
+            await callback.answer("Такого аккаунта уже нет", show_alert=True)
+            text, kb = _acc_list_view()
+            await _show(text, kb)
+            return
+        await callback.answer()
+        last = "\n\n⚠️ <b>Это последний аккаунт — Instagram в боте перестанет работать.</b>" \
+            if len(_POOL._accounts) <= 1 else ""
+        await _show(
+            f"🗑 Удалить <code>{_htmlmod.escape(arg)}</code> из пула?\n\n"
+            f"Сотрутся его сессия, паузы, лайки и подписки, сделанные с него. "
+            f"Вернуть можно только заново добавив аккаунт с куками.{last}",
+            InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"ig_acc:delc:{arg}"),
+                InlineKeyboardButton(text="↩️ Отмена", callback_data="ig_acc:list"),
+            ]]),
+        )
+
+    elif act == "delc":
+        ok, msg = await _POOL.remove_account(arg)
+        await callback.answer("Удалён" if ok else "Не вышло", show_alert=not ok)
+        note = (f"🗑 <code>{_htmlmod.escape(arg)}</code> удалён. "
+                f"<i>Если он есть в IG_ACCOUNTS — после рестарта он не вернётся, "
+                f"но лучше убери его и оттуда.</i>") if ok else f"❌ {_htmlmod.escape(msg)}"
+        text, kb = _acc_list_view(note)
+        await _show(text, kb)
+
+    else:
+        await callback.answer()
+
+
+async def process_ig_new_login(message: types.Message, state: FSMContext):
+    """Получили логин нового донора — просим куки (дальше работает process_ig_cookies)."""
+    if not _acc_admin_ok(message.from_user.id):
+        await state.clear()
+        return
+    from instagram_viewer import _POOL, norm_login
+
+    raw = (message.text or "").strip()
+    login = norm_login(raw)
+    if not login:
+        await message.answer(
+            "❌ Логин не подходит: только латиница, цифры, точка и подчёркивание, до 30 символов.\n"
+            "Пришли ещё раз или /cancel."
+        )
+        return
+    if any(l.lower() == login for l, _ in _POOL._accounts):
+        await state.clear()
+        await message.answer(f"ℹ️ <code>{login}</code> уже в пуле. Обновить куки: /ig_refresh", parse_mode="HTML")
+        return
+
+    await state.set_state(IGStates.waiting_cookies)
+    await state.update_data(refresh_username=login, new_account=True)
+    await message.answer(
+        f"👤 Аккаунт: <b>{login}</b>\n\n"
+        "Теперь пришли куки этого аккаунта:\n"
+        "1. Зайди на <code>instagram.com</code> именно под ним\n"
+        "2. EditThisCookie → <b>Экспорт</b>\n"
+        "3. Отправь JSON сюда текстом или файлом\n\n"
+        "<i>Подойдут и sessionid + ds_user_id в формате key: value.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="ig_refresh_cancel")]]),
+    )
+
+
 async def cmd_ig_cancel(message: types.Message, state: FSMContext):
     """/cancel — отменить текущий шаг (ввод username или кук)."""
     cur = await state.get_state()
-    if cur in (IGStates.waiting_username.state, IGStates.waiting_cookies.state):
+    if cur in (IGStates.waiting_username.state, IGStates.waiting_cookies.state,
+               IGStates.waiting_new_login.state):
         await state.clear()
         await message.answer("🚫 Отменено.")
     else:
@@ -3396,6 +3548,7 @@ async def process_ig_cookies(message: types.Message, state: FSMContext):
 
     data = await state.get_data()
     username = data.get("refresh_username", "")
+    new_account = bool(data.get("new_account"))
     await state.clear()
 
     if not username:
@@ -3477,12 +3630,30 @@ async def process_ig_cookies(message: types.Message, state: FSMContext):
     status_msg = await message.answer("🔄 Файл сохранён. Тестирую новые куки...")
 
     # ── Безопасный горячий перезапуск ────────────────────────────────────────
-    reload_ok, reload_msg = await _POOL.reload_client(username)
+    if new_account:
+        reload_ok, reload_msg = await _POOL.add_account(username)
+    else:
+        reload_ok, reload_msg = await _POOL.reload_client(username)
 
     try:
         await status_msg.delete()
     except Exception:
         pass
+
+    if not reload_ok and new_account:
+        for f in (session_file, backup_file):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        await message.answer(
+            f"❌ <b>Аккаунт не добавлен</b>\n\n"
+            f"👤 <b>{_htmlmod.escape(username)}</b>\n"
+            f"Причина: {_htmlmod.escape(str(reload_msg))}\n\n"
+            f"Проверь, что куки именно от этого аккаунта, и повтори: /ig_accounts",
+            parse_mode="HTML",
+        )
+        return
 
     if not reload_ok:
         # Восстанавливаем бэкап если он есть
@@ -3514,13 +3685,16 @@ async def process_ig_cookies(message: types.Message, state: FSMContext):
         return
 
     persist_session(username)      # копия в БД — переживёт стирание диска
+    head = ("✅ <b>Аккаунт добавлен в пул!</b>" if new_account
+            else "✅ <b>Куки обновлены и проверены!</b>")
+    tail = "" if new_account else f"\n💾 Бэкап: <code>{backup_file.name}</code>"
     await message.answer(
-        f"✅ <b>Куки обновлены и проверены!</b>\n\n"
+        f"{head}\n\n"
         f"👤 Аккаунт: <b>{username}</b>\n"
         f"🔑 sessionid: <code>{sessionid[:30]}...</code>\n"
         f"🆔 ds_user_id: <code>{ds_user_id}</code>\n"
-        f"✅ Клиент протестирован — запрос к Instagram прошёл\n"
-        f"💾 Бэкап: <code>{backup_file.name}</code>",
+        f"✅ Клиент протестирован — запрос к Instagram прошёл"
+        f"{tail}",
         parse_mode="HTML",
     )
     logger.info(f"✅ ig_refresh: куки {username} обновлены пользователем {message.from_user.id}")
@@ -3538,7 +3712,7 @@ async def cmd_ig_status(message: types.Message):
 
     statuses = get_sessions_status()
     if not statuses:
-        await message.answer("❌ Аккаунтов в пуле нет (IG_ACCOUNTS не задан).")
+        await message.answer("❌ Аккаунтов в пуле нет. Добавь через /ig_accounts")
         return
 
     lines = ["📊 <b>Статус Instagram аккаунтов:</b>\n"]
@@ -4499,6 +4673,11 @@ def register_ig_handlers(dp: Dispatcher):
     dp.callback_query.register(callback_ig_refresh_pick,   F.data.startswith("ig_refresh_pick:"))
     dp.callback_query.register(callback_ig_refresh_cancel, F.data == "ig_refresh_cancel")
     dp.message.register(process_ig_cookies,      IGStates.waiting_cookies)
+
+    # ручное добавление / удаление доноров
+    dp.message.register(cmd_ig_accounts,         Command("ig_accounts"))
+    dp.callback_query.register(callback_ig_acc,  F.data.startswith("ig_acc:"))
+    dp.message.register(process_ig_new_login,    IGStates.waiting_new_login)
 
     # Скачивание поста/рилса по ссылке. Регистрируем ПОСЛЕДНИМИ среди текстовых
     # хендлеров IG, чтобы состояния (username / куки) имели приоритет.

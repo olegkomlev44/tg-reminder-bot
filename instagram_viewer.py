@@ -172,6 +172,81 @@ def _parse_accounts() -> list[tuple[str, str]]:
     return accounts
 
 
+# ── РУЧНОЕ ДОБАВЛЕНИЕ / УДАЛЕНИЕ ДОНОРОВ ──────────────────────────────────────
+# Аккаунты из IG_ACCOUNTS остаются основой. Поверх них в БД хранится:
+#   state='added'   — аккаунт, добавленный из бота (только куки, без пароля);
+#   state='removed' — аккаунт, удалённый из бота (даже если он есть в IG_ACCOUNTS,
+#                     после рестарта он не вернётся).
+
+def norm_login(raw: str) -> str:
+    """Логин Instagram в нижнем регистре или '' если формат неверный."""
+    import re as _re
+    v = (raw or "").strip().lstrip("@").lower()
+    return v if _re.fullmatch(r"[a-z0-9._]{1,30}", v) else ""
+
+
+def _pool_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(IG_DB, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS ig_pool_accounts ("
+                 "login TEXT PRIMARY KEY, state TEXT NOT NULL, ts REAL NOT NULL DEFAULT 0)")
+    return conn
+
+
+def _pool_acc_rows() -> dict[str, str]:
+    conn = _pool_conn()
+    try:
+        return {r[0]: r[1] for r in conn.execute("SELECT login, state FROM ig_pool_accounts")}
+    finally:
+        conn.close()
+
+
+def _pool_acc_set(login: str, state: str) -> None:
+    conn = _pool_conn()
+    try:
+        conn.execute("INSERT OR REPLACE INTO ig_pool_accounts (login, state, ts) VALUES (?,?,?)",
+                     (login, state, time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _merge_accounts(base: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """IG_ACCOUNTS минус удалённые из бота плюс добавленные из бота."""
+    try:
+        rows = _pool_acc_rows()
+    except Exception as e:
+        logger.warning(f"[pool] не прочитал ig_pool_accounts: {e}")
+        return base
+    out = [(l, p) for l, p in base if rows.get(l) != "removed"]
+    have = {l for l, _ in out}
+    for l, st in rows.items():
+        if st == "added" and l not in have:
+            out.append((l, ""))
+    return out
+
+
+def _purge_account_data(login: str) -> None:
+    """Стереть сессию удалённого донора и его следы в БД (лайки, подписки, паузы)."""
+    d = _session_dir()
+    for suffix in (".json", ".json.bak", ".json.tmp"):
+        try:
+            (d / f"{login}{suffix}").unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning(f"[pool] не удалил {login}{suffix}: {e}")
+    for table in ("ig_sessions", "ig_follows", "ig_likes", "ig_action_blocks"):
+        try:
+            conn = sqlite3.connect(IG_DB, timeout=10)
+            try:
+                conn.execute(f"DELETE FROM {table} WHERE login=?", (login,))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass        # таблицы может ещё не быть — не страшно
+
+
 def _session_dir() -> Path:
     explicit = os.getenv("IG_SESSION_DIR")
     if explicit:
@@ -484,8 +559,9 @@ class _AccountPool:
     def _init_all(self):
         if not _INSTAGRAPI_OK:
             return
+        self._accounts = _merge_accounts(self._accounts)
         if not self._accounts:
-            logger.error("[pool] IG_ACCOUNTS не задан — Instagram недоступен")
+            logger.error("[pool] нет аккаунтов (IG_ACCOUNTS пуст, из бота не добавлены) — Instagram недоступен")
             return
         for login, pwd in self._accounts:
             try:
@@ -738,6 +814,98 @@ class _AccountPool:
         self._known_dead.discard(login)
         self._dead_ts.pop(login, None)
         return was
+
+    # ── ручное добавление / удаление доноров ─────────────────────────────────
+
+    async def add_account(self, login: str) -> tuple[bool, str]:
+        """
+        Добавить донора в работающий пул. session.json должен уже лежать в session_dir
+        (его собирает хендлер из присланных кук). Клиент сначала проверяется реальным
+        запросом, и только потом попадает в пул.
+        """
+        login = norm_login(login)
+        if not login:
+            return False, "Неверный логин (буквы, цифры, точка, подчёркивание, до 30 символов)"
+        await self._ensure_init()
+        if any(l.lower() == login for l, _ in self._accounts):
+            return False, f"{login} уже в пуле"
+
+        loop = asyncio.get_event_loop()
+        try:
+            new_cl = await loop.run_in_executor(None, lambda: self._make_client(login, ""))
+        except Exception as e:
+            return False, f"Ошибка загрузки session.json: {e}"
+
+        def _ping(cl):
+            _unwrap_percent_re()
+            info = cl.user_info_by_username(login)
+            uid = str(getattr(cl, "user_id", "") or "")
+            if uid and str(getattr(info, "pk", "")) != uid:
+                raise ValueError(f"куки принадлежат другому аккаунту (ds_user_id={uid}), а не {login}")
+            return info
+
+        try:
+            await loop.run_in_executor(None, lambda: _ping(new_cl))
+        except LoginRequired as e:
+            return False, f"Куки не работают — LoginRequired: {e}"
+        except Exception as e:
+            return False, f"Тест не прошёл: {e}"
+
+        async with self._gate.hold(PRIO_USER):          # ни один запрос в этот момент не летит
+            if any(l.lower() == login for l, _ in self._accounts):
+                return False, f"{login} уже в пуле"
+            self._accounts.append((login, ""))
+            self._clients.append(new_cl)
+            self._request_counts[len(self._clients) - 1] = 0
+            self._initialized = True
+        try:
+            _pool_acc_set(login, "added")
+        except Exception as e:
+            logger.warning(f"[pool] add_account {login}: не записал в БД: {e}")
+        logger.info(f"[pool] ➕ добавлен донор {login} (всего {len(self._accounts)})")
+        return True, "Аккаунт добавлен и протестирован"
+
+    async def remove_account(self, login: str) -> tuple[bool, str]:
+        """Убрать донора из пула, стереть его сессию и записи в БД."""
+        await self._ensure_init()
+        if self._idx_of(login) is None:
+            return False, f"{login} нет в пуле"
+
+        async with self._gate.hold(PRIO_USER):          # индексы не должны сдвинуться под живым запросом
+            idx = self._idx_of(login)
+            if idx is None:
+                return False, f"{login} нет в пуле"
+            old_n = max(len(self._clients), 1)
+            cur = self._current % old_n
+            self._accounts.pop(idx)
+            if idx < len(self._clients):
+                self._clients.pop(idx)
+
+            def _shift(d: dict) -> dict:
+                return {(k - 1 if k > idx else k): v for k, v in d.items() if k != idx}
+
+            self._request_counts = _shift(self._request_counts)
+            self._rate_limited_until = _shift(self._rate_limited_until)
+            self._since_dump = _shift(self._since_dump)
+            for dct in (self._loaded_mtime, self._dump_hash, self._dead_ts):
+                dct.pop(login, None)
+            self._known_dead.discard(login)
+
+            new_n = len(self._clients)
+            if new_n == 0:
+                self._current = 0
+            else:
+                if cur > idx:
+                    cur -= 1
+                self._current = cur % new_n
+
+        try:
+            _pool_acc_set(login, "removed")
+            await asyncio.get_event_loop().run_in_executor(None, _purge_account_data, login)
+        except Exception as e:
+            logger.warning(f"[pool] remove_account {login}: чистка данных: {e}")
+        logger.info(f"[pool] 🗑 удалён донор {login} (осталось {len(self._accounts)})")
+        return True, "Аккаунт удалён из пула"
 
     # ── выполнение запроса с ротацией ────────────────────────────────────────
 
@@ -2344,6 +2512,8 @@ def init_ig_db():
     )""")
     conn.commit()
     conn.close()
+    if not _POOL._initialized:
+        _POOL._accounts = _merge_accounts(_POOL._accounts)   # добавленные/удалённые из бота
     logger.info("🟢 Instagram DB инициализирована")
 
 
