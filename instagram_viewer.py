@@ -415,9 +415,29 @@ def _apply_client_identity(cl, login: str) -> None:
 # работаем только по сессии. Пароль нигде не хранится. 2FA и коды подтверждения запрашиваются
 # у админа через ask_code(kind) — async-функцию, которая вернёт строку с кодом или None.
 
+# После 429 на вход повторять с того же IP нельзя: каждая попытка продлевает блок.
+IG_LOGIN_COOLDOWN_MIN = float(os.getenv("IG_LOGIN_COOLDOWN_MIN", "45"))
+_LOGIN_COOLDOWN: dict[str, float] = {}          # ключ «IP» (прокси или direct) → до какого времени ждём
+
+
+def _is_429(e: Exception) -> bool:
+    low = f"{type(e).__name__} {e}".lower()
+    return ("429" in low or "too many" in low or "retryerror" in low
+            or type(e).__name__ in ("PleaseWaitFewMinutes", "RateLimitError", "ClientThrottledError"))
+
+
+def _login_key(login: str) -> str:
+    return proxy_mask(get_account_proxy(login)) or "direct"
+
+
 def _login_error(e: Exception, password: str) -> str:
     name = type(e).__name__
     txt = str(e).replace(password, "***")
+    if _is_429(e):
+        return (f"Instagram ответил 429 («слишком много запросов») на вход с этого IP. Повторять сейчас нельзя — "
+                f"каждая попытка продлевает блок. Подожди ~{IG_LOGIN_COOLDOWN_MIN:.0f} минут. Чтобы не упереться снова: "
+                f"задай прокси этому аккаунту (🌐 в /ig_accounts) — домашний или мобильный, из своей страны. "
+                f"Пока прокси нет, войди через 🍪 куки: они не трогают страницу входа.")
     if name == "BadPassword":
         return ("Instagram не принял логин/пароль. Если пароль точно верный — это защита от входа с "
                 "нового IP: подтверди вход в приложении Instagram или задай прокси из своей страны (🌐).")
@@ -445,6 +465,11 @@ async def ig_password_login(login: str, password: str, ask_code) -> tuple[bool, 
     if not _INSTAGRAPI_OK:
         return False, "instagrapi не установлена"
     await _POOL._ensure_init()
+    key = _login_key(login)
+    left = _LOGIN_COOLDOWN.get(key, 0) - time.time()
+    if left > 0:
+        return False, (f"Instagram недавно ответил 429 на вход с этого IP ({key}). Подожди ещё ~{left / 60:.0f} мин, "
+                       f"иначе блок продлится. Тем временем можно добавить аккаунт через 🍪 куки.")
     loop = asyncio.get_event_loop()
     path = _session_dir() / f"{login}.json"
     was_in_pool = any(l.lower() == login for l, _ in _POOL._accounts)
@@ -458,6 +483,14 @@ async def ig_password_login(login: str, password: str, ask_code) -> tuple[bool, 
     def _do() -> None:
         cl = _new_client()
         cl.delay_range = [IG_DELAY_MIN, IG_DELAY_MAX]
+        try:                    # одна попытка без скрытых повторов: 429 возвращаем сразу, а не бьём по нему 5 раз
+            from requests.adapters import HTTPAdapter
+            for sess in (getattr(cl, "private", None), getattr(cl, "public", None)):
+                if sess is not None and hasattr(sess, "mount"):
+                    sess.mount("https://", HTTPAdapter(max_retries=0))
+                    sess.mount("http://", HTTPAdapter(max_retries=0))
+        except Exception:
+            pass
         if path.exists():       # то же «устройство», что и раньше, но без мёртвой авторизации
             try:
                 old = json.loads(path.read_text())
@@ -488,6 +521,8 @@ async def ig_password_login(login: str, password: str, ask_code) -> tuple[bool, 
         await loop.run_in_executor(None, _do)
     except Exception as e:
         logger.warning(f"[login] @{login}: {type(e).__name__}: {str(e).replace(password, '***')[:200]}")
+        if _is_429(e):
+            _LOGIN_COOLDOWN[key] = time.time() + IG_LOGIN_COOLDOWN_MIN * 60
         return False, _login_error(e, password)
 
     ok, msg = await (_POOL.reload_client(login) if was_in_pool else _POOL.add_account(login))
