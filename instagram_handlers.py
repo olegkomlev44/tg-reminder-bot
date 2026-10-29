@@ -206,6 +206,7 @@ class IGStates(StatesGroup):
     waiting_cookies  = State()
     waiting_new_login = State()
     waiting_proxy = State()
+    waiting_password = State()
 
 
 # ── ВСПОМОГАТЕЛЬНЫЕ ───────────────────────────────────────────────────────────
@@ -3338,6 +3339,16 @@ async def callback_ig_refresh_pick(callback: types.CallbackQuery, state: FSMCont
         return
 
     username = callback.data.split(":", 1)[1]
+    if not callback.data.startswith("ig_refresh_ck:"):      # сначала выбор: пароль или куки
+        await callback.answer()
+        await callback.message.edit_text(
+            f"🔄 <b>{_htmlmod.escape(username)}</b>: как входим?\n\n"
+            "🔐 <b>Логин и пароль</b> — рекомендую: Instagram видит обычный вход с прокси аккаунта "
+            "и реже просит подтвердить личность.\n"
+            "🍪 <b>Куки из браузера</b> — запасной вариант.",
+            parse_mode="HTML", reply_markup=_method_kb(username, new=False),
+        )
+        return
     await state.set_state(IGStates.waiting_cookies)
     await state.update_data(refresh_username=username)
     await callback.answer()
@@ -3457,7 +3468,8 @@ async def callback_ig_acc(callback: types.CallbackQuery, state: FSMContext):
             await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
 
     if act == "list":
-        if await state.get_state() in (IGStates.waiting_new_login.state, IGStates.waiting_proxy.state):
+        if await state.get_state() in (IGStates.waiting_new_login.state, IGStates.waiting_proxy.state,
+                                       IGStates.waiting_password.state):
             await state.clear()
         await callback.answer()
         text, kb = _acc_list_view()
@@ -3473,6 +3485,29 @@ async def callback_ig_acc(callback: types.CallbackQuery, state: FSMContext):
             InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="❌ Отмена", callback_data="ig_acc:list")]]),
         )
+
+    elif act in ("pw", "pwn"):
+        from instagram_viewer import get_account_proxy
+        await state.set_state(IGStates.waiting_password)
+        await state.update_data(pw_login=arg, new_account=(act == "pwn"))
+        await callback.answer()
+        warn = "" if get_account_proxy(arg) else (
+            "\n\n⚠️ <b>Прокси не задан</b>: вход пойдёт с IP хостинга, и Instagram почти наверняка "
+            "попросит подтвердить личность. Лучше сначала нажми 🌐 в /ig_accounts.")
+        await _show(
+            f"🔐 Пришли <b>пароль</b> от <code>{_htmlmod.escape(arg)}</code> одним сообщением.\n\n"
+            "Я сразу удалю его из чата и нигде не сохраню — на диске останется только сессия. "
+            "Если включена 2FA или придёт проверка, следом попрошу код." + warn,
+            InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="ig_acc:list")]]),
+        )
+
+    elif act == "ckn":
+        await state.set_state(IGStates.waiting_cookies)
+        await state.update_data(refresh_username=arg, new_account=True)
+        await callback.answer()
+        await _show(_cookies_prompt(arg), InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="ig_refresh_cancel")]]))
 
     elif act == "px":
         if _POOL._idx_of(arg) is None:
@@ -3623,17 +3658,106 @@ async def process_ig_proxy(message: types.Message, state: FSMContext):
         await message.answer(text + "\n\nПришли ещё раз или /cancel.", parse_mode="HTML")
         return
     if new_account:
-        await state.set_state(IGStates.waiting_cookies)
-        await state.update_data(refresh_username=login, new_account=True)
+        await state.clear()
         await message.answer(
-            text + "\n\n" + _cookies_prompt(login), parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="❌ Отмена", callback_data="ig_refresh_cancel")]]),
+            text + f"\n\n👤 <b>{_htmlmod.escape(login)}</b>: как входим?\n"
+            "🔐 Логин и пароль — рекомендую. 🍪 Куки — запасной вариант.",
+            parse_mode="HTML", reply_markup=_method_kb(login, new=True),
         )
     else:
         await state.clear()
         t, kb = _acc_list_view(text)
         await message.answer(t, parse_mode="HTML", reply_markup=kb)
+
+
+_CODE_WAITERS: dict[int, asyncio.Future] = {}
+
+
+def _method_kb(login: str, new: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔐 Логин и пароль (рекомендую)",
+                              callback_data=f"ig_acc:{'pwn' if new else 'pw'}:{login}")],
+        [InlineKeyboardButton(text="🍪 Куки из браузера",
+                              callback_data=f"ig_acc:ckn:{login}" if new else f"ig_refresh_ck:{login}")],
+        [InlineKeyboardButton(text="❌ Отмена",
+                              callback_data="ig_acc:list" if new else "ig_refresh_cancel")],
+    ])
+
+
+def _has_code_waiter(message: types.Message) -> bool:
+    return bool(message.from_user and message.from_user.id in _CODE_WAITERS
+                and message.text and not message.text.startswith("/"))
+
+
+async def process_ig_login_code(message: types.Message):
+    """Код 2FA / подтверждения, о котором просил вход по паролю."""
+    w = _CODE_WAITERS.pop(message.from_user.id, None)
+    if not w or w.done():
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    w.set_result("".join((message.text or "").split()))
+
+
+async def _run_password_login(bot, chat_id: int, uid: int, login: str, password: str,
+                              new_account: bool, status: types.Message):
+    from instagram_viewer import ig_password_login
+
+    async def ask(kind: str):
+        what = ("код 2FA (из приложения-аутентификатора или SMS)" if kind == "2fa"
+                else "код подтверждения (из письма или SMS)")
+        fut = asyncio.get_event_loop().create_future()
+        _CODE_WAITERS[uid] = fut
+        await bot.send_message(chat_id, f"🔐 Instagram просит {what}.\nПришли код сюда в течение 5 минут "
+                                        f"или /cancel.", parse_mode="HTML")
+        try:
+            return await asyncio.wait_for(fut, 300)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            _CODE_WAITERS.pop(uid, None)
+
+    try:
+        ok, msg = await ig_password_login(login, password, ask)
+    except Exception as e:
+        ok, msg = False, f"{type(e).__name__}: {str(e).replace(password, '***')[:200]}"
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    safe = _htmlmod.escape(login)
+    if ok:
+        t, kb = _acc_list_view(
+            f"✅ <code>{safe}</code> — {'добавлен в пул' if new_account else 'сессия обновлена'}, "
+            f"вход по паролю прошёл. Пароль не сохранён.")
+        await bot.send_message(chat_id, t, parse_mode="HTML", reply_markup=kb)
+    else:
+        await bot.send_message(
+            chat_id, f"❌ <b>Вход не удался</b> (<code>{safe}</code>)\n\n{_htmlmod.escape(str(msg))}\n\n"
+                     f"Повторить: /ig_accounts", parse_mode="HTML")
+
+
+async def process_ig_password(message: types.Message, state: FSMContext):
+    """Получили пароль — удаляем сообщение и входим в фоне (долго: могут понадобиться коды)."""
+    if not _acc_admin_ok(message.from_user.id):
+        await state.clear()
+        return
+    data = await state.get_data()
+    login = data.get("pw_login", "")
+    new_account = bool(data.get("new_account"))
+    password = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await state.clear()
+    if not login or not password:
+        return
+    status = await message.answer("⏳ Вхожу в Instagram… это может занять до минуты.")
+    _spawn(_run_password_login(message.bot, message.chat.id, message.from_user.id,
+                               login, password, new_account, status))
 
 
 async def cmd_ig_proxy(message: types.Message):
@@ -3666,8 +3790,14 @@ async def cmd_ig_cancel(message: types.Message, state: FSMContext):
     """/cancel — отменить текущий шаг (ввод username или кук)."""
     cur = await state.get_state()
     if cur in (IGStates.waiting_username.state, IGStates.waiting_cookies.state,
-               IGStates.waiting_new_login.state, IGStates.waiting_proxy.state):
+               IGStates.waiting_new_login.state, IGStates.waiting_proxy.state,
+               IGStates.waiting_password.state):
         await state.clear()
+        await message.answer("🚫 Отменено.")
+    elif message.from_user.id in _CODE_WAITERS:
+        w = _CODE_WAITERS.pop(message.from_user.id, None)
+        if w and not w.done():
+            w.set_result(None)               # вход по паролю прервётся
         await message.answer("🚫 Отменено.")
     else:
         await message.answer("Нечего отменять.")
@@ -4754,6 +4884,7 @@ async def callback_ig_bm_del(callback: types.CallbackQuery):
 def register_ig_handlers(dp: Dispatcher):
     """Зарегистрировать все Instagram-хендлеры в диспетчере."""
     init_ig_db()
+    logger.info("🟢 IG handlers: build proxy + вход по паролю (выбор пароль/куки включён)")
 
     # Регистрируем callback для алертов при смерти сессии
     set_session_dead_callback(_notify_admins_session_dead)
@@ -4814,6 +4945,9 @@ def register_ig_handlers(dp: Dispatcher):
     dp.message.register(process_ig_new_login,    IGStates.waiting_new_login)
     dp.message.register(cmd_ig_proxy,            Command("ig_proxy"))
     dp.message.register(process_ig_proxy,        IGStates.waiting_proxy)
+    dp.message.register(process_ig_password,     IGStates.waiting_password)
+    dp.message.register(process_ig_login_code,   _has_code_waiter)
+    dp.callback_query.register(callback_ig_refresh_pick, F.data.startswith("ig_refresh_ck:"))
 
     # Скачивание поста/рилса по ссылке. Регистрируем ПОСЛЕДНИМИ среди текстовых
     # хендлеров IG, чтобы состояния (username / куки) имели приоритет.

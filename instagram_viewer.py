@@ -410,6 +410,146 @@ def _apply_client_identity(cl, login: str) -> None:
                 logger.warning(f"[pool] гео @{login} {env}: {e}")
 
 
+# ── ВХОД ПО ЛОГИНУ И ПАРОЛЮ (вместо кук из браузера) ──────────────────────────
+# Один раз логинимся «как приложение» с прокси аккаунта, сохраняем session.json и дальше
+# работаем только по сессии. Пароль нигде не хранится. 2FA и коды подтверждения запрашиваются
+# у админа через ask_code(kind) — async-функцию, которая вернёт строку с кодом или None.
+
+def _login_error(e: Exception, password: str) -> str:
+    name = type(e).__name__
+    txt = str(e).replace(password, "***")
+    if name == "BadPassword":
+        return ("Instagram не принял логин/пароль. Если пароль точно верный — это защита от входа с "
+                "нового IP: подтверди вход в приложении Instagram или задай прокси из своей страны (🌐).")
+    if name in ("ChallengeRequired", "ChallengeUnknownStep", "SelectContactPointRecoveryForm",
+                "RecaptchaChallengeForm", "CheckpointRequired", "LegacyForceSetNewPasswordForm"):
+        return ("Instagram просит подтвердить, что это ты. Открой приложение Instagram на телефоне, нажми "
+                "«Это был я», подожди 10–15 минут и повтори вход.")
+    if name in ("PleaseWaitFewMinutes", "RateLimitError"):
+        return "Instagram просит подождать. Повтори вход через 15–30 минут."
+    if name in ("ProxyAddressIsBlocked",):
+        return "Instagram заблокировал этот прокси. Возьми другой (🌐)."
+    if "код не получен" in txt:
+        return txt
+    return f"{name}: {txt[:200]}"
+
+
+async def ig_password_login(login: str, password: str, ask_code) -> tuple[bool, str]:
+    """
+    Логин по паролю → session.json → в пул (добавить или перезагрузить).
+    ask_code(kind): kind = '2fa' | 'challenge:EMAIL' | 'challenge:SMS' → await str | None.
+    """
+    login = norm_login(login)
+    if not login or not password:
+        return False, "Пустой логин или пароль"
+    if not _INSTAGRAPI_OK:
+        return False, "instagrapi не установлена"
+    await _POOL._ensure_init()
+    loop = asyncio.get_event_loop()
+    path = _session_dir() / f"{login}.json"
+    was_in_pool = any(l.lower() == login for l, _ in _POOL._accounts)
+
+    def _ask(kind: str) -> str:
+        code = asyncio.run_coroutine_threadsafe(ask_code(kind), loop).result(timeout=330)
+        if not code:
+            raise RuntimeError("код не получен (время вышло или отмена)")
+        return str(code)
+
+    def _do() -> None:
+        cl = _new_client()
+        cl.delay_range = [IG_DELAY_MIN, IG_DELAY_MAX]
+        if path.exists():       # то же «устройство», что и раньше, но без мёртвой авторизации
+            try:
+                old = json.loads(path.read_text())
+                for key, setter in (("uuids", "set_uuids"), ("device_settings", "set_device"),
+                                    ("user_agent", "set_user_agent")):
+                    if old.get(key) and hasattr(cl, setter):
+                        getattr(cl, setter)(old[key])
+            except Exception as e:
+                logger.info(f"[login] {login}: не перенёс прежнее устройство: {e}")
+        _apply_client_identity(cl, login)
+        # без этого instagrapi вызвал бы input() и повесил поток
+        cl.challenge_code_handler = lambda username, choice: _ask(
+            "challenge:" + str(getattr(choice, "name", choice)))
+        try:
+            cl.login(login, password)
+        except Exception as e:
+            if type(e).__name__ != "TwoFactorRequired":
+                raise
+            cl.login(login, password, verification_code=_ask("2fa"))
+        if not getattr(cl, "user_id", None):
+            raise RuntimeError("вход не вернул user_id")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        cl.dump_settings(tmp)
+        os.replace(tmp, path)
+
+    try:
+        await loop.run_in_executor(None, _do)
+    except Exception as e:
+        logger.warning(f"[login] @{login}: {type(e).__name__}: {str(e).replace(password, '***')[:200]}")
+        return False, _login_error(e, password)
+
+    ok, msg = await (_POOL.reload_client(login) if was_in_pool else _POOL.add_account(login))
+    if not ok:
+        if not was_in_pool:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return False, msg
+    try:
+        persist_session(login)
+    except Exception:
+        pass
+    logger.info(f"[login] ✅ @{login}: вход по паролю, сессия сохранена")
+    return True, msg
+
+
+# ── ТРАНСПОРТ instagrapi 3.2+ (curl_cffi: TLS/HTTP2-отпечаток как у настоящего клиента) ──
+# IG_PUBLIC_TRANSPORT=curl|requests, IG_PUBLIC_IMPERSONATE=chrome136. На старой версии библиотеки
+# или без curl_cffi тихо работаем как раньше. Обновление: pip install -U "instagrapi[curl]" (Python 3.11+).
+IG_PUBLIC_TRANSPORT   = os.getenv("IG_PUBLIC_TRANSPORT", "curl").strip().lower()
+IG_PUBLIC_IMPERSONATE = os.getenv("IG_PUBLIC_IMPERSONATE", "chrome136").strip()
+_TRANSPORT_LOGGED = False
+
+
+def _new_client():
+    global _TRANSPORT_LOGGED
+    why = ""
+    if IG_PUBLIC_TRANSPORT == "curl":
+        try:
+            import curl_cffi  # noqa: F401
+            have_curl = True
+        except Exception:
+            have_curl = False
+        if not have_curl:
+            why = 'не установлен curl_cffi — pip install -U "instagrapi[curl]"'
+        else:
+            try:
+                cl = Client(public_transport="curl", public_transport_impersonate=IG_PUBLIC_IMPERSONATE)
+                if not _TRANSPORT_LOGGED:
+                    _TRANSPORT_LOGGED = True
+                    logger.info(f"[pool] транспорт: curl/{IG_PUBLIC_IMPERSONATE}, instagrapi {_ig_version()}")
+                return cl
+            except TypeError:
+                why = f"instagrapi {_ig_version()} не знает public_transport — обнови до 3.2+ (нужен Python 3.11+)"
+            except Exception as e:
+                why = f"{type(e).__name__}: {e}"
+    if why and not _TRANSPORT_LOGGED:
+        _TRANSPORT_LOGGED = True
+        logger.warning(f"[pool] curl-транспорт выключен: {why}")
+    return Client()
+
+
+def _ig_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("instagrapi")
+    except Exception:
+        return "?"
+
+
 # ── ТИХИЕ ЧАСЫ (фоновые запросы ночью не идут) ───────────────────────────────
 # IG_QUIET_HOURS="1-7" — по местному времени (IG_TZ_OFFSET_HOURS от UTC, по умолчанию +3).
 # "off" — выключить. Запросы пользователя ночью работают; ждут только фоновые задачи.
@@ -784,7 +924,7 @@ class _AccountPool:
         то есть часть "случайных" разрывов сессии могла быть самодельной.
         Убрали патч, оставили только set_settings().
         """
-        cl = Client()
+        cl = _new_client()
         cl.delay_range = [IG_DELAY_MIN, IG_DELAY_MAX]
         session_file = _session_dir() / f"{login}.json"
 
