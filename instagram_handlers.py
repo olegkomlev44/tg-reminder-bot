@@ -71,7 +71,7 @@ from instagram_viewer import (
 logger = logging.getLogger(__name__)
 
 # ── НАСТРОЙКИ ФОНОВОЙ ПРОВЕРКИ ────────────────────────────────────────────────
-IG_CHECK_BASE        = int(os.getenv("IG_CHECK_BASE", str(30 * 60)))   # базовый интервал на ник, сек
+IG_CHECK_BASE        = int(os.getenv("IG_CHECK_BASE", str(60 * 60)))   # базовый интервал на ник, сек
 IG_CHECK_TICK        = int(os.getenv("IG_CHECK_TICK", str(10 * 60)))   # как часто планировщик смотрит «кто пора»
 IG_MAX_PER_TICK      = int(os.getenv("IG_MAX_PER_TICK", "12"))         # максимум ников за один тик
 IG_NIGHT_START       = int(os.getenv("IG_NIGHT_START", "1"))           # ночью проверяем реже (локальные часы)
@@ -205,6 +205,7 @@ class IGStates(StatesGroup):
     waiting_username = State()
     waiting_cookies  = State()
     waiting_new_login = State()
+    waiting_proxy = State()
 
 
 # ── ВСПОМОГАТЕЛЬНЫЕ ───────────────────────────────────────────────────────────
@@ -2458,7 +2459,7 @@ async def cmd_igdl(message: types.Message):
 
 # ── HEALTH CHECK TASK ─────────────────────────────────────────────────────────
 
-IG_HEALTH_INTERVAL = int(os.getenv("IG_HEALTH_INTERVAL", str(60 * 60)))   # по умолчанию раз в час
+IG_HEALTH_INTERVAL = int(os.getenv("IG_HEALTH_INTERVAL", str(3 * 60 * 60)))   # по умолчанию раз в час
 
 
 async def _run_session_health_check(bot: Bot) -> dict:
@@ -3391,8 +3392,14 @@ def _acc_admin_ok(uid: int) -> bool:
 
 
 def _acc_list_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
-    from instagram_viewer import ig_blocked_map
+    from collections import Counter
+    from instagram_viewer import ig_blocked_map, ig_proxy_masks, quiet_hours_label
     statuses = get_sessions_status()
+    try:
+        masks = ig_proxy_masks()
+    except Exception:
+        masks = {}
+    cnt = Counter(m for m in masks.values() if m)
     try:
         blocked = ig_blocked_map()
     except Exception:
@@ -3400,6 +3407,9 @@ def _acc_list_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     lines = [f"👥 <b>Аккаунты-доноры</b> ({len(statuses)})", ""]
     if note:
         lines += [note, ""]
+    ql = quiet_hours_label()
+    if ql:
+        lines += [f"<i>{ql}</i>", ""]
     if not statuses:
         lines.append("Пул пуст. Нажми «Добавить аккаунт».")
     btns = []
@@ -3408,10 +3418,13 @@ def _acc_list_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         icon = "💀" if broken else "✅"
         extra = f" · ⏸ пауза действий {_left_txt(blocked[s['login']])}" if s["login"] in blocked else ""
         cur = " 👈" if s.get("is_current") else ""
-        lines.append(f"{icon} <code>{_htmlmod.escape(s['login'])}</code>{cur} · запросов: {s['requests']}{extra}")
+        m = masks.get(s["login"], "")
+        px = (f" · 🌐 {m}" + (" ⚠️ общий IP" if cnt[m] > 1 else "")) if m else " · ⚠️ без прокси"
+        lines.append(f"{icon} <code>{_htmlmod.escape(s['login'])}</code>{cur} · запросов: {s['requests']}{px}{extra}")
         btns.append([
             InlineKeyboardButton(text=f"🔄 {s['login']}", callback_data=f"ig_refresh_pick:{s['login']}"),
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"ig_acc:del:{s['login']}"),
+            InlineKeyboardButton(text="🌐", callback_data=f"ig_acc:px:{s['login']}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"ig_acc:del:{s['login']}"),
         ])
     btns.append([InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="ig_acc:add")])
     btns.append([InlineKeyboardButton(text="🔃 Обновить список", callback_data="ig_acc:list")])
@@ -3444,7 +3457,7 @@ async def callback_ig_acc(callback: types.CallbackQuery, state: FSMContext):
             await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
 
     if act == "list":
-        if await state.get_state() == IGStates.waiting_new_login.state:
+        if await state.get_state() in (IGStates.waiting_new_login.state, IGStates.waiting_proxy.state):
             await state.clear()
         await callback.answer()
         text, kb = _acc_list_view()
@@ -3457,6 +3470,19 @@ async def callback_ig_acc(callback: types.CallbackQuery, state: FSMContext):
             "➕ <b>Новый аккаунт-донор</b>\n\n"
             "Пришли его <b>логин</b> (username), например <code>my_account</code>.\n"
             "Следом попрошу куки — как в /ig_refresh.",
+            InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="ig_acc:list")]]),
+        )
+
+    elif act == "px":
+        if _POOL._idx_of(arg) is None:
+            await callback.answer("Такого аккаунта уже нет", show_alert=True)
+            return
+        await state.set_state(IGStates.waiting_proxy)
+        await state.update_data(proxy_login=arg, new_account=False)
+        await callback.answer()
+        await _show(
+            f"🌐 <b>Прокси для <code>{_htmlmod.escape(arg)}</code></b>\n\n" + _PROXY_HELP,
             InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="❌ Отмена", callback_data="ig_acc:list")]]),
         )
@@ -3513,26 +3539,134 @@ async def process_ig_new_login(message: types.Message, state: FSMContext):
         await message.answer(f"ℹ️ <code>{login}</code> уже в пуле. Обновить куки: /ig_refresh", parse_mode="HTML")
         return
 
-    await state.set_state(IGStates.waiting_cookies)
-    await state.update_data(refresh_username=login, new_account=True)
+    await state.set_state(IGStates.waiting_proxy)
+    await state.update_data(proxy_login=login, new_account=True)
     await message.answer(
+        f"👤 Аккаунт: <b>{login}</b>\n\n🌐 <b>Сначала прокси</b> — аккаунт должен входить с того же IP, "
+        f"с которого потом работает.\n\n" + _PROXY_HELP + "\n<code>пропустить</code> — без прокси (не советую).",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="ig_acc:list")]]),
+    )
+
+
+_PROXY_HELP = (
+    "Пришли прокси одним сообщением:\n"
+    "<code>http://user:pass@host:port</code>\n"
+    "или <code>host:port:user:pass</code>\n\n"
+    "• свой постоянный (sticky) домашний/мобильный прокси из твоей страны\n"
+    "• 1 аккаунт = 1 прокси, не делай один на всех\n"
+    "• <code>off</code> — убрать прокси\n"
+    "<i>Сообщение с паролем я сразу удалю.</i>"
+)
+_PX_OFF = {"off", "-", "нет", "выкл", "none"}
+_PX_SKIP = {"skip", "пропустить"}
+
+
+def _cookies_prompt(login: str) -> str:
+    return (
         f"👤 Аккаунт: <b>{login}</b>\n\n"
         "Теперь пришли куки этого аккаунта:\n"
         "1. Зайди на <code>instagram.com</code> именно под ним\n"
         "2. EditThisCookie → <b>Экспорт</b>\n"
         "3. Отправь JSON сюда текстом или файлом\n\n"
-        "<i>Подойдут и sessionid + ds_user_id в формате key: value.</i>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="❌ Отмена", callback_data="ig_refresh_cancel")]]),
+        "<i>Подойдут и sessionid + ds_user_id в формате key: value.</i>"
     )
+
+
+async def _set_proxy_flow(login: str, raw: str) -> tuple[bool, str]:
+    """Проверить прокси реальным запросом, сохранить, применить. Возвращает (ok, HTML-текст)."""
+    from instagram_viewer import norm_proxy, test_proxy, ig_set_proxy, ig_proxy_masks, proxy_mask
+    if raw.strip().lower() in _PX_OFF:
+        await ig_set_proxy(login, "")
+        return True, "🌐 Прокси выключен — запросы идут с IP хостинга (чаще просит подтвердить личность)."
+    px = norm_proxy(raw)
+    if not px:
+        return False, ("❌ Не понял формат. Примеры:\n<code>http://user:pass@1.2.3.4:8000</code>\n"
+                       "<code>1.2.3.4:8000:user:pass</code>")
+    ok, info = await test_proxy(px)
+    if not ok:
+        return False, f"❌ Прокси не отвечает: <code>{_htmlmod.escape(info)}</code>"
+    try:
+        dup = [l for l, m in ig_proxy_masks().items() if m == proxy_mask(px) and l.lower() != login.lower()]
+    except Exception:
+        dup = []
+    await ig_set_proxy(login, px)
+    txt = f"✅ Прокси включён для <code>{_htmlmod.escape(login)}</code>\nIP выхода: <code>{_htmlmod.escape(info)}</code>"
+    if dup:
+        txt += f"\n⚠️ Тот же адрес уже у: {', '.join(_htmlmod.escape(x) for x in dup)} — лучше свой IP на каждый."
+    txt += "\n<i>Смена IP у давно работающего аккаунта может вызвать проверку личности — не меняй без нужды.</i>"
+    return True, txt
+
+
+async def process_ig_proxy(message: types.Message, state: FSMContext):
+    """Получили прокси (для нового или существующего аккаунта)."""
+    if not _acc_admin_ok(message.from_user.id):
+        await state.clear()
+        return
+    data = await state.get_data()
+    login = data.get("proxy_login", "")
+    new_account = bool(data.get("new_account"))
+    raw = (message.text or "").strip()
+    try:
+        await message.delete()                   # в сообщении логин/пароль прокси
+    except Exception:
+        pass
+    if not login:
+        await state.clear()
+        return
+    if new_account and raw.lower() in _PX_SKIP:
+        ok, text = True, "⏭ Без прокси. Задать позже можно в /ig_accounts (кнопка 🌐)."
+    else:
+        ok, text = await _set_proxy_flow(login, raw)
+    if not ok:
+        await message.answer(text + "\n\nПришли ещё раз или /cancel.", parse_mode="HTML")
+        return
+    if new_account:
+        await state.set_state(IGStates.waiting_cookies)
+        await state.update_data(refresh_username=login, new_account=True)
+        await message.answer(
+            text + "\n\n" + _cookies_prompt(login), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="ig_refresh_cancel")]]),
+        )
+    else:
+        await state.clear()
+        t, kb = _acc_list_view(text)
+        await message.answer(t, parse_mode="HTML", reply_markup=kb)
+
+
+async def cmd_ig_proxy(message: types.Message):
+    """/ig_proxy <логин> <прокси|off> — быстрый способ задать прокси."""
+    if not _acc_admin_ok(message.from_user.id):
+        await message.answer("⛔ Только для администратора (нужен IG_ADMIN_IDS).")
+        return
+    from instagram_viewer import _POOL
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) >= 3:
+        try:
+            await message.delete()               # в команде пароль прокси
+        except Exception:
+            pass
+    if len(parts) < 3:
+        await message.answer("Использование: <code>/ig_proxy логин http://user:pass@host:port</code>\n"
+                             "Выключить: <code>/ig_proxy логин off</code>\nИли кнопка 🌐 в /ig_accounts.",
+                             parse_mode="HTML")
+        return
+    login = parts[1].strip().lstrip("@").lower()
+    real = next((l for l, _ in _POOL._accounts if l.lower() == login), None)
+    if not real:
+        await message.answer(f"❌ Аккаунта <code>{_htmlmod.escape(login)}</code> нет в пуле.", parse_mode="HTML")
+        return
+    ok, text = await _set_proxy_flow(real, parts[2])
+    await message.answer(text, parse_mode="HTML")
 
 
 async def cmd_ig_cancel(message: types.Message, state: FSMContext):
     """/cancel — отменить текущий шаг (ввод username или кук)."""
     cur = await state.get_state()
     if cur in (IGStates.waiting_username.state, IGStates.waiting_cookies.state,
-               IGStates.waiting_new_login.state):
+               IGStates.waiting_new_login.state, IGStates.waiting_proxy.state):
         await state.clear()
         await message.answer("🚫 Отменено.")
     else:
@@ -4678,6 +4812,8 @@ def register_ig_handlers(dp: Dispatcher):
     dp.message.register(cmd_ig_accounts,         Command("ig_accounts"))
     dp.callback_query.register(callback_ig_acc,  F.data.startswith("ig_acc:"))
     dp.message.register(process_ig_new_login,    IGStates.waiting_new_login)
+    dp.message.register(cmd_ig_proxy,            Command("ig_proxy"))
+    dp.message.register(process_ig_proxy,        IGStates.waiting_proxy)
 
     # Скачивание поста/рилса по ссылке. Регистрируем ПОСЛЕДНИМИ среди текстовых
     # хендлеров IG, чтобы состояния (username / куки) имели приоритет.

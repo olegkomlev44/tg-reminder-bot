@@ -58,20 +58,24 @@ logger = logging.getLogger(__name__)
 # Без своих прокси все аккаунты бьют с одного IP хостинга — единственный рычаг
 # снизить риск бана/выброса это (а) не спешить и (б) не дёргать по кругу все
 # аккаунты при первой же временной ошибке.
-IG_DELAY_MIN          = float(os.getenv("IG_DELAY_MIN", "3"))       # мин. пауза между запросами instagrapi
-IG_DELAY_MAX          = float(os.getenv("IG_DELAY_MAX", "8"))       # макс. пауза между запросами instagrapi
+IG_DELAY_MIN          = float(os.getenv("IG_DELAY_MIN", "4"))       # мин. пауза между запросами instagrapi
+IG_DELAY_MAX          = float(os.getenv("IG_DELAY_MAX", "9"))       # макс. пауза между запросами instagrapi
 IG_SAME_ACC_RETRIES   = int(os.getenv("IG_SAME_ACC_RETRIES", "2"))  # попыток на ТОМ ЖЕ акке при ClientError
 IG_RATE_WAIT_MIN      = float(os.getenv("IG_RATE_WAIT_MIN", "20"))  # backoff при 429/PleaseWaitFewMinutes
 IG_RATE_WAIT_MAX      = float(os.getenv("IG_RATE_WAIT_MAX", "45"))
 # Пункт 4: общий лимитер — запросы к IG идут строго по одному, с паузой между стартами
-IG_MIN_INTERVAL       = float(os.getenv("IG_MIN_INTERVAL", "1.5"))   # мин. пауза между стартами запросов
+IG_MIN_INTERVAL       = float(os.getenv("IG_MIN_INTERVAL", "2"))     # мин. пауза между стартами запросов (пользователь)
+# Фоновые задачи (проверка подписок, health-check) идут заметно медленнее пользователя
+IG_BG_MIN_INTERVAL    = float(os.getenv("IG_BG_MIN_INTERVAL", "4"))
+IG_BG_DELAY_MIN       = float(os.getenv("IG_BG_DELAY_MIN", "8"))
+IG_BG_DELAY_MAX       = float(os.getenv("IG_BG_DELAY_MAX", "20"))
 IG_REQ_TIMEOUT        = float(os.getenv("IG_REQ_TIMEOUT", "60"))     # таймаут одного запроса, сек
 # Пункт 5: ретраи на сетевых ошибках (таймаут, обрыв, DNS)
 IG_NET_RETRIES        = int(os.getenv("IG_NET_RETRIES", "3"))
 # Пункт 6: как часто сохранять обновлённые куки сессии на диск (раз в N успешных запросов)
 IG_DUMP_EVERY         = int(os.getenv("IG_DUMP_EVERY", "15"))
 # Пункт 2: TTL кэша профилей (сек)
-IG_USER_CACHE_TTL     = int(os.getenv("IG_USER_CACHE_TTL", "900"))
+IG_USER_CACHE_TTL     = int(os.getenv("IG_USER_CACHE_TTL", "3600"))
 # Пункт 7: сколько дней хранить записи «уже отправлено»
 IG_SENT_KEEP_DAYS     = int(os.getenv("IG_SENT_KEEP_DAYS", "14"))
 # Сколько сидит в «карантине» аккаунт, получивший 429 (сек)
@@ -82,7 +86,7 @@ IG_DEAD_RETRY         = int(os.getenv("IG_DEAD_RETRY", "3600"))
 IG_POSTS_CHECK_AMOUNT = int(os.getenv("IG_POSTS_CHECK_AMOUNT", "5"))
 # Если media_count не менялся — посты не тянем, но не реже, чем раз в N сек
 # (страховка от «удалили один и выложили другой» — счётчик тот же)
-IG_POSTS_FORCE_EVERY  = int(os.getenv("IG_POSTS_FORCE_EVERY", str(6 * 3600)))
+IG_POSTS_FORCE_EVERY  = int(os.getenv("IG_POSTS_FORCE_EVERY", str(12 * 3600)))
 # Устаревшая карточка: сколько дней держим копию профиля в БД, чтобы показать её,
 # когда Instagram не отвечает
 IG_STALE_MAX_DAYS     = int(os.getenv("IG_STALE_MAX_DAYS", "30"))
@@ -235,7 +239,7 @@ def _purge_account_data(login: str) -> None:
             pass
         except OSError as e:
             logger.warning(f"[pool] не удалил {login}{suffix}: {e}")
-    for table in ("ig_sessions", "ig_follows", "ig_likes", "ig_action_blocks"):
+    for table in ("ig_sessions", "ig_follows", "ig_likes", "ig_action_blocks", "ig_proxy", "ig_acc_first_seen"):
         try:
             conn = sqlite3.connect(IG_DB, timeout=10)
             try:
@@ -245,6 +249,254 @@ def _purge_account_data(login: str) -> None:
                 conn.close()
         except Exception:
             pass        # таблицы может ещё не быть — не страшно
+
+
+# ── ПРОКСИ НА АККАУНТ (1 аккаунт = 1 IP навсегда) ────────────────────────────
+# Приоритет: прокси, заданный из бота (/ig_proxy) → IG_PROXIES → IG_PROXY (общий, не советуем).
+# IG_PROXIES="login1=http://user:pass@host:port;login2=http://..."
+IG_PROXY   = os.getenv("IG_PROXY", "").strip()
+IG_PROXIES = os.getenv("IG_PROXIES", "")
+
+
+def norm_proxy(raw: str) -> str:
+    """Приводит прокси к scheme://[user:pass@]host:port или '' если формат неверный."""
+    from urllib.parse import urlsplit
+    v = (raw or "").strip()
+    if not v:
+        return ""
+    if "://" not in v:
+        parts = v.split(":")
+        if "@" in v:
+            v = "http://" + v
+        elif len(parts) == 4:                      # host:port:user:pass (формат многих провайдеров)
+            v = f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+        elif len(parts) == 2:
+            v = "http://" + v
+        else:
+            return ""
+    try:
+        u = urlsplit(v)
+        if u.scheme not in ("http", "https", "socks5", "socks5h") or not u.hostname or not u.port:
+            return ""
+    except ValueError:
+        return ""
+    return v
+
+
+def proxy_mask(px: str) -> str:
+    """host:port без логина/пароля — безопасно показывать в чате."""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(px)
+        return f"{u.hostname}:{u.port}" if u.hostname else ""
+    except ValueError:
+        return ""
+
+
+def _scrub(msg: str, px: str) -> str:
+    from urllib.parse import urlsplit
+    msg = (msg or "").replace(px, "<proxy>")
+    try:
+        u = urlsplit(px)
+        for secret in (u.password, u.username):
+            if secret:
+                msg = msg.replace(secret, "***")
+    except ValueError:
+        pass
+    return msg
+
+
+def _env_proxies() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in IG_PROXIES.replace("\n", ";").replace(",", ";").split(";"):
+        if "=" in part:
+            lg, px = part.split("=", 1)
+            lg, px = lg.strip().lstrip("@").lower(), norm_proxy(px)
+            if lg and px:
+                out[lg] = px
+    return out
+
+
+def _proxy_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(IG_DB, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS ig_proxy (login TEXT PRIMARY KEY, proxy TEXT NOT NULL, ts REAL)")
+    return conn
+
+
+def get_account_proxy(login: str) -> str:
+    lg = (login or "").lower()
+    try:
+        conn = _proxy_conn()
+        try:
+            r = conn.execute("SELECT proxy FROM ig_proxy WHERE login=?", (login,)).fetchone()
+        finally:
+            conn.close()
+        if r:
+            return "" if r[0] == "-" else r[0]            # '-' = в боте явно выключили прокси
+    except Exception as e:
+        logger.warning(f"[proxy] не прочитал ig_proxy: {e}")
+    return _env_proxies().get(lg) or IG_PROXY
+
+
+def _proxy_db_set(login: str, proxy: str) -> None:
+    conn = _proxy_conn()
+    try:
+        conn.execute("INSERT OR REPLACE INTO ig_proxy (login, proxy, ts) VALUES (?,?,?)",
+                     (login, proxy or "-", time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _apply_proxy(cl, proxy: str) -> None:
+    try:
+        cl.set_proxy(proxy or "")
+    except Exception:
+        d = {"http": proxy, "https": proxy} if proxy else {}
+        for sess in (getattr(cl, "public", None), getattr(cl, "private", None)):
+            if sess is not None:
+                sess.proxies = d
+
+
+async def test_proxy(proxy: str) -> tuple[bool, str]:
+    """Реальный запрос через прокси; при успехе возвращает IP выхода."""
+    def _t():
+        import requests
+        r = requests.get("https://api.ipify.org", proxies={"http": proxy, "https": proxy}, timeout=15)
+        r.raise_for_status()
+        return r.text.strip()[:45]
+    try:
+        return True, await asyncio.get_event_loop().run_in_executor(None, _t)
+    except Exception as e:
+        return False, _scrub(f"{type(e).__name__}: {e}", proxy)[:160]
+
+
+async def ig_set_proxy(login: str, proxy: str) -> None:
+    """Сохранить прокси ('' = выключить) и сразу применить к живому клиенту."""
+    _proxy_db_set(login, proxy)
+    try:
+        await _POOL.set_account_proxy(login, proxy)
+    except Exception as e:
+        logger.warning(f"[proxy] ig_set_proxy {login}: {e}")
+
+
+def ig_proxy_masks() -> dict[str, str]:
+    """{login: 'host:port' или ''} для всех аккаунтов пула."""
+    return {l: proxy_mask(get_account_proxy(l)) for l, _ in _POOL._accounts}
+
+
+_NOPROXY_WARNED: set = set()
+
+
+def _apply_client_identity(cl, login: str) -> None:
+    """Прокси + (по желанию) гео клиента. Вызывается после set_settings()."""
+    px = get_account_proxy(login)
+    if px:
+        _apply_proxy(cl, px)
+    elif login not in _NOPROXY_WARNED:
+        _NOPROXY_WARNED.add(login)
+        logger.warning(f"[pool] ⚠️ у @{login} нет прокси — запросы идут с IP хостинга "
+                       f"(главная причина «подтвердите личность»). Задай: /ig_proxy")
+    # Гео меняем только если явно задано в env: смена у существующей сессии = смена «устройства».
+    geo = (("IG_LOCALE", "set_locale", str), ("IG_COUNTRY", "set_country", str),
+           ("IG_COUNTRY_CODE", "set_country_code", int),
+           ("IG_TZ_OFFSET_HOURS", "set_timezone_offset", lambda v: int(float(v) * 3600)))
+    for env, method, conv in geo:
+        val = os.getenv(env)
+        if val and hasattr(cl, method):
+            try:
+                getattr(cl, method)(conv(val))
+            except Exception as e:
+                logger.warning(f"[pool] гео @{login} {env}: {e}")
+
+
+# ── ТИХИЕ ЧАСЫ (фоновые запросы ночью не идут) ───────────────────────────────
+# IG_QUIET_HOURS="1-7" — по местному времени (IG_TZ_OFFSET_HOURS от UTC, по умолчанию +3).
+# "off" — выключить. Запросы пользователя ночью работают; ждут только фоновые задачи.
+IG_QUIET_HOURS     = os.getenv("IG_QUIET_HOURS", "1-7").strip().lower()
+IG_TZ_OFFSET_HOURS = float(os.getenv("IG_TZ_OFFSET_HOURS", "3"))
+
+
+def _quiet_window():
+    if IG_QUIET_HOURS in ("", "off", "0", "no", "нет"):
+        return None
+    try:
+        a, b = IG_QUIET_HOURS.replace("–", "-").split("-", 1)
+        a, b = int(a) % 24, int(b) % 24
+    except Exception:
+        return None
+    return None if a == b else (a, b)
+
+
+def quiet_remaining() -> float:
+    """Сколько секунд осталось до конца тихих часов (0 — сейчас не тихие)."""
+    w = _quiet_window()
+    if not w:
+        return 0.0
+    a, b = w
+    h = ((time.time() + IG_TZ_OFFSET_HOURS * 3600) % 86400) / 3600.0
+    inside = (a <= h < b) if a < b else (h >= a or h < b)
+    return ((b - h) % 24) * 3600 if inside else 0.0
+
+
+def quiet_hours_label() -> str:
+    w = _quiet_window()
+    return f"🌙 тихие часы {w[0]:02d}–{w[1]:02d} (UTC{IG_TZ_OFFSET_HOURS:+g}): фоновые запросы спят" if w else ""
+
+
+# ── ПРОГРЕВ: новые аккаунты получают сниженные суточные лимиты ───────────────
+IG_WARMUP_DAYS = float(os.getenv("IG_WARMUP_DAYS", "7"))      # 0 — выключить
+
+
+def _seen_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(IG_DB, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS ig_acc_first_seen (login TEXT PRIMARY KEY, ts REAL NOT NULL)")
+    return conn
+
+
+def _seed_first_seen(accounts) -> None:
+    """Аккаунты, что были до этого обновления, считаются «старыми» (ts=0)."""
+    if not accounts:
+        return
+    conn = _seen_conn()
+    try:
+        empty = conn.execute("SELECT COUNT(*) FROM ig_acc_first_seen").fetchone()[0] == 0
+        ts = 0.0 if empty else time.time()
+        for l, _ in accounts:
+            conn.execute("INSERT OR IGNORE INTO ig_acc_first_seen (login, ts) VALUES (?,?)", (l, ts))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _first_seen_set(login: str) -> None:
+    conn = _seen_conn()
+    try:
+        conn.execute("INSERT OR REPLACE INTO ig_acc_first_seen (login, ts) VALUES (?,?)", (login, time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def warmup_factor(login: str) -> float:
+    if IG_WARMUP_DAYS <= 0:
+        return 1.0
+    try:
+        conn = _seen_conn()
+        try:
+            r = conn.execute("SELECT ts FROM ig_acc_first_seen WHERE login=?", (login,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return 1.0
+    if not r or not r[0]:
+        return 1.0
+    age = (time.time() - float(r[0])) / 86400
+    return 1.0 if age >= IG_WARMUP_DAYS else (0.5 if age >= IG_WARMUP_DAYS / 2 else 0.25)
+
+
+def _day_limit(base: int, login: str) -> int:
+    return 0 if base <= 0 else max(1, int(base * warmup_factor(login)))
 
 
 def _session_dir() -> Path:
@@ -551,6 +803,7 @@ class _AccountPool:
             pass
         settings = json.loads(session_file.read_text())
         cl.set_settings(settings)
+        _apply_client_identity(cl, login)
 
         ds_user_id = settings.get("cookies", {}).get("ds_user_id", "")
         logger.info(f"[pool] ✅ загружен: {login}  ds_user_id={ds_user_id}")
@@ -560,6 +813,10 @@ class _AccountPool:
         if not _INSTAGRAPI_OK:
             return
         self._accounts = _merge_accounts(self._accounts)
+        try:
+            _seed_first_seen(self._accounts)
+        except Exception as e:
+            logger.warning(f"[pool] first_seen: {e}")
         if not self._accounts:
             logger.error("[pool] нет аккаунтов (IG_ACCOUNTS пуст, из бота не добавлены) — Instagram недоступен")
             return
@@ -815,6 +1072,18 @@ class _AccountPool:
         self._dead_ts.pop(login, None)
         return was
 
+    async def set_account_proxy(self, login: str, proxy: str) -> bool:
+        """Применить прокси к уже работающему клиенту (между запросами)."""
+        await self._ensure_init()
+        if self._idx_of(login) is None:
+            return False
+        async with self._gate.hold(PRIO_USER):
+            idx = self._idx_of(login)
+            if idx is None or idx >= len(self._clients) or self._clients[idx] is None:
+                return False
+            _apply_proxy(self._clients[idx], proxy)
+        return True
+
     # ── ручное добавление / удаление доноров ─────────────────────────────────
 
     async def add_account(self, login: str) -> tuple[bool, str]:
@@ -860,6 +1129,7 @@ class _AccountPool:
             self._initialized = True
         try:
             _pool_acc_set(login, "added")
+            _first_seen_set(login)
         except Exception as e:
             logger.warning(f"[pool] add_account {login}: не записал в БД: {e}")
         logger.info(f"[pool] ➕ добавлен донор {login} (всего {len(self._accounts)})")
@@ -931,6 +1201,17 @@ class _AccountPool:
         if retries is None:
             retries = IG_SAME_ACC_RETRIES + IG_NET_RETRIES + 3
 
+        if prio >= PRIO_BG:                 # фон ночью спит; пользователь не ждёт никогда
+            slept = False
+            while True:
+                qr = quiet_remaining()
+                if qr <= 0:
+                    break
+                slept = True
+                await asyncio.sleep(min(qr, 600))
+            if slept:
+                await asyncio.sleep(random.uniform(0, 900))   # не стартовать всем разом в 07:00
+
         loop = asyncio.get_event_loop()
         last_err = None
         same_acc_failures = 0
@@ -950,15 +1231,17 @@ class _AccountPool:
                         return None
                     cl = self._clients[idx]
 
-                    gap = self._last_start + IG_MIN_INTERVAL - time.monotonic()
+                    is_bg = prio >= PRIO_BG
+                    gap = self._last_start + (IG_BG_MIN_INTERVAL if is_bg else IG_MIN_INTERVAL) - time.monotonic()
                     if gap > 0:
                         await asyncio.sleep(gap)
                     self._last_start = time.monotonic()
 
                     _unwrap_percent_re()
+                    cl.delay_range = [IG_BG_DELAY_MIN, IG_BG_DELAY_MAX] if is_bg else [IG_DELAY_MIN, IG_DELAY_MAX]
                     result = await asyncio.wait_for(
                         loop.run_in_executor(None, lambda: fn(cl, *args, **kwargs)),
-                        timeout=IG_REQ_TIMEOUT,
+                        timeout=IG_REQ_TIMEOUT + (2 * IG_BG_DELAY_MAX if is_bg else 0),
                     )
 
                     # успех
@@ -2212,7 +2495,7 @@ async def get_avatar_bytes(username: str) -> bytes | None:
 
 # yt-dlp / embed как запасной путь: работает, даже когда все аккаунты пула в 429 / с мёртвыми куками.
 # IG_YTDLP_FIRST=1 — наоборот, пробовать yt-dlp ПЕРВЫМ (бережёт лимиты доноров, но без точных лайков/музыки).
-IG_YTDLP_FIRST = os.getenv("IG_YTDLP_FIRST", "0") == "1"
+IG_YTDLP_FIRST = os.getenv("IG_YTDLP_FIRST", "1") == "1"
 
 
 async def _embed_post(url: str) -> dict | None:
@@ -2883,8 +3166,8 @@ def ig_set_filter(user_id: str, ig_username: str, sub_type: str, f: str) -> None
 # донору, чью заявку владелец одобрил, поэтому запросы к такому профилю идут через
 # pool.run(..., only={логины}) — ротация не должна уводить запрос на аккаунт без доступа.
 IG_FOLLOW_ALL      = os.getenv("IG_FOLLOW_ALL", "0") == "1"      # на обычные тоже подписывать всеми донорами
-IG_FOLLOW_PER_DAY  = int(os.getenv("IG_FOLLOW_PER_DAY", "25"))   # подписок в сутки на ОДИН донор
-IG_LIKE_PER_DAY    = int(os.getenv("IG_LIKE_PER_DAY", "120"))    # лайков в сутки на ОДИН донор
+IG_FOLLOW_PER_DAY  = int(os.getenv("IG_FOLLOW_PER_DAY", "8"))   # подписок в сутки на ОДИН донор
+IG_LIKE_PER_DAY    = int(os.getenv("IG_LIKE_PER_DAY", "40"))    # лайков в сутки на ОДИН донор
 IG_BOOKMARK_ON_IG  = os.getenv("IG_BOOKMARK_ON_IG", "0") == "1"  # дублировать закладку в «Сохранённое» донора
 
 
@@ -3248,7 +3531,7 @@ async def follow_user(username: str, requested_by: str = "") -> dict:
     skipped_limit = 0
     block_until: float | None = None
     for lg in logins:
-        if ig_act_count("follow", since, lg) >= IG_FOLLOW_PER_DAY:
+        if ig_act_count("follow", since, lg) >= _day_limit(IG_FOLLOW_PER_DAY, lg):
             skipped_limit += 1
             continue
 
@@ -3415,7 +3698,7 @@ async def like_toggle(shortcode: str, username: str = "", user_id: str = "") -> 
     if pool0 and not pool1:
         return {"ok": False, "error": "blocked", "until": min(bm[l] for l in pool0)}
     since = time.time() - 86400
-    pool = [l for l in pool1 if ig_act_count("like", since, l) < IG_LIKE_PER_DAY]
+    pool = [l for l in pool1 if ig_act_count("like", since, l) < _day_limit(IG_LIKE_PER_DAY, l)]
     if not pool:
         return {"ok": False, "error": "limit"}
 
