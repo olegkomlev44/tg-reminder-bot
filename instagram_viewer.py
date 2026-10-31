@@ -239,7 +239,7 @@ def _purge_account_data(login: str) -> None:
             pass
         except OSError as e:
             logger.warning(f"[pool] не удалил {login}{suffix}: {e}")
-    for table in ("ig_sessions", "ig_follows", "ig_likes", "ig_action_blocks", "ig_proxy", "ig_acc_first_seen"):
+    for table in ("ig_sessions", "ig_follows", "ig_likes", "ig_action_blocks", "ig_proxy", "ig_acc_first_seen", "ig_roles"):
         try:
             conn = sqlite3.connect(IG_DB, timeout=10)
             try:
@@ -491,15 +491,24 @@ async def ig_password_login(login: str, password: str, ask_code) -> tuple[bool, 
                     sess.mount("http://", HTTPAdapter(max_retries=0))
         except Exception:
             pass
+        had_device = False
         if path.exists():       # то же «устройство», что и раньше, но без мёртвой авторизации
             try:
                 old = json.loads(path.read_text())
+                had_device = bool(old.get("device_settings"))
                 for key, setter in (("uuids", "set_uuids"), ("device_settings", "set_device"),
                                     ("user_agent", "set_user_agent")):
                     if old.get(key) and hasattr(cl, setter):
                         getattr(cl, setter)(old[key])
             except Exception as e:
                 logger.info(f"[login] {login}: не перенёс прежнее устройство: {e}")
+        if not had_device and hasattr(cl, "set_device"):   # новый аккаунт: свой закреплённый профиль телефона
+            try:
+                cl.set_device(pick_device(login))
+                if hasattr(cl, "set_user_agent"):
+                    cl.set_user_agent()
+            except Exception as e:
+                logger.info(f"[login] {login}: не применил профиль устройства: {e}")
         _apply_client_identity(cl, login)
         # без этого instagrapi вызвал бы input() и повесил поток
         cl.challenge_code_handler = lambda username, choice: _ask(
@@ -539,6 +548,278 @@ async def ig_password_login(login: str, password: str, ask_code) -> tuple[bool, 
         pass
     logger.info(f"[login] ✅ @{login}: вход по паролю, сессия сохранена")
     return True, msg
+
+
+# ── ЧЕЛОВЕЧЕСКИЕ ПАУЗЫ (логнормальные) ───────────────────────────────────────
+import contextlib as _contextlib
+import math as _math
+from collections import deque as _deque
+
+
+def human_delay(lo: float, hi: float) -> float:
+    """Логнормальная пауза: чаще около середины диапазона, изредка длинная — как у живого человека.
+    Равномерное random.uniform(lo, hi) легко отличить статистикой."""
+    lo = max(float(lo), 0.05)
+    hi = max(float(hi), lo)
+    if hi - lo < 0.05:
+        return lo
+    mu = _math.log(_math.sqrt(lo * hi))
+    return min(max(random.lognormvariate(mu, 0.4), lo * 0.7), hi * 1.8)
+
+
+def page_pause(page_no: int) -> float:
+    """Пауза перед страницей №page_no (1 = вторая): растёт на 3–4 с с каждой, как замедление скролла."""
+    return min(human_delay(1.5, 3.0) + max(page_no - 1, 0) * random.uniform(3.0, 4.0), 30.0)
+
+
+# ── БЮДЖЕТЫ ЧТЕНИЯ: любые обращения к API, не только лайки и подписки ──────────
+# Окно 15 минут и сутки на донора. Превысил — донор «отдыхает» 30–60 минут ДО того, как
+# Instagram сам скажет PleaseWaitFewMinutes. Пользовательские запросы не блокируются:
+# если все доноры на отдыхе, берётся наименее загруженный.
+IG_BUDGET_15MIN    = int(os.getenv("IG_BUDGET_15MIN", "25"))      # 0 — без лимита
+IG_BUDGET_DAY      = int(os.getenv("IG_BUDGET_DAY", "180"))
+IG_BUDGET_REST_MIN = float(os.getenv("IG_BUDGET_REST_MIN", "30"))
+IG_BUDGET_REST_MAX = float(os.getenv("IG_BUDGET_REST_MAX", "60"))
+_REQ_LOG: dict[str, _deque] = {}
+_REST_UNTIL: dict[str, float] = {}
+_LAST_USED: dict[str, float] = {}
+_LAST_OK: dict[str, float] = {}
+
+
+def _budget_note(login: str) -> None:
+    now = time.time()
+    dq = _REQ_LOG.setdefault(login, _deque())
+    dq.append(now)
+    cutoff = now - 86400
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+    _LAST_USED[login] = now
+    if _REST_UNTIL.get(login, 0) > now:
+        return
+    n15 = 0
+    for t in reversed(dq):
+        if t < now - 900:
+            break
+        n15 += 1
+    if (IG_BUDGET_15MIN and n15 >= IG_BUDGET_15MIN) or (IG_BUDGET_DAY and len(dq) >= IG_BUDGET_DAY):
+        rest = random.uniform(IG_BUDGET_REST_MIN, IG_BUDGET_REST_MAX) * 60
+        _REST_UNTIL[login] = now + rest
+        logger.info(f"[budget] @{login}: {n15}/15мин, {len(dq)}/сутки — отдых {rest / 60:.0f} мин")
+
+
+def _budget_rested(login: str, now: float) -> bool:
+    return _REST_UNTIL.get(login, 0) > now
+
+
+def ig_budget_info(login: str) -> tuple[int, int, float]:
+    """(обращений за 15 мин, за сутки, сколько секунд ещё отдыхает)."""
+    now = time.time()
+    dq = _REQ_LOG.get(login) or ()
+    n15 = sum(1 for t in dq if t >= now - 900)
+    nday = sum(1 for t in dq if t >= now - 86400)
+    return n15, nday, max(_REST_UNTIL.get(login, 0) - now, 0.0)
+
+
+# ── РАСХОДНЫЕ ДОНОРЫ: тяжёлый парсинг (теги, локации, /ig_dump) только на них ─────
+# Хэштеги и локации Instagram лимитирует жёстче всего. Помеченные доноры (кнопка 🧪 в /ig_accounts
+# или IG_EXPENDABLE=login1,login2) берут только такие задачи и не читают основные подписки.
+_ig_scope: ContextVar = ContextVar("ig_scope", default="main")
+_EXP_CACHE: dict = {"ts": 0.0, "set": set()}
+
+
+@_contextlib.contextmanager
+def bulk_scope():
+    """Всё, что внутри (_POOL.run), идёт на расходных доноров, если они назначены."""
+    tok = _ig_scope.set("bulk")
+    try:
+        yield
+    finally:
+        _ig_scope.reset(tok)
+
+
+def _roles_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(IG_DB, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS ig_roles (login TEXT PRIMARY KEY, role TEXT NOT NULL)")
+    return conn
+
+
+def expendable_logins() -> set:
+    now = time.time()
+    if now - _EXP_CACHE["ts"] < 20:
+        return _EXP_CACHE["set"]
+    out = {x.strip().lstrip("@") for x in os.getenv("IG_EXPENDABLE", "").replace(";", ",").split(",") if x.strip()}
+    try:
+        conn = _roles_conn()
+        try:
+            for lg, role in conn.execute("SELECT login, role FROM ig_roles"):
+                (out.add if role == "expendable" else out.discard)(lg)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"[pool] roles: {e}")
+    live = {l for l, _ in _POOL._accounts}
+    _EXP_CACHE.update(ts=now, set={l for l in out if l in live})
+    return _EXP_CACHE["set"]
+
+
+def ig_set_expendable(login: str, flag: bool) -> None:
+    conn = _roles_conn()
+    try:
+        conn.execute("INSERT OR REPLACE INTO ig_roles (login, role) VALUES (?,?)",
+                     (login, "expendable" if flag else "main"))
+        conn.commit()
+    finally:
+        conn.close()
+    _EXP_CACHE["ts"] = 0.0
+
+
+# ── УНИКАЛЬНЫЕ УСТРОЙСТВА: у каждого донора свой профиль телефона ────────────────
+# Версия приложения и version_code остаются одной проверенной парой (IG_APP_VERSION / IG_VERSION_CODE):
+# подбирать их «из головы» опаснее, чем держать одну. Меняется «железо». Поле cpu — чипсет
+# (qcom, exynos2200, panther), как у настоящего клиента, а не архитектура arm64-v8a.
+_DEVICE_PRESETS = [
+    # manufacturer, model, device, cpu, android_version(API), release, dpi, resolution
+    ("samsung", "SM-S918B", "dm3q", "qcom", 34, "14", "480dpi", "1080x2316"),
+    ("samsung", "SM-S911B", "dm1q", "qcom", 34, "14", "420dpi", "1080x2340"),
+    ("samsung", "SM-S901B", "r0s", "exynos2200", 34, "14", "420dpi", "1080x2340"),
+    ("samsung", "SM-G991B", "o1s", "exynos2100", 34, "14", "420dpi", "1080x2400"),
+    ("samsung", "SM-G780F", "r8s", "exynos990", 33, "13", "420dpi", "1080x2400"),
+    ("samsung", "SM-A546B", "a54x", "exynos1380", 34, "14", "420dpi", "1080x2340"),
+    ("samsung", "SM-A536B", "a53x", "exynos1280", 34, "14", "420dpi", "1080x2400"),
+    ("samsung", "SM-A346B", "a34x", "mt6877", 34, "14", "420dpi", "1080x2340"),
+    ("samsung", "SM-A525F", "a52q", "qcom", 33, "13", "420dpi", "1080x2400"),
+    ("samsung", "SM-A336B", "a33x", "exynos1280", 33, "13", "420dpi", "1080x2400"),
+    ("Google/google", "Pixel 8", "shiba", "shiba", 34, "14", "420dpi", "1080x2400"),
+    ("Google/google", "Pixel 7", "panther", "panther", 34, "14", "420dpi", "1080x2400"),
+    ("Google/google", "Pixel 7a", "lynx", "lynx", 34, "14", "420dpi", "1080x2400"),
+    ("Google/google", "Pixel 6", "oriole", "oriole", 34, "14", "420dpi", "1080x2400"),
+    ("Google/google", "Pixel 6a", "bluejay", "bluejay", 34, "14", "420dpi", "1080x2400"),
+    ("Xiaomi", "2201123G", "cupid", "qcom", 33, "13", "440dpi", "1080x2400"),
+    ("Xiaomi", "2211133G", "fuxi", "qcom", 34, "14", "440dpi", "1080x2400"),
+    ("Xiaomi", "2201117TG", "spes", "qcom", 33, "13", "440dpi", "1080x2400"),
+    ("Xiaomi", "M2102J20SG", "vayu", "qcom", 33, "13", "440dpi", "1080x2400"),
+    ("OnePlus", "LE2113", "lemonade", "qcom", 33, "13", "420dpi", "1080x2400"),
+]
+
+
+def pick_device(login: str) -> dict:
+    """Профиль устройства, закреплённый за логином (хэш логина: один и тот же всегда)."""
+    import hashlib
+    app_version = os.getenv("IG_APP_VERSION", "365.0.0.39.109")
+    version_code = os.getenv("IG_VERSION_CODE", "568858490")
+    if os.getenv("IG_DEVICE_MODEL"):            # ручное переопределение для всех аккаунтов
+        return {
+            "app_version": app_version, "version_code": version_code,
+            "android_version": int(os.getenv("IG_ANDROID_VERSION", "34")),
+            "android_release": os.getenv("IG_ANDROID_RELEASE", "14"),
+            "dpi": os.getenv("IG_DEVICE_DPI", "480dpi"),
+            "resolution": os.getenv("IG_DEVICE_RESOLUTION", "1080x2400"),
+            "manufacturer": os.getenv("IG_DEVICE_MANUFACTURER", "samsung"),
+            "device": os.getenv("IG_DEVICE_CODE", "dm3q"),
+            "model": os.getenv("IG_DEVICE_MODEL"),
+            "cpu": os.getenv("IG_DEVICE_CPU", "qcom"),
+        }
+    h = int(hashlib.sha256(("ig-device:" + (login or "").lower()).encode()).hexdigest(), 16)
+    man, model, dev, cpu, api, rel, dpi, res = _DEVICE_PRESETS[h % len(_DEVICE_PRESETS)]
+    return {"app_version": app_version, "version_code": version_code, "android_version": api,
+            "android_release": rel, "dpi": dpi, "resolution": res, "manufacturer": man,
+            "device": dev, "model": model, "cpu": cpu}
+
+
+# ── ПАУЗЫ И УЧЁТ НА УРОВНЕ ЗАПРОСОВ instagrapi ───────────────────────────────
+def _install_human_pacing(cl, login: str) -> None:
+    """Оборачивает *_request клиента: логнормальная пауза + учёт бюджета донора.
+    Внутреннюю равномерную паузу delay_range instagrapi при этом отключаем."""
+    installed = False
+    for name in ("private_request", "public_request", "public_graphql_request"):
+        orig = getattr(cl, name, None)
+        if not callable(orig) or getattr(orig, "_ig_paced", False):
+            continue
+
+        def _make(orig=orig):
+            def paced(*a, **k):
+                lo, hi = getattr(cl, "_pace", (IG_DELAY_MIN, IG_DELAY_MAX))
+                time.sleep(human_delay(lo, hi))
+                _budget_note(login)
+                return orig(*a, **k)
+            paced._ig_paced = True
+            return paced
+        setattr(cl, name, _make())
+        installed = installed or name == "private_request"
+    if installed:
+        cl.delay_range = []
+        cl._pace_installed = True
+
+
+# ── АНОНИМНАЯ ШАПКА ПРОФИЛЯ до обращения к донорам ───────────────────────────
+# Для фоновой проверки: публичная embed-страница отдаёт число постов и аватар без кук.
+# Не изменилось (и карточка не старше IG_ANON_MAX_STALE) — доноров не трогаем.
+IG_ANON_FIRST     = os.getenv("IG_ANON_FIRST", "1") == "1"
+IG_ANON_MAX_STALE = int(os.getenv("IG_ANON_MAX_STALE", str(6 * 3600)))
+IG_ANON_PROXY     = os.getenv("IG_ANON_PROXY", "").strip()
+_ANON: dict = {"fails": 0, "until": 0.0}
+
+
+def _anon_parse(html_text: str) -> dict | None:
+    import re
+
+    def _num(pats):
+        for pat in pats:
+            m = re.search(pat, html_text, re.I)
+            if m:
+                try:
+                    return int(re.sub(r"[^\d]", "", m.group(1)))
+                except ValueError:
+                    pass
+        return None
+
+    posts = _num([r'"edge_owner_to_timeline_media":\{"count":(\d+)', r'"media_count":(\d+)',
+                  r'"posts_count":(\d+)', r'>([\d.,\s]+)\s*(?:posts|публикаци)'])
+    if posts is None:
+        return None
+    followers = _num([r'"edge_followed_by":\{"count":(\d+)', r'"follower_count":(\d+)',
+                      r'"followers_count":(\d+)'])
+    m = re.search(r'"profile_pic_url(?:_hd)?":"([^"]+)"', html_text)
+    avatar = m.group(1).replace("\\u0026", "&").replace("\\/", "/") if m else ""
+    return {"posts_count": posts, "followers": followers, "avatar_url": avatar}
+
+
+async def _anon_profile(username: str) -> dict | None:
+    if not IG_ANON_FIRST or time.time() < _ANON["until"]:
+        return None
+    proxy = IG_ANON_PROXY or (get_account_proxy(_POOL._accounts[0][0]) if _POOL._accounts else "")
+
+    def _get():
+        import requests
+        r = requests.get(f"https://www.instagram.com/{username}/embed/",
+                         headers={"User-Agent": _WEB_UA, "Accept-Language": "en-US,en;q=0.9"},
+                         proxies={"http": proxy, "https": proxy} if proxy else None, timeout=15)
+        if r.status_code != 200 or "accounts/login" in r.url:
+            return None
+        return _anon_parse(r.text)
+
+    try:
+        res = await asyncio.get_event_loop().run_in_executor(None, _get)
+    except Exception:
+        res = None
+    if res:
+        _ANON["fails"] = 0
+        return res
+    _ANON["fails"] += 1
+    if _ANON["fails"] >= 5:                      # страница не парсится / режется — не долбим 6 часов
+        _ANON.update(fails=0, until=time.time() + 6 * 3600)
+        logger.info("[anon] embed-шапка не отвечает 5 раз подряд — пауза 6 ч, работаем через доноров")
+    return None
+
+
+def _anon_same(cached: dict, anon: dict) -> bool:
+    from urllib.parse import urlsplit
+    if cached.get("posts_count") is None or cached.get("posts_count") != anon.get("posts_count"):
+        return False
+    a, b = cached.get("avatar_url") or "", anon.get("avatar_url") or ""
+    if a and b:       # подпись в query меняется постоянно — сравниваем только путь к файлу
+        return urlsplit(a).path == urlsplit(b).path
+    return True
 
 
 # ── ТРАНСПОРТ instagrapi 3.2+ (curl_cffi: TLS/HTTP2-отпечаток как у настоящего клиента) ──
@@ -583,6 +864,19 @@ def _ig_version() -> str:
         return version("instagrapi")
     except Exception:
         return "?"
+
+
+def _ping_auth(cl, login: str):
+    """Лёгкая авторизованная проверка сессии: users/<свой pk>/info/ (как validate_session).
+    Раньше пинг шёл через user_info_by_username — это публичный запрос, он мог пройти и с мёртвой сессией."""
+    uid = ""
+    try:
+        uid = str((cl.get_settings().get("cookies") or {}).get("ds_user_id") or getattr(cl, "user_id", "") or "")
+    except Exception:
+        uid = str(getattr(cl, "user_id", "") or "")
+    if uid.isdigit():
+        return cl.user_info_v1(int(uid))
+    return cl.user_info_by_username(login)
 
 
 # ── ТИХИЕ ЧАСЫ (фоновые запросы ночью не идут) ───────────────────────────────
@@ -979,6 +1273,7 @@ class _AccountPool:
         settings = json.loads(session_file.read_text())
         cl.set_settings(settings)
         _apply_client_identity(cl, login)
+        _install_human_pacing(cl, login)
 
         ds_user_id = settings.get("cookies", {}).get("ds_user_id", "")
         logger.info(f"[pool] ✅ загружен: {login}  ds_user_id={ds_user_id}")
@@ -1029,24 +1324,33 @@ class _AccountPool:
                 return False
         return True
 
+    def _lru_pick(self, idxs: list, now: float, prio: int) -> Optional[int]:
+        """Из годных — тот, кто дольше всех отдыхал. Доноров с исчерпанным бюджетом обходим;
+        пользователь, если все на отдыхе, всё равно обслуживается, фон — нет."""
+        if not idxs:
+            return None
+        fresh = [i for i in idxs if not _budget_rested(self._accounts[i][0], now)]
+        pool = fresh or (idxs if prio < PRIO_BG else [])
+        if not pool:
+            return None
+        return min(pool, key=lambda i: (_LAST_USED.get(self._accounts[i][0], 0.0), i))
+
     def _select_idx(self, prio: int) -> Optional[int]:
         """
-        Индекс аккаунта для запроса. Текущий, если он годится; иначе первый
-        годный по кругу. Если годных нет: фоновый запрос отменяется (None),
-        пользовательский идёт на аккаунт, у которого 429 истекает раньше всех.
+        Индекс аккаунта для запроса: среди годных — least recently used, чтобы нагрузка
+        ровно делилась по пулу, а не выжимался один донор до 429. Если годных нет: фоновый
+        запрос отменяется (None), пользовательский идёт на аккаунт, у которого 429 истекает раньше.
         """
         n = len(self._clients)
         if n == 0:
             return None
         now = time.time()
-        cur = self._current % n
-        if self._usable(cur, now):
-            return cur
-        for step in range(1, n):
-            i = (cur + step) % n
-            if self._usable(i, now):
-                self._current = i
-                return i
+        usable = [i for i in range(n) if self._usable(i, now)]
+        if usable:
+            best = self._lru_pick(usable, now, prio)
+            if best is not None:
+                self._current = best
+            return best
         if prio >= PRIO_BG:
             return None
         cands = [i for i in range(n) if self._clients[i] is not None
@@ -1068,12 +1372,33 @@ class _AccountPool:
             return None
         ok = [i for i in idxs if self._usable(i, now)]
         if ok:
-            cur = self._current % max(len(self._clients), 1)
-            return cur if cur in ok else ok[0]
+            best = self._lru_pick(ok, now, prio)
+            if best is not None:
+                self._current = best
+            return best
         if prio >= PRIO_BG:
             return None
         alive = [i for i in idxs if self._accounts[i][0] not in self._known_dead] or idxs
         return min(alive, key=lambda k: self._rate_limited_until.get(k, 0))
+
+    def _choose(self, only: set | None, prio: int) -> Optional[int]:
+        """Выбор с учётом расходных доноров. only (доступ к приватному профилю) важнее изоляции."""
+        exp = expendable_logins()
+        if only:
+            return self._select_among(only, prio)
+        if exp and _ig_scope.get() == "bulk":
+            return self._select_among(exp, prio)         # тяжёлый парсинг — только на расходных
+        if exp:                                          # обычные чтения расходных не жгут
+            main = {l for l, _ in self._accounts if l not in exp}
+            i = self._select_among(main, PRIO_BG) if main else None
+            if i is not None:
+                return i
+        return self._select_idx(prio)
+
+    def last_ok_age(self, login: str) -> float:
+        """Сколько секунд назад у донора последний успешный запрос (inf — не было)."""
+        t = _LAST_OK.get(login)
+        return time.time() - t if t else float("inf")
 
     def live_logins(self) -> list[str]:
         """Логины живых (не мёртвых) аккаунтов пула."""
@@ -1199,7 +1524,7 @@ class _AccountPool:
         try:
             def _ping(cl: Client):
                 _unwrap_percent_re()
-                return cl.user_info_by_username(login)
+                return _ping_auth(cl, login)
 
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda: _ping(new_cl)
@@ -1282,10 +1607,10 @@ class _AccountPool:
 
         def _ping(cl):
             _unwrap_percent_re()
-            info = cl.user_info_by_username(login)
-            uid = str(getattr(cl, "user_id", "") or "")
-            if uid and str(getattr(info, "pk", "")) != uid:
-                raise ValueError(f"куки принадлежат другому аккаунту (ds_user_id={uid}), а не {login}")
+            info = _ping_auth(cl, login)
+            who = (getattr(info, "username", "") or "").lower()
+            if who and who != login:
+                raise ValueError(f"сессия принадлежит @{who}, а не {login}")
             return info
 
         try:
@@ -1302,6 +1627,7 @@ class _AccountPool:
             self._clients.append(new_cl)
             self._request_counts[len(self._clients) - 1] = 0
             self._initialized = True
+            _LAST_USED[login] = time.time()            # новичок не должен сразу стать «самым отдохнувшим»
         try:
             _pool_acc_set(login, "added")
             _first_seen_set(login)
@@ -1335,6 +1661,8 @@ class _AccountPool:
             for dct in (self._loaded_mtime, self._dump_hash, self._dead_ts):
                 dct.pop(login, None)
             self._known_dead.discard(login)
+            for dct in (_REQ_LOG, _REST_UNTIL, _LAST_USED, _LAST_OK):
+                dct.pop(login, None)
 
             new_n = len(self._clients)
             if new_n == 0:
@@ -1399,12 +1727,14 @@ class _AccountPool:
                 async with self._gate.hold(prio):
                     # аккаунт выбираем ПОСЛЕ получения гейта: пока ждали очередь,
                     # другой запрос мог получить 429 и провести ротацию
-                    idx = self._select_among(only, prio) if only else self._select_idx(prio)
+                    idx = self._choose(only, prio)
                     if idx is None:
                         logger.warning("[pool] нет доступных аккаунтов (все в 429/мертвы"
                                        + (f" или нет среди {sorted(only)}" if only else "") + ") — запрос пропущен")
                         return None
                     cl = self._clients[idx]
+                    if idx < len(self._accounts):          # выбран = «использован»: следующий запрос уйдёт другому
+                        _LAST_USED[self._accounts[idx][0]] = time.time()
 
                     is_bg = prio >= PRIO_BG
                     gap = self._last_start + (IG_BG_MIN_INTERVAL if is_bg else IG_MIN_INTERVAL) - time.monotonic()
@@ -1413,7 +1743,11 @@ class _AccountPool:
                     self._last_start = time.monotonic()
 
                     _unwrap_percent_re()
-                    cl.delay_range = [IG_BG_DELAY_MIN, IG_BG_DELAY_MAX] if is_bg else [IG_DELAY_MIN, IG_DELAY_MAX]
+                    pace = (IG_BG_DELAY_MIN, IG_BG_DELAY_MAX) if is_bg else (IG_DELAY_MIN, IG_DELAY_MAX)
+                    if getattr(cl, "_pace_installed", False):
+                        cl._pace = pace                      # логнормальная пауза внутри каждого запроса
+                    else:
+                        cl.delay_range = list(pace)
                     result = await asyncio.wait_for(
                         loop.run_in_executor(None, lambda: fn(cl, *args, **kwargs)),
                         timeout=IG_REQ_TIMEOUT + (2 * IG_BG_DELAY_MAX if is_bg else 0),
@@ -1424,6 +1758,7 @@ class _AccountPool:
                     self._note_ok()
                     if idx < len(self._accounts):
                         self._known_dead.discard(self._accounts[idx][0])   # сессия доказала, что жива
+                        _LAST_OK[self._accounts[idx][0]] = time.time()
                     self._since_dump[idx] = self._since_dump.get(idx, 0) + 1
                     if self._since_dump[idx] >= IG_DUMP_EVERY:
                         self._since_dump[idx] = 0
@@ -1475,6 +1810,12 @@ class _AccountPool:
             except ClientError as e:
                 cur = idx if idx is not None else self._current % len(self._clients)
                 self._note_err("client", str(e))
+                if getattr(e, "rotate_now", False):          # каскад уже пробовал методы — пусть другой донор
+                    switched = self._rotate_from(cur)
+                    same_acc_failures = 0
+                    last_err = e
+                    await asyncio.sleep(random.uniform(2, 4) if switched else random.uniform(5, 9))
+                    continue
                 same_acc_failures += 1
                 if same_acc_failures <= IG_SAME_ACC_RETRIES:
                     wait = 2 * same_acc_failures + random.uniform(0, 2)
@@ -1956,6 +2297,10 @@ def _lk_log(cl, username: str, result: str, method: str = "", notes: list | None
     })
 
 
+IG_WEB_WITH_COOKIES = os.getenv("IG_WEB_WITH_COOKIES", "0") == "1"
+IG_LOOKUP_MAX_STEPS = int(os.getenv("IG_LOOKUP_MAX_STEPS", "2"))
+
+
 def _web_profile_info(cl, username: str):
     """web_profile_info с куками аккаунта (sessionid/csrftoken/ds_user_id)."""
     import requests
@@ -2035,7 +2380,11 @@ def _lookup_via_search(cl, username: str):
 
 def _lookup_user(cl, username: str) -> dict:
     """Каскад методов. Возвращает dict профиля или бросает исключение для пула."""
-    steps: list[tuple[str, Callable]] = [("web", lambda: _web_profile_info(cl, username))]
+    # Куки донора + десктопный UA на одной сессии с мобильным отпечатком = чекпоинты, поэтому
+    # веб-метод по умолчанию выключен (IG_WEB_WITH_COOKIES=1 вернёт). Анонимный веб — отдельно.
+    steps: list[tuple[str, Callable]] = []
+    if IG_WEB_WITH_COOKIES:
+        steps.append(("web", lambda: _web_profile_info(cl, username)))
     gql = getattr(cl, "user_info_by_username_gql", None)
     if gql:
         steps.append(("gql", lambda: gql(username)))
@@ -2043,13 +2392,15 @@ def _lookup_user(cl, username: str) -> dict:
     if v1:
         steps.append(("private", lambda: v1(username)))
     steps.append(("search", lambda: _lookup_via_search(cl, username)))
-    steps = _lk_arrange(steps)
+    steps = _lk_arrange(steps)[:max(IG_LOOKUP_MAX_STEPS, 1)]   # не «залп» из 4 методов, а 1–2
 
     rate = login = net = None
     nf_votes = 0
     notes: list[str] = []
 
-    for name, fn in steps:
+    for step_no, (name, fn) in enumerate(steps):
+        if step_no:
+            time.sleep(human_delay(2.5, 6.0))        # между методами пауза, а не доли секунды
         try:
             _unwrap_percent_re()
             res = fn()
@@ -2102,7 +2453,9 @@ def _lookup_user(cl, username: str) -> dict:
         raise login
     if net:
         raise net
-    raise ClientError(f"lookup @{username}: " + "; ".join(notes))
+    err = ClientError(f"lookup @{username}: " + "; ".join(notes))
+    err.rotate_now = True            # пул передаст попытку следующему донору, а не повторит тут же
+    raise err
 
 
 # ── ПУБЛИЧНЫЙ API ─────────────────────────────────────────────────────────────
@@ -2275,6 +2628,15 @@ async def get_user_status(username: str, force: bool = False,
                 return "swr", info
     _CSTAT["miss"] += 1
 
+    if force and IG_ANON_FIRST:                 # фоновая проверка: сначала бесплатная шапка без кук
+        stale = _ucache_stale(username)
+        if stale and stale[0].get("id") and time.time() - stale[1] < IG_ANON_MAX_STALE:
+            anon = await _anon_profile(username)
+            if anon and _anon_same(stale[0], anon):
+                _CSTAT["anon_hit"] += 1
+                logger.info(f"[anon] @{username}: без изменений (постов {anon['posts_count']}) — доноров не трогаю")
+                return "ok", dict(stale[0])
+
     def _fetch(cl: Client):
         return _lookup_user(cl, username)
 
@@ -2372,6 +2734,8 @@ def clear_profile_caches() -> dict:
     _USER_CACHE.clear()
     _NOTFOUND_CACHE.clear()
     _SEARCH_CACHE.clear()
+    for _c in (_STORIES_CACHE, _HL_CACHE, _HLI_CACHE):
+        _c.clear()
     _pc_drop()
     return n
 
@@ -2480,9 +2844,114 @@ async def search_accounts(query: str, limit: int = 8) -> list[dict] | None:
     return out[:limit]
 
 
+# TTL-кэши: повторные нажатия «Истории»/«Хайлайты» не дублируют запросы к Instagram.
+IG_STORIES_TTL    = int(os.getenv("IG_STORIES_TTL", "600"))
+IG_HIGHLIGHTS_TTL = int(os.getenv("IG_HIGHLIGHTS_TTL", "900"))
+IG_STORIES_BATCH  = int(os.getenv("IG_STORIES_BATCH", "10"))
+IG_PK_STALE_MAX   = int(os.getenv("IG_PK_STALE_MAX", str(24 * 3600)))   # возраст карточки для get_posts
+_STORIES_CACHE: dict[str, tuple[float, list]] = {}
+_HL_CACHE: dict[str, tuple[float, list]] = {}
+_HLI_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _ttl_get(cache: dict, key: str, ttl: float):
+    """(попали?, значение). Пустой список — тоже валидный кэш («историй нет»)."""
+    e = cache.get(key)
+    if e and time.time() - e[0] < ttl:
+        return True, e[1]
+    return False, None
+
+
+def _ttl_put(cache: dict, key: str, val, cap: int = 400) -> None:
+    cache[key] = (time.time(), val)
+    if len(cache) > cap:
+        for k in sorted(cache, key=lambda k: cache[k][0])[:len(cache) - cap]:
+            cache.pop(k, None)
+
+
+async def _info_cheap(username: str, need_card: bool = False) -> dict | None:
+    """
+    Профиль без запроса к Instagram, если хватает уже известного: свежий кэш → карточка любого
+    возраста (для get_posts — не старше IG_PK_STALE_MAX) → pk/is_private из ig_user_state.
+    Нужен только pk и приватность (истории, хайлайты, последние посты), и профиль дёргать незачем.
+    Удалённые (is_gone) и неизвестные ники идут обычным get_user_info.
+    """
+    u = _norm_u(username)
+    st = ig_get_user_state(u) or {}
+    if not st.get("is_gone"):
+        cached = _ucache_get(u)
+        if cached:
+            return cached
+        stale = _ucache_stale(u)
+        if stale and stale[0].get("id") and (not need_card or time.time() - stale[1] < IG_PK_STALE_MAX):
+            _CSTAT["pk_saved"] += 1
+            return stale[0]
+        if not need_card and st.get("pk") and st.get("is_private") is not None:
+            _CSTAT["pk_saved"] += 1
+            return {"id": str(st["pk"]), "username": u, "is_private": bool(st["is_private"])}
+    return await get_user_info(username)
+
+
+async def prefetch_stories(pairs: list[tuple[str, str]]) -> int:
+    """
+    Фоновый чекер: истории сразу пачкой. pairs = [(ник, pk)] ТОЛЬКО публичных аккаунтов.
+    Один запрос feed/reels_media/ на IG_STORIES_BATCH ников вместо отдельного user_stories
+    на каждого; результат кладётся в кэш get_stories. Любой сбой → ничего не кэшируем,
+    get_stories сработает как раньше по одному. Возвращает, сколько ников закэшировано.
+    """
+    todo = [(u, str(pk)) for u, pk in pairs
+            if pk and not _ttl_get(_STORIES_CACHE, _norm_u(u), IG_STORIES_TTL)[0]]
+    done = 0
+    for i in range(0, len(todo), max(IG_STORIES_BATCH, 2)):
+        chunk = todo[i:i + max(IG_STORIES_BATCH, 2)]
+        if len(chunk) < 2:
+            continue                                   # одиночке пачка не нужна
+
+        def _fetch(cl: Client, _c=chunk):
+            from instagrapi.extractors import extract_story_v1
+            data = {"exclude_media_ids": "[]", "source": "profile", "user_ids": [pk for _, pk in _c]}
+            try:
+                from instagrapi import config as _cfg
+                data["supported_capabilities_new"] = json.dumps(_cfg.SUPPORTED_CAPABILITIES)
+            except Exception:
+                pass
+            if hasattr(cl, "with_default_data"):
+                data = cl.with_default_data(data)
+            res = cl.private_request("feed/reels_media/", data=data) or {}
+            if "reels" not in res and "reels_media" not in res:
+                return None                        # формат не тот — без исключения, чтобы пул не повторял запрос
+            reels = res.get("reels") or {}
+            if not reels and isinstance(res.get("reels_media"), list):
+                reels = {str((r.get("user") or {}).get("pk") or r.get("id") or ""): r for r in res["reels_media"]}
+            return {pk: [extract_story_v1(it) for it in ((reels.get(pk) or {}).get("items") or [])]
+                    for _, pk in _c}
+
+        try:
+            got = await _POOL.run(_fetch, retries=1)      # одна попытка: пачка — оптимизация, а не обязанность
+        except Exception as e:
+            logger.info(f"[stories-batch] пачка из {len(chunk)} не вышла ({type(e).__name__}: {e}) — пойдём по одному")
+            continue
+        if not isinstance(got, dict):
+            continue
+        for uname, pk in chunk:
+            try:
+                stories = [_story_to_dict(x) for x in got.get(pk, [])]
+                _ttl_put(_STORIES_CACHE, _norm_u(uname), [x for x in stories if x.get("url")])
+                done += 1
+            except Exception as e:
+                logger.debug(f"[stories-batch] @{uname}: {e}")
+    if done:
+        logger.info(f"[stories-batch] истории {done} ников получены пачками")
+    return done
+
+
 async def get_stories(username: str) -> list:
-    """Получить активные истории пользователя."""
-    info = await get_user_info(username)
+    """Получить активные истории пользователя (кэш IG_STORIES_TTL)."""
+    key = _norm_u(username)
+    hit, val = _ttl_get(_STORIES_CACHE, key, IG_STORIES_TTL)
+    if hit:
+        return [dict(x) for x in val]
+    info = await _info_cheap(username)
     if not info:
         return []
     only = _access(username, info)
@@ -2499,11 +2968,13 @@ async def get_stories(username: str) -> list:
     try:
         items = await _POOL.run(_fetch, only=only)
         if not items:
+            _ttl_put(_STORIES_CACHE, key, [])
             return []
         stories = [_story_to_dict(s) for s in items]
         stories = [s for s in stories if s.get("url")]
+        _ttl_put(_STORIES_CACHE, key, stories)
         logger.info(f"✅ get_stories @{username}: {len(stories)} шт.")
-        return stories
+        return [dict(x) for x in stories]
     except PrivateAccount:
         _follow_lost(username, only)
         return []
@@ -2523,7 +2994,7 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
     «первые 33 и всё»: кэш хранит уже загруженное и курсор для продолжения.
     """
     username = username.lower().strip("@").strip()
-    info = await get_user_info(username)
+    info = await _info_cheap(username, need_card=True)
     if not info:
         return {"posts": [], "next_cursor": "", "has_more": False}
     only = _access(username, info)
@@ -2547,7 +3018,11 @@ async def get_posts(username: str, after_cursor: str = "") -> dict:
             _POSTS_CACHE[username] = e
 
         # дотягиваем страницы, пока не хватает постов для запрошенного окна
+        page_no = 0
         while len(e["posts"]) < need and not e["done"]:
+            if page_no:                       # листаем как человек: каждая следующая страница медленнее
+                await asyncio.sleep(page_pause(page_no))
+            page_no += 1
             cursor = e["cursor"]
             want = max(10, need - len(e["posts"]))
 
@@ -2614,7 +3089,7 @@ async def get_latest_posts(username: str, amount: int | None = None) -> list | N
     if ent and time.time() - ent[0] < _LATEST_TTL:
         return ent[1]
 
-    info = await get_user_info(username)
+    info = await _info_cheap(username)
     if not info:
         return None
     only = _access(username, info)
@@ -2733,6 +3208,12 @@ async def _media_fallback(url: str) -> dict | None:
     return post
 
 
+def _local_media_code(url: str) -> str:
+    import re
+    m = re.search(r"instagram\.com/(?:(?!share/)[A-Za-z0-9._]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]{6,})", url or "")
+    return m.group(1) if m else ""
+
+
 async def get_media_by_url(url: str) -> dict | None:
     """
     Достать пост/рилс/IGTV по ссылке.
@@ -2741,7 +3222,10 @@ async def get_media_by_url(url: str) -> dict | None:
     Порядок: пул instagrapi → yt-dlp → embed (при IG_YTDLP_FIRST=1 — yt-dlp раньше пула).
     """
     def _fetch(cl: Client):
-        pk = cl.media_pk_from_url(url)
+        # Обычные ссылки (/p/, /reel/, /tv/) считаем сами, без сети. Остальное (share/короткие
+        # ссылки с редиректом) оставляем библиотеке: ей нужен запрос, чтобы раскрыть ссылку.
+        code = _local_media_code(url)
+        pk = cl.media_pk_from_code(code) if code else cl.media_pk_from_url(url)
         m = cl.media_info(pk)
         post = _media_to_post(m)
         if not post:
@@ -2796,8 +3280,12 @@ async def get_story_by_url(url: str) -> dict | None:
 
 
 async def get_highlights(username: str) -> list[dict]:
-    """Список хайлайтов: [{pk, title, count}]."""
-    info = await get_user_info(username)
+    """Список хайлайтов: [{pk, title, count}] (кэш IG_HIGHLIGHTS_TTL)."""
+    key = _norm_u(username)
+    hit, val = _ttl_get(_HL_CACHE, key, IG_HIGHLIGHTS_TTL)
+    if hit:
+        return [dict(x) for x in val]
+    info = await _info_cheap(username)
     if not info:
         return []
     only = _access(username, info)
@@ -2822,12 +3310,18 @@ async def get_highlights(username: str) -> list[dict]:
     except Exception as e:
         logger.warning(f"get_highlights @{username}: {e}")
         return []
-    return [h for h in (res or []) if h["pk"]]
+    out = [h for h in (res or []) if h["pk"]]
+    if res is not None:
+        _ttl_put(_HL_CACHE, key, out)
+    return [dict(x) for x in out]
 
 
 async def get_highlight_items(highlight_pk: str) -> dict | None:
     """Содержимое хайлайта: {title, username, stories:[story dict]}."""
     pk = str(highlight_pk).replace("highlight:", "")
+    hit, val = _ttl_get(_HLI_CACHE, pk, IG_HIGHLIGHTS_TTL)
+    if hit:
+        return val
 
     def _fetch(cl: Client):
         h = cl.highlight_info(pk)
@@ -2845,7 +3339,10 @@ async def get_highlight_items(highlight_pk: str) -> dict | None:
     except Exception as e:
         logger.warning(f"get_highlight_items {pk}: {e}")
         return None
-    return res if res and res.get("stories") else None
+    if res and res.get("stories"):
+        _ttl_put(_HLI_CACHE, pk, res)
+        return res
+    return None
 
 
 # ── БД (подписки) ─────────────────────────────────────────────────────────────
@@ -3653,6 +4150,17 @@ def _ig_like_put(shortcode: str, login: str | None) -> None:
 
 # ── операции в Instagram ─────────────────────────────────────────────────────
 
+def _rel_from_response(cl):
+    """Статус из ответа friendships/create (instagrapi кладёт его в cl.last_json): following /
+    pending / '' — либо None, если в ответе статуса нет и придётся спросить отдельно."""
+    fs = (getattr(cl, "last_json", None) or {}).get("friendship_status")
+    if isinstance(fs, dict) and ("following" in fs or "outgoing_request" in fs):
+        if fs.get("following"):
+            return "following"
+        return "pending" if fs.get("outgoing_request") else ""
+    return None
+
+
 def _rel_status(cl, pk: str, private: bool, followed_ok: bool | None = None) -> str:
     """Реальный статус подписки: following / pending / '' (нет)."""
     try:
@@ -3717,7 +4225,8 @@ async def follow_user(username: str, requested_by: str = "") -> dict:
                 if _is_action_block(e):
                     return ("__block__", str(e))
                 raise
-            return _rel_status(cl, _pk, _priv, bool(ok))
+            st_resp = _rel_from_response(cl)            # статус уже в ответе — второй запрос не нужен
+            return st_resp if st_resp is not None else _rel_status(cl, _pk, _priv, bool(ok))
 
         try:
             st = await _POOL.run(_do, only={lg})
@@ -3775,6 +4284,17 @@ async def unfollow_user(username: str) -> dict:
     return {"ok": removed > 0, "removed": removed, "errors": errors}
 
 
+_PEND_CHECKED: dict[tuple[str, str], float] = {}
+
+
+def _pending_every(age: float) -> float:
+    """Как часто проверять заявку: свежая (<1 сут) — каждый цикл, до недели — раз в 3 ч, старше — раз в 12 ч."""
+    if age < 86400:
+        return 0.0
+    return float(os.getenv("IG_PENDING_MID_EVERY", str(3 * 3600))) if age < 7 * 86400 \
+        else float(os.getenv("IG_PENDING_OLD_EVERY", str(12 * 3600)))
+
+
 async def refresh_pending_follows() -> list[dict]:
     """
     Проверить заявки «pending»: одобрили → following, отклонили/отозвали → удаляем.
@@ -3782,14 +4302,22 @@ async def refresh_pending_follows() -> list[dict]:
     """
     conn = _dbx()
     try:
-        rows = conn.execute("SELECT ig_username, login, pk, requested_by FROM ig_follows "
+        rows = conn.execute("SELECT ig_username, login, pk, requested_by, ts FROM ig_follows "
                             "WHERE status='pending'").fetchall()
     finally:
         conn.close()
     changes: list[dict] = []
-    for uname, lg, pk, by in rows:
+    now = time.time()
+    asked = False
+    for uname, lg, pk, by, ts in rows:
         if not pk:
             continue
+        if now - _PEND_CHECKED.get((uname, lg), 0) < _pending_every(now - (ts or now)):
+            continue                                   # старую заявку проверяем реже
+        if asked:
+            await asyncio.sleep(human_delay(5, 10))   # между заявками — пауза, а не очередь подряд
+        asked = True
+        _PEND_CHECKED[(uname, lg)] = time.time()
 
         def _do(cl, _pk=pk):
             fr = cl.user_friendship_v1(int(_pk))

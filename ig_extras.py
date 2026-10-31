@@ -29,6 +29,7 @@ from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarku
 from instagram_viewer import (
     IG_DB, _POOL, _access, _norm_u, _pk_for, get_posts, get_user_info,
     ig_get_subscriptions, set_background_priority,
+    _REST_UNTIL, _acc_login, _is_action_block, bulk_scope, page_pause,
 )
 from instagram_handlers import (
     _act_row, _download, _fetch_media_files, _get_admin_ids, _out_chat,
@@ -272,15 +273,20 @@ def _split_file(path: str, part_bytes: int) -> list[str]:
 async def _collect_posts(username: str, n: int) -> tuple[list[dict], str]:
     posts: list[dict] = []
     offset = 0
-    while len(posts) < n:
-        r = await get_posts(username, str(offset) if offset else "")
-        if r.get("private"):
-            return posts, "private"
-        page = r.get("posts") or []
-        posts += page
-        if not r.get("has_more") or not page:
-            break
-        offset += 10
+    page_no = 0
+    with bulk_scope():          # выгрузка до 60 постов идёт на расходных доноров (если назначены)
+        while len(posts) < n:
+            if page_no:         # каждая следующая страница медленнее — как живой скролл
+                await asyncio.sleep(page_pause(page_no))
+            page_no += 1
+            r = await get_posts(username, str(offset) if offset else "")
+            if r.get("private"):
+                return posts, "private"
+            page = r.get("posts") or []
+            posts += page
+            if not r.get("has_more") or not page:
+                break
+            offset += 10
     return posts[:n], ""
 
 
@@ -495,6 +501,10 @@ def _loc_pk_from_url(text: str) -> str:
     return m.group(1) if m else ""
 
 
+_LOC_CACHE: dict[tuple, tuple[float, list]] = {}
+_LOC_TTL = int(os.getenv("IG_LOC_CACHE_TTL", str(6 * 3600)))
+
+
 async def cmd_ig_loc(message: types.Message, command: CommandObject):
     raw = (command.args or "").strip()
     if not raw:
@@ -520,16 +530,25 @@ async def cmd_ig_loc(message: types.Message, command: CommandObject):
                         "name": getattr(loc, "name", "") or "", "address": getattr(loc, "address", "") or ""})
         return [x for x in out if x["pk"] and x["name"]][:6]
 
-    wait = await message.answer("🔎 Ищу место...")
-    try:
-        found = await _POOL.run(_search)
-    except Exception as e:
-        logger.info(f"loc search {raw}: {type(e).__name__}: {e}")
-        found = None
-    try:
-        await wait.delete()
-    except Exception:
-        pass
+    key = (" ".join(raw.lower().split()), IG_LOC_LAT, IG_LOC_LNG)
+    hit = _LOC_CACHE.get(key)
+    if hit and time.time() - hit[0] < _LOC_TTL:       # тот же запрос недавно уже искали — Instagram не трогаем
+        found = hit[1]
+    else:
+        wait = await message.answer("🔎 Ищу место...")
+        try:
+            found = await _POOL.run(_search)
+        except Exception as e:
+            logger.info(f"loc search {raw}: {type(e).__name__}: {e}")
+            found = None
+        try:
+            await wait.delete()
+        except Exception:
+            pass
+        if found:
+            _LOC_CACHE[key] = (time.time(), found)
+            if len(_LOC_CACHE) > 200:
+                _LOC_CACHE.pop(min(_LOC_CACHE, key=lambda k: _LOC_CACHE[k][0]), None)
     if not found:
         await message.answer("😶 Не нашёл такое место. Пришли ссылку вида instagram.com/explore/locations/ID/…")
         return
@@ -622,15 +641,20 @@ async def _fetch_topic_posts(kind: str, key: str, amount: int = 12) -> list[dict
     from instagram_viewer import _media_to_post
 
     def _fetch(cl):
-        if kind == "tag":
-            try:
-                medias = cl.hashtag_medias_recent(key, amount=amount)
-            except Exception as e:
-                if "feedback" in str(e).lower():
-                    raise
-                medias = cl.hashtag_medias_top(key, amount=amount)
-        else:
-            medias = cl.location_medias_recent(int(key), amount=amount)
+        try:
+            if kind == "tag":
+                try:
+                    medias = cl.hashtag_medias_recent(key, amount=amount)
+                except Exception as e:
+                    if _is_action_block(e):
+                        raise
+                    medias = cl.hashtag_medias_top(key, amount=amount)
+            else:
+                medias = cl.location_medias_recent(int(key), amount=amount)
+        except Exception as e:
+            if _is_action_block(e):          # feedback_required: не повторяем, донор отдыхает
+                return ("__block__", _acc_login(cl), str(e))
+            raise
         out = []
         for m in medias or []:
             p = _media_to_post(m)
@@ -639,10 +663,17 @@ async def _fetch_topic_posts(kind: str, key: str, amount: int = 12) -> list[dict
         return out
 
     try:
-        return await _POOL.run(_fetch)
+        with bulk_scope():
+            res = await _POOL.run(_fetch)
     except Exception as e:
         logger.warning(f"topic {kind}:{key}: {type(e).__name__}: {e}")
         return None
+    if isinstance(res, tuple) and res and res[0] == "__block__":
+        rest = float(os.getenv("IG_TOPIC_BLOCK_REST_H", "3")) * 3600
+        _REST_UNTIL[res[1]] = time.time() + rest
+        logger.warning(f"topic {kind}:{key}: feedback_required у @{res[1]} — отдых {rest / 3600:.0f} ч ({res[2][:80]})")
+        return None
+    return res
 
 
 async def _check_topic(bot: Bot, t: dict) -> None:

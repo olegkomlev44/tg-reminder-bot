@@ -152,11 +152,20 @@ async def _resolve_person(person: str) -> dict:
     evaluated: list[tuple[str, dict]] = []
     any_error = False
     dominant = None
+
+    def _flat(x: str) -> str:
+        return re.sub(r"[^0-9a-zа-яё]", "", (x or "").casefold())
+
+    want = _flat(person)
     for h in handles:
         status, info = await get_user_status(h, allow_stale=True)
         if status in ("ok", "stale") and info:
             evaluated.append((h, info))
-            if info.get("is_verified") or int(info.get("followers") or 0) >= 100_000:
+            followers = int(info.get("followers") or 0)
+            # точное совпадение имени у заметного аккаунта (5К+) — тоже уверенный ответ: дальше не ищем.
+            # Совпадение у крошечного аккаунта не считаем: возможен тёзка, и тогда нужны остальные кандидаты.
+            exact = bool(want) and want in (_flat(h), _flat(info.get("full_name"))) and followers >= 5_000
+            if info.get("is_verified") or followers >= 100_000 or exact:
                 dominant = (h, info)
                 break
         elif status == "error":

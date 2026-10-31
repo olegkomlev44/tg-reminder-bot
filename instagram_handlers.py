@@ -1595,6 +1595,21 @@ async def _run_ig_check(bot: Bot):
     due = due[:IG_MAX_PER_TICK]
     logger.info(f"[ig-check] к проверке: {len(due)} из {len(by_username)} ников")
 
+    # Истории пачкой: один запрос feed/reels_media/ на ~10 публичных ников вместо отдельного на каждого.
+    # Результат ложится в кэш get_stories; не вышло — _check_stories пойдёт по одному, как раньше.
+    try:
+        from instagram_viewer import prefetch_stories
+        pairs = []
+        for _, uname, user_subs in due:
+            st = ustates.get(uname) or {}
+            if (st.get("pk") and not st.get("is_private") and not st.get("is_gone")
+                    and any(x.get("sub_type") == "stories" for x in user_subs)):
+                pairs.append((uname, st["pk"]))
+        if len(pairs) >= 2:
+            await prefetch_stories(pairs)
+    except Exception as e:
+        logger.info(f"[ig-check] пачка историй не вышла: {type(e).__name__}: {e}")
+
     for _, uname, user_subs in due:
         found = False
         try:
@@ -2480,6 +2495,11 @@ async def _run_session_health_check(bot: Bot) -> dict:
         if not s["alive"]:                      # клиент не загрузился (нет/битый файл сессии)
             dead_logins.append(login)
             continue
+        skip_s = float(os.getenv("IG_HEALTH_SKIP_HOURS", "5")) * 3600
+        if _ig_pool.last_ok_age(login) < skip_s:      # недавно отдавал данные — холостой запрос не нужен
+            logger.info(f"[health] ⏭ {login}: успешно работал недавно, проверку пропускаю")
+            ok_logins.append(login)
+            continue
         try:
             ok = await validate_session(login, strict=False)
         except Exception as e:
@@ -2851,18 +2871,13 @@ def _get_my_viewed(user_id: str, limit: int = 5) -> list[dict]:
 # ── Ф7: ПОХОЖИЕ АККАУНТЫ ──────────────────────────────────────────────────────
 
 async def callback_ig_related(callback: types.CallbackQuery):
+    """«Похожие аккаунты»: через instagram_related из ig_extras (кэш 6 ч, без лишнего запроса профиля)."""
     ig_username = callback.data.split(":", 1)[1]
     await callback.answer("🔍 Ищу похожие аккаунты...")
 
     try:
-        from instagram_viewer import _POOL
-
-        def _fetch(cl):
-            user = cl.user_info_by_username(ig_username)
-            related = cl.user_related_profiles(user.pk)
-            return related[:6]
-
-        profiles = await _POOL.run(_fetch)
+        from ig_extras import instagram_related        # импорт внутри: ig_extras сам импортирует этот модуль
+        profiles = (await instagram_related(ig_username))[:6]
     except Exception as e:
         logger.error(f"ig_related {ig_username}: {e}")
         profiles = []
@@ -2871,14 +2886,13 @@ async def callback_ig_related(callback: types.CallbackQuery):
         await callback.message.answer("😕 Не удалось найти похожие аккаунты.")
         return
 
-    lines = [f"👥 <b>Похожие на @{ig_username}:</b>\n"]
+    lines = [f"👥 <b>Похожие на @{_htmlmod.escape(ig_username)}:</b>\n"]
     buttons = []
     for p in profiles:
-        uname     = getattr(p, "username", "")
-        fname     = getattr(p, "full_name", "") or uname
-        followers = getattr(p, "follower_count", 0) or 0
-        verified  = " ✅" if getattr(p, "is_verified", False) else ""
-        lines.append(f"• <b>{fname}</b>{verified} @{uname} · {_fmt_count(followers)} подп.")
+        uname = p.get("username", "")
+        fname = p.get("full_name") or uname
+        lock = " 🔒" if p.get("is_private") else ""
+        lines.append(f"• <b>{_htmlmod.escape(fname)}</b>{lock} @{_htmlmod.escape(uname)}")
         if uname:
             buttons.append([InlineKeyboardButton(
                 text=f"👤 @{uname}", callback_data=f"ig_profile:{uname}"
@@ -3253,7 +3267,11 @@ def _build_session_json(username: str, cookies: dict, existing: dict | None = No
                               or ("android-" + _b64.b16encode(_rnd.randbytes(8)).decode().lower()),
     }
 
-    device_settings = old_device if old_device else dict(_IG_DEFAULT_DEVICE)
+    if old_device:
+        device_settings = old_device
+    else:                                    # у каждого донора свой закреплённый профиль телефона
+        from instagram_viewer import pick_device
+        device_settings = pick_device(username)
 
     user_agent = existing.get("user_agent") or (
         "Instagram {app_version} Android "
@@ -3404,7 +3422,12 @@ def _acc_admin_ok(uid: int) -> bool:
 
 def _acc_list_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
     from collections import Counter
-    from instagram_viewer import ig_blocked_map, ig_proxy_masks, quiet_hours_label
+    from instagram_viewer import (ig_blocked_map, ig_proxy_masks, quiet_hours_label,
+                                  ig_budget_info, expendable_logins, IG_BUDGET_15MIN, IG_BUDGET_DAY)
+    try:
+        exp = expendable_logins()
+    except Exception:
+        exp = set()
     statuses = get_sessions_status()
     try:
         masks = ig_proxy_masks()
@@ -3431,10 +3454,19 @@ def _acc_list_view(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
         cur = " 👈" if s.get("is_current") else ""
         m = masks.get(s["login"], "")
         px = (f" · 🌐 {m}" + (" ⚠️ общий IP" if cnt[m] > 1 else "")) if m else " · ⚠️ без прокси"
-        lines.append(f"{icon} <code>{_htmlmod.escape(s['login'])}</code>{cur} · запросов: {s['requests']}{px}{extra}")
+        try:
+            n15, nday, rest = ig_budget_info(s["login"])
+        except Exception:
+            n15 = nday = 0
+            rest = 0.0
+        budget = (f" · 📊 {n15}/{IG_BUDGET_15MIN or '∞'} · {nday}/{IG_BUDGET_DAY or '∞'}"
+                  + (f" 💤{rest / 60:.0f}м" if rest > 0 else ""))
+        role = " · 🧪 расходный" if s["login"] in exp else ""
+        lines.append(f"{icon} <code>{_htmlmod.escape(s['login'])}</code>{cur}{role} · запросов: {s['requests']}{px}{budget}{extra}")
         btns.append([
             InlineKeyboardButton(text=f"🔄 {s['login']}", callback_data=f"ig_refresh_pick:{s['login']}"),
             InlineKeyboardButton(text="🌐", callback_data=f"ig_acc:px:{s['login']}"),
+            InlineKeyboardButton(text="🧪", callback_data=f"ig_acc:ex:{s['login']}"),
             InlineKeyboardButton(text="🗑", callback_data=f"ig_acc:del:{s['login']}"),
         ])
     btns.append([InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="ig_acc:add")])
@@ -3508,6 +3540,21 @@ async def callback_ig_acc(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         await _show(_cookies_prompt(arg), InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="❌ Отмена", callback_data="ig_refresh_cancel")]]))
+
+    elif act == "ex":
+        from instagram_viewer import expendable_logins, ig_set_expendable
+        if _POOL._idx_of(arg) is None:
+            await callback.answer("Такого аккаунта уже нет", show_alert=True)
+            return
+        now_exp = arg in expendable_logins()
+        ig_set_expendable(arg, not now_exp)
+        await callback.answer("🧪 Теперь расходный: теги, локации и /ig_dump только на нём" if not now_exp
+                              else "Снова обычный донор")
+        text, kb = _acc_list_view(
+            f"🧪 <code>{_htmlmod.escape(arg)}</code> — "
+            + ("расходный: на нём тяжёлый парсинг (теги, локации, /ig_dump), основные подписки он не читает."
+               if not now_exp else "обычный донор."))
+        await _show(text, kb)
 
     elif act == "px":
         if _POOL._idx_of(arg) is None:
@@ -3605,7 +3652,9 @@ def _cookies_prompt(login: str) -> str:
         "1. Зайди на <code>instagram.com</code> именно под ним\n"
         "2. EditThisCookie → <b>Экспорт</b>\n"
         "3. Отправь JSON сюда текстом или файлом\n\n"
-        "<i>Подойдут и sessionid + ds_user_id в формате key: value.</i>"
+        "<i>Подойдут и sessionid + ds_user_id в формате key: value.</i>\n\n"
+        "⚠️ Куки из браузера — запасной способ: сессия «склеивается» из браузера и Android, и "
+        "Instagram чаще просит подтвердить личность. Вход по паролю надёжнее."
     )
 
 
