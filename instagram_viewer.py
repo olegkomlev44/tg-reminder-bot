@@ -421,9 +421,36 @@ _LOGIN_COOLDOWN: dict[str, float] = {}          # ключ «IP» (прокси 
 
 
 def _is_429(e: Exception) -> bool:
+    import re
     low = f"{type(e).__name__} {e}".lower()
-    return ("429" in low or "too many" in low or "retryerror" in low
+    return (re.search(r"(?<!\d)429(?!\d)", low) is not None or "too many" in low or "retryerror" in low
             or type(e).__name__ in ("PleaseWaitFewMinutes", "RateLimitError", "ClientThrottledError"))
+
+
+def _is_challenge(e: Exception) -> bool:
+    """Чекпоинт / «подтвердите, что это вы» (в т.ч. новый Bloks-формат com.bloks.www.ig.challenge.*).
+    instagrapi не знает новые шаги и бросает обычный ClientError — для пула это смерть сессии, а не «сбой запроса»."""
+    name = type(e).__name__.lower()
+    if "challenge" in name or "checkpoint" in name:
+        return True
+    low = str(e).lower()
+    return any(t in low for t in ("challenge_required", "checkpoint_required", "bloks.www.ig.challenge",
+                                  "challenge/", "step_name"))
+
+
+def _guarded_call(fn, cl, args, kwargs):
+    """Запуск fn(cl, …) в потоке: чекпоинт → LoginRequired (пул выведет донора из ротации и пришлёт алерт),
+    429 под видом сетевой ошибки (RetryError) → RateLimitError (карантин, а не быстрые повторы на том же акке)."""
+    try:
+        return fn(cl, *args, **kwargs)
+    except (LoginRequired, UserNotFound, PrivateAccount, RateLimitError, PleaseWaitFewMinutes):
+        raise
+    except Exception as e:
+        if _is_challenge(e):
+            raise LoginRequired(f"challenge/checkpoint: {type(e).__name__}: {e}"[:300]) from e
+        if isinstance(e, _NET_ERRORS) and _is_429(e):
+            raise RateLimitError(f"429: {e}"[:300]) from e
+        raise
 
 
 def _login_key(login: str) -> str:
@@ -1818,7 +1845,7 @@ class _AccountPool:
                     else:
                         cl.delay_range = list(pace)
                     result = await asyncio.wait_for(
-                        loop.run_in_executor(None, lambda: fn(cl, *args, **kwargs)),
+                        loop.run_in_executor(None, lambda: _guarded_call(fn, cl, args, kwargs)),
                         timeout=IG_REQ_TIMEOUT + (2 * IG_BG_DELAY_MAX if is_bg else 0),
                     )
 
@@ -2512,13 +2539,29 @@ def _lookup_user(cl, username: str) -> dict:
             login = login or e
             notes.append(f"{name}: login")
         except ClientError as e:
+            if _is_challenge(e):               # сессия на чекпоинте: остальные методы с этого донора бесполезны
+                login = login or LoginRequired(f"challenge/checkpoint: {type(e).__name__}: {e}"[:300])
+                notes.append(f"{name}: challenge")
+                break                          # _lk_note не трогаем: метод не виноват, виновата сессия
             _lk_note(name, False)
-            notes.append(f"{name}: {e}")
+            if _is_429(e):
+                rate = rate or RateLimitError(str(e))
+                notes.append(f"{name}: 429")
+            else:
+                notes.append(f"{name}: {e}")
         except _NET_ERRORS as e:
             _lk_note(name, False)
-            net = net or e
-            notes.append(f"{name}: net {type(e).__name__}")
+            if _is_429(e):                     # RetryError('too many 429 …') — это лимит, а не обрыв связи
+                rate = rate or RateLimitError(str(e))
+                notes.append(f"{name}: 429 (retry)")
+            else:
+                net = net or e
+                notes.append(f"{name}: net {type(e).__name__}")
         except Exception as e:                 # битый ответ/pydantic и т.п. — не роняем каскад
+            if _is_challenge(e):
+                login = login or LoginRequired(f"challenge/checkpoint: {type(e).__name__}: {e}"[:300])
+                notes.append(f"{name}: challenge")
+                break
             _lk_note(name, False)
             notes.append(f"{name}: {type(e).__name__}: {e}")
 
@@ -2526,10 +2569,10 @@ def _lookup_user(cl, username: str) -> dict:
     _lk_log(cl, username, "notfound" if nf_votes else "fail", "", notes)
     if nf_votes:
         raise UserNotFound(f"private: User not found @{username}", username=username)
+    if login:                      # вылет сессии/чекпоинт важнее лимита и сети: донора надо выводить из ротации
+        raise login
     if rate:
         raise rate
-    if login:
-        raise login
     if net:
         raise net
     err = ClientError(f"lookup @{username}: " + "; ".join(notes))
