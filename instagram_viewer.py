@@ -751,6 +751,65 @@ def _install_human_pacing(cl, login: str) -> None:
         cl._pace_installed = True
 
 
+def _limit_hidden_retries(cl) -> None:
+    """urllib3 под капотом повторяет 429/5xx до нескольких раз подряд — это молотит по лимиту.
+    Оставляем повтор только для обрыва соединения; ответ 429/5xx сразу уходит пулу, который
+    решает, что делать (отдых, другой донор). Нет mount (curl-сессия) — молча пропускаем."""
+    try:
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        for sess in (getattr(cl, "private", None), getattr(cl, "public", None)):
+            if sess is not None and hasattr(sess, "mount"):
+                ad = HTTPAdapter(max_retries=Retry(total=2, connect=2, read=0, status=0, redirect=5,
+                                                   backoff_factor=1.5, status_forcelist=(),
+                                                   respect_retry_after_header=False))
+                sess.mount("https://", ad)
+                sess.mount("http://", ad)
+    except Exception as e:
+        logger.debug(f"[pool] retries: {e}")
+
+
+# ── ЗАКРЕПЛЕНИЕ НИКА ЗА ДОНОРОМ (sticky affinity) ─────────────────────────────
+# Фоновая проверка ника идёт с одного и того же донора: crc32(ник) % число доноров основного пула.
+# Instagram не видит «хоровод» разных аккаунтов вокруг одного профиля. Если закреплённый донор
+# недоступен (отдых, 429, мёртв) — обычный выбор. Не hash(): он меняется при каждом запуске.
+_ig_affinity: ContextVar = ContextVar("ig_affinity", default="")
+
+
+@_contextlib.contextmanager
+def ig_affinity(username: str):
+    tok = _ig_affinity.set(_norm_u(username))
+    try:
+        yield
+    finally:
+        _ig_affinity.reset(tok)
+
+
+# ── SINGLE-FLIGHT: одинаковые параллельные запросы делят один полёт ─────────────
+_SF: dict[str, asyncio.Future] = {}
+
+
+async def _single_flight(key: str, factory):
+    """Пока запрос по key в полёте, остальные ждут тот же результат (клики в группах, двойные тапы)."""
+    fut = _SF.get(key)
+    if fut is None or fut.done():
+        fut = asyncio.ensure_future(factory())
+        _SF[key] = fut
+
+        def _cleanup(f, _k=key):
+            if _SF.get(_k) is f:
+                _SF.pop(_k, None)
+            if not f.cancelled():
+                f.exception()                       # «забрать» исключение, чтобы asyncio не ругался
+        fut.add_done_callback(_cleanup)
+    return await asyncio.shield(fut)
+
+
+def _sf_copy(res):
+    import copy
+    return copy.deepcopy(res)
+
+
 # ── АНОНИМНАЯ ШАПКА ПРОФИЛЯ до обращения к донорам ───────────────────────────
 # Для фоновой проверки: публичная embed-страница отдаёт число постов и аватар без кук.
 # Не изменилось (и карточка не старше IG_ANON_MAX_STALE) — доноров не трогаем.
@@ -1274,6 +1333,7 @@ class _AccountPool:
         cl.set_settings(settings)
         _apply_client_identity(cl, login)
         _install_human_pacing(cl, login)
+        _limit_hidden_retries(cl)
 
         ds_user_id = settings.get("cookies", {}).get("ds_user_id", "")
         logger.info(f"[pool] ✅ загружен: {login}  ds_user_id={ds_user_id}")
@@ -1388,6 +1448,15 @@ class _AccountPool:
             return self._select_among(only, prio)
         if exp and _ig_scope.get() == "bulk":
             return self._select_among(exp, prio)         # тяжёлый парсинг — только на расходных
+        aff = _ig_affinity.get()
+        if aff:                                          # фоновая проверка ника — «его» донор
+            import zlib
+            main_pool = sorted(l for l, _ in self._accounts if l not in exp)
+            if main_pool:
+                pref = main_pool[zlib.crc32(aff.encode("utf-8")) % len(main_pool)]
+                i = self._select_among({pref}, PRIO_BG)  # только если годен и не на отдыхе
+                if i is not None:
+                    return i
         if exp:                                          # обычные чтения расходных не жгут
             main = {l for l, _ in self._accounts if l not in exp}
             i = self._select_among(main, PRIO_BG) if main else None
@@ -2257,10 +2326,13 @@ def _lk_broken(method: str) -> bool:
     return len(last) == 5 and not any(last)
 
 
+IG_LK_PROBE_EVERY = max(int(os.getenv("IG_LK_PROBE_EVERY", "25")), 1)   # как редко пробуем «упавший» метод
+
+
 def _lk_arrange(steps: list, commit: bool = True) -> list:
     """
     Адаптивный порядок: методы с лучшей недавней статистикой идут первыми, «лежащие»
-    (5 неудач подряд за 10 минут) пропускаются — но каждый 5-й вызов пробуем снова, чтобы
+    (5 неудач подряд за 10 минут) пропускаются — но каждый IG_LK_PROBE_EVERY-й вызов (25) пробуем снова, чтобы
     заметить, что метод ожил. «search» всегда последний; если пропустили бы всё — идём как есть.
     """
     head, tail = steps[:-1], steps[-1:]
@@ -2270,7 +2342,7 @@ def _lk_arrange(steps: list, commit: bool = True) -> list:
     live = []
     for st in ordered:
         if _lk_broken(st[0]):
-            if not commit or _bump_probe(st[0]) % 5 != 0:
+            if not commit or _bump_probe(st[0]) % IG_LK_PROBE_EVERY != 0:
                 continue
         live.append(st)
     return (live or ordered) + tail
@@ -2340,6 +2412,13 @@ def _web_profile_info(cl, username: str):
         "https://www.instagram.com/api/v1/users/web_profile_info/",
         params={"username": username}, headers=headers, proxies=proxies, timeout=20,
     )
+    try:        # обновлённые csrftoken/rur из Set-Cookie возвращаем в сессию клиента (только существующие — без дублей)
+        fresh = {c.name: c.value for c in sess.cookies if c.value}
+        for ck in cl.private.cookies:
+            if ck.name in ("csrftoken", "rur", "mid", "ig_did") and fresh.get(ck.name) and fresh[ck.name] != ck.value:
+                ck.value = fresh[ck.name]
+    except Exception:
+        pass
     if r.status_code == 404:
         raise UserNotFound(f"web 404 @{username}", username=username)
     if r.status_code == 429:
@@ -2592,8 +2671,8 @@ def _fail_result(username: str, allow_stale: bool) -> tuple[str, dict | None]:
     return "error", None
 
 
-async def get_user_status(username: str, force: bool = False,
-                          allow_stale: bool = False, swr: bool = False) -> tuple[str, dict | None]:
+async def _get_user_status_impl(username: str, force: bool = False,
+                                allow_stale: bool = False, swr: bool = False) -> tuple[str, dict | None]:
     """
     Как get_user_info, но различает причины пустого ответа:
       ("ok", info)       — профиль получен (в т.ч. приватный);
@@ -2628,14 +2707,10 @@ async def get_user_status(username: str, force: bool = False,
                 return "swr", info
     _CSTAT["miss"] += 1
 
-    if force and IG_ANON_FIRST:                 # фоновая проверка: сначала бесплатная шапка без кук
-        stale = _ucache_stale(username)
-        if stale and stale[0].get("id") and time.time() - stale[1] < IG_ANON_MAX_STALE:
-            anon = await _anon_profile(username)
-            if anon and _anon_same(stale[0], anon):
-                _CSTAT["anon_hit"] += 1
-                logger.info(f"[anon] @{username}: без изменений (постов {anon['posts_count']}) — доноров не трогаю")
-                return "ok", dict(stale[0])
+    if force:
+        shortcut = await _anon_shortcut(username)     # фоновая проверка: сначала бесплатная шапка без кук
+        if shortcut:
+            return "ok", shortcut
 
     def _fetch(cl: Client):
         return _lookup_user(cl, username)
@@ -2679,6 +2754,48 @@ async def get_user_info(username: str, force: bool = False) -> dict | None:
     return info
 
 
+async def _anon_shortcut(username: str) -> dict | None:
+    """Карточка из кэша, если анонимная embed-шапка не изменилась (и карточка не старше IG_ANON_MAX_STALE)."""
+    if not IG_ANON_FIRST:
+        return None
+    stale = _ucache_stale(username)
+    if stale and stale[0].get("id") and time.time() - stale[1] < IG_ANON_MAX_STALE:
+        anon = await _anon_profile(username)
+        if anon and _anon_same(stale[0], anon):
+            _CSTAT["anon_hit"] += 1
+            logger.info(f"[anon] @{username}: без изменений (постов {anon['posts_count']}) — доноров не трогаю")
+            return dict(stale[0])
+    return None
+
+
+async def get_user_status_for_check(username: str, pk: str = "") -> tuple[str, dict | None]:
+    """
+    Фоновая проверка ника: 1) анонимная шапка без кук; 2) если pk уже известен — один авторизованный запрос
+    user_info_v1 по pk; 3) обычный путь по нику. Ник сменился, занят другим или pk не найден → шаг 3
+    (там и обрабатывается смена ника / «аккаунта нет»). Сбой на шаге 2 → "error" без повтора каскадом.
+    """
+    username = _norm_u(username)
+    shortcut = await _anon_shortcut(username)
+    if shortcut:
+        return "ok", shortcut
+    if str(pk or "").isdigit():
+        st, info = await get_user_status_by_pk(pk)
+        if st == "error":
+            return "error", None
+        if st == "ok" and info and (info.get("username") or "").lower() == username:
+            return "ok", info
+    return await get_user_status(username, force=True)
+
+
+async def get_user_status(username: str, force: bool = False,
+                          allow_stale: bool = False, swr: bool = False) -> tuple[str, dict | None]:
+    """Как _get_user_status_impl, но одинаковые параллельные вызовы делят один запрос к Instagram."""
+    key = f"us:{_norm_u(username)}:{int(force)}{int(allow_stale)}{int(swr)}"
+    status, info = await _single_flight(
+        key, lambda: _get_user_status_impl(username, force, allow_stale, swr))
+    return status, (dict(info) if isinstance(info, dict) else info)
+
+
 async def get_user_status_by_pk(pk: str) -> tuple[str, dict | None]:
     """
     Профиль по числовому pk (он не меняется при смене ника).
@@ -2690,7 +2807,8 @@ async def get_user_status_by_pk(pk: str) -> tuple[str, dict | None]:
 
     def _fetch(cl: Client):
         try:
-            return _user_to_dict(cl.user_info(int(pk)))
+            # user_info сначала идёт в публичный GQL; фоновой проверке нужен один запрос — user_info_v1
+            return _user_to_dict(getattr(cl, "user_info_v1", None) and cl.user_info_v1(int(pk)) or cl.user_info(int(pk)))
         except UserNotFound as e:
             _fail_if_endpoint_404(cl, e)
             raise
@@ -2945,7 +3063,7 @@ async def prefetch_stories(pairs: list[tuple[str, str]]) -> int:
     return done
 
 
-async def get_stories(username: str) -> list:
+async def _get_stories_impl(username: str) -> list:
     """Получить активные истории пользователя (кэш IG_STORIES_TTL)."""
     key = _norm_u(username)
     hit, val = _ttl_get(_STORIES_CACHE, key, IG_STORIES_TTL)
@@ -3072,6 +3190,12 @@ _LATEST_CACHE: dict[tuple[str, int], tuple[float, list]] = {}
 _LATEST_TTL = 120
 
 
+def _medias_direct(cl):
+    """user_medias в instagrapi сначала бьёт в публичный GQL и при сбое делает второй запрос.
+    Фоновой проверке нужен сразу один авторизованный запрос — user_medias_v1."""
+    return getattr(cl, "user_medias_v1", None) or cl.user_medias
+
+
 async def get_latest_posts(username: str, amount: int | None = None) -> list | None:
     """
     Последние `amount` постов (по умолчанию IG_POSTS_CHECK_AMOUNT) для фоновой проверки.
@@ -3098,7 +3222,7 @@ async def get_latest_posts(username: str, amount: int | None = None) -> list | N
         return None
 
     def _fetch(cl: Client):
-        medias = cl.user_medias(int(user_id), amount=amount)
+        medias = _medias_direct(cl)(int(user_id), amount=amount)
         return [_media_to_post(m) for m in medias if m]
 
     try:
@@ -3120,19 +3244,21 @@ async def get_latest_posts(username: str, amount: int | None = None) -> list | N
 # ── АВАТАРКА (байты) ──────────────────────────────────────────────────────────
 
 async def get_avatar_bytes(username: str) -> bytes | None:
-    """Скачать аватарку через instagrapi (надёжнее, чем прямой URL)."""
-    import tempfile
-
+    """Скачать аватарку. В instagrapi нет метода user_download_profile_pic, поэтому берём ссылку
+    из профиля и качаем картинку напрямую — через прокси этого же аккаунта, чтобы IP не менялся."""
     username = username.lower().strip("@").strip()
     info = await get_user_info(username)          # из кэша — без лишнего запроса
-    pk = (info or {}).get("id", "")
 
     def _fetch(cl: Client):
-        user_pk = int(pk) if pk else int(_lookup_user(cl, username)["id"])
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = cl.user_download_profile_pic(user_pk, folder=tmpdir)
-            with open(path, "rb") as f:
-                return f.read()
+        url = (info or {}).get("avatar_url") or (_lookup_user(cl, username) or {}).get("avatar_url") or ""
+        if not url:
+            return None
+        import requests
+        px = get_account_proxy(_acc_login(cl))
+        r = requests.get(url, headers={"User-Agent": _WEB_UA}, timeout=20,
+                         proxies={"http": px, "https": px} if px else None)
+        r.raise_for_status()
+        return r.content or None
 
     try:
         return await _POOL.run(_fetch)
@@ -3208,13 +3334,22 @@ async def _media_fallback(url: str) -> dict | None:
     return post
 
 
+async def get_media_by_url(url: str) -> dict | None:
+    """Пост/рилс по ссылке; параллельные одинаковые вызовы делят один запрос."""
+    res = await _single_flight(f"mu:{url}", lambda: _get_media_by_url_impl(url))
+    return _sf_copy(res)
+
+
 def _local_media_code(url: str) -> str:
     import re
     m = re.search(r"instagram\.com/(?:(?!share/)[A-Za-z0-9._]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]{6,})", url or "")
     return m.group(1) if m else ""
 
 
-async def get_media_by_url(url: str) -> dict | None:
+_PRIVATE_MARK = {"__private__": True}
+
+
+async def _get_media_by_url_impl(url: str) -> dict | None:
     """
     Достать пост/рилс/IGTV по ссылке.
     Возвращает наш dict поста (как в get_posts) + username, is_reel, music,
@@ -3226,7 +3361,14 @@ async def get_media_by_url(url: str) -> dict | None:
         # ссылки с редиректом) оставляем библиотеке: ей нужен запрос, чтобы раскрыть ссылку.
         code = _local_media_code(url)
         pk = cl.media_pk_from_code(code) if code else cl.media_pk_from_url(url)
-        m = cl.media_info(pk)
+        try:
+            m = cl.media_info(pk)
+        except PrivateAccount:
+            return _PRIVATE_MARK              # пул не должен ретраить: нужен донор, подписанный на владельца
+        except Exception as e:
+            if type(e).__name__ in ("MediaNotFound", "PrivateError"):
+                return _PRIVATE_MARK          # закрытые посты чужим донорам часто видны как «не найдено»
+            raise
         post = _media_to_post(m)
         if not post:
             return None
@@ -3239,17 +3381,25 @@ async def get_media_by_url(url: str) -> dict | None:
         post = await _media_fallback(url)
         if post:
             return post
+    private_like = False
     try:
         post = await _POOL.run(_fetch)
-        if post and post.get("media"):
+        if post is _PRIVATE_MARK:
+            private_like = True
+        elif post and post.get("media"):
             return post
+    except PrivateAccount:
+        private_like = True
     except Exception as e:
         logger.warning(f"get_media_by_url {url[:80]}: {e}")
-    fl = ig_follow_any_logins()
+    # Повтор через подписанные аккаунты — только если пост мог быть закрытым. Сеть, 429, LoginRequired
+    # и прочие сбои повтором не лечатся, а лишний запрос только жжёт лимит. (Пул при исчерпании
+    # попыток возвращает None, поэтому «закрытость» помечаем маркером прямо в _fetch.)
+    fl = ig_follow_any_logins() if private_like else None
     if fl:
         try:
             post = await _POOL.run(_fetch, only=fl)
-            if post and post.get("media"):
+            if post is not _PRIVATE_MARK and post and post.get("media"):
                 return post
         except Exception as e:
             logger.info(f"get_media_by_url (через подписанные акки) {url[:80]}: {e}")
@@ -3260,10 +3410,11 @@ async def get_media_by_url(url: str) -> dict | None:
 
 # ── ИСТОРИЯ ПО ССЫЛКЕ / ХАЙЛАЙТЫ ──────────────────────────────────────────────
 
-async def get_story_by_url(url: str) -> dict | None:
-    """Одна история по ссылке instagram.com/stories/<user>/<id>/ (+username в ответе)."""
+async def get_story_by_url(url: str, sid: str = "") -> dict | None:
+    """Одна история по ссылке instagram.com/stories/<user>/<id>/ (+username в ответе).
+    sid — id истории, уже вытащенный регуляркой из ссылки: передаём его прямо в story_info."""
     def _fetch(cl: Client):
-        pk = cl.story_pk_from_url(url)
+        pk = sid if str(sid).isdigit() else cl.story_pk_from_url(url)
         st = cl.story_info(pk)
         d = _story_to_dict(st)
         if not d or not d.get("url"):
@@ -3277,6 +3428,12 @@ async def get_story_by_url(url: str) -> dict | None:
     except Exception as e:
         logger.warning(f"get_story_by_url {url[:80]}: {e}")
         return None
+
+
+async def get_stories(username: str) -> list:
+    """Истории ника; параллельные одинаковые вызовы делят один запрос."""
+    res = await _single_flight(f"st:{_norm_u(username)}", lambda: _get_stories_impl(username))
+    return _sf_copy(res)
 
 
 async def get_highlights(username: str) -> list[dict]:
@@ -4260,12 +4417,16 @@ async def unfollow_user(username: str) -> dict:
     if not rows:
         return {"ok": True, "removed": 0}
     removed, errors = 0, []
+    done_requests = 0
     for r in rows:
         pk = r.get("pk")
         if not pk:
             ig_follow_del(username, r["login"])
             removed += 1
             continue
+        if done_requests:                          # несколько доноров подряд без паузы выглядят как скрипт
+            await asyncio.sleep(random.uniform(4, 9))
+        done_requests += 1
 
         def _do(cl, _pk=pk):
             return cl.user_unfollow(int(_pk))
@@ -4428,6 +4589,9 @@ async def like_toggle(shortcode: str, username: str = "", user_id: str = "") -> 
     return {"ok": True, "liked": True}
 
 
+IG_SAVE_PER_DAY = int(os.getenv("IG_SAVE_PER_DAY", "40"))
+
+
 async def bookmark_toggle(user_id: str, shortcode: str, username: str = "", caption: str = "") -> dict:
     """Закладка в боте (у каждого пользователя своя). Опционально дублируется в «Сохранённое» донора."""
     if not shortcode:
@@ -4442,10 +4606,29 @@ async def bookmark_toggle(user_id: str, shortcode: str, username: str = "", capt
         try:
             only, err = await _only_for_owner(username)
             if not err:
-                def _do(cl):
-                    mid = _mid(cl, shortcode)
-                    return cl.media_save(mid) if saved else cl.media_unsave(mid)
-                await _POOL.run(_do, only=only)
+                await _POOL._ensure_init()
+                bm = ig_blocked_map()
+                since = time.time() - 86400
+                pool = [l for l in _POOL.live_logins()
+                        if (not only or l in only) and l not in bm
+                        and (not saved or ig_act_count("save", since, l) < _day_limit(IG_SAVE_PER_DAY, l))]
+                if not pool:        # все на паузе или упёрлись в суточный лимит — зеркало в IG пропускаем
+                    logger.info(f"bookmark mirror {shortcode}: нет доноров без паузы/лимита — пропуск")
+                else:
+                    def _do(cl):
+                        mid = _mid(cl, shortcode)
+                        try:
+                            ok = cl.media_save(mid) if saved else cl.media_unsave(mid)
+                        except Exception as e:
+                            if _is_action_block(e):
+                                return ("__block__", _acc_login(cl), str(e))
+                            raise
+                        return (bool(ok), _acc_login(cl))
+                    r = await _POOL.run(_do, only=set(pool))
+                    if r and r[0] == "__block__":
+                        _note_action_block(r[1], r[2])
+                    elif r and r[0]:
+                        ig_act_log("save" if saved else "unsave", shortcode, r[1], user_id)
         except Exception as e:
             logger.info(f"bookmark mirror {shortcode}: {e}")
     return {"ok": True, "saved": saved}

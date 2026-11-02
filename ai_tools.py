@@ -13,6 +13,7 @@ import asyncio
 import html
 import logging
 import os
+import random
 import re
 import time
 from collections import defaultdict, deque
@@ -269,7 +270,15 @@ async def _tool_instagram_find_people(ctx: ToolContext, names: str = "") -> str:
     if len(parts) == 1:
         return await _tool_instagram_find_person(ctx, parts[0])
 
-    results = await asyncio.gather(*(_resolve_person(p) for p in parts), return_exceptions=True)
+    # По очереди с паузой, а не залпом: каждое имя — это поиск ников и запросы профилей к Instagram.
+    results: list = []
+    for i, p in enumerate(parts):
+        if i:
+            await asyncio.sleep(random.uniform(1.5, 3.5))
+        try:
+            results.append(await _resolve_person(p))
+        except Exception as e:
+            results.append(e)
     lines = [f"🔎 нашёл {len(parts)} имён:\n"]
     rows: list[list] = []
 

@@ -570,8 +570,35 @@ def _profile_btn(user: str):
         text=f"👤 профиль @{user}", callback_data=f"ig_profile:{user}")]])
 
 
+IG_HL_CACHE_H = float(os.getenv("IG_HL_CACHE_HOURS", "24"))     # сколько живёт кэш file_id хайлайта
+
+
+async def _send_hl_cached(message: types.Message, pk: str, *, reply: bool = False) -> tuple | None:
+    """Хайлайт по сохранённым file_id: ни запросов к Instagram, ни скачивания. (sent, total, title, user) или None."""
+    import html as _html
+    row = ig_cache_get(f"hl:{pk}")
+    if not row or time.time() - (row.get("created") or 0) > IG_HL_CACHE_H * 3600:
+        return None
+    items, title, user = row["items"], row.get("caption") or "хайлайт", row.get("username") or ""
+    head = f"🌟 {_html.escape(title)}" + (f" · @{user}" if user else "")
+    out = _out_message(message, reply=reply)
+    n, sent = len(items), 0
+    try:
+        for i in range(0, n, 10):
+            chunk = items[i:i + 10]
+            cap = head + (f" · {i + 1}–{i + len(chunk)} из {n}" if n > 10 else f" · {n}")
+            sent += len(await _send_cached(out, {"items": chunk, "caption": cap}, caption=cap))
+            await asyncio.sleep(0.5)
+    except Exception as e:             # file_id протух — сносим кэш, дальше обычный путь
+        logger.info(f"hl cache {pk}: {e}")
+        ig_cache_drop(f"hl:{pk}")
+        return None
+    return sent, n, title, user
+
+
 async def _send_story_albums(message: types.Message, stories: list[dict], title_html: str,
-                             *, reply: bool = False, limit: int = 50) -> int:
+                             *, reply: bool = False, limit: int = 50,
+                             cache: tuple | None = None) -> int:
     """
     Отправить истории альбомами по 10 штук (память: качаем и шлём по одной десятке).
     Возвращает, сколько файлов ушло.
@@ -580,18 +607,28 @@ async def _send_story_albums(message: types.Message, stories: list[dict], title_
     stories = stories[:limit]
     n = len(stories)
     sent = 0
+    cache_items: list[dict] = []
+    cache_ok = bool(cache)
     for i in range(0, n, 10):
         chunk = stories[i:i + 10]
         files, _ = await _fetch_media_files(chunk, limit=10)
         if not files:
+            cache_ok = False
             continue
         cap = title_html + (f" · {i + 1}–{i + len(chunk)} из {n}" if n > 10 else f" · {n}")
         try:
             msgs, _ok = await _send_files_safe(out, files, cap)
             sent += len(msgs)
+            got = _cache_items(msgs)
+            cache_items.extend(got)
+            if not _ok or len(got) != len(chunk):
+                cache_ok = False                 # часть не ушла / деградация — неполный набор не кэшируем
         except Exception as e:
+            cache_ok = False
             logger.error(f"send story album: {e}")
         await asyncio.sleep(1.0)
+    if cache and cache_ok and n and len(cache_items) == n:
+        ig_cache_put(cache[0], cache[1], cache[2], cache_items, n)
     return sent
 
 
@@ -923,18 +960,17 @@ async def _show_profile(source, ig_username: str, tg_user_id: int) -> bool:
     await anim.step("📸 Загружаю аватарку...")
 
     avatar_bytes: bytes | None = None
-    if not stale_ts:                     # из кэша (swr / сбой IG) пул ради аватарки не гоняем — зависнем на ретраях
+    avatar_url = info.get("avatar_url", "")
+    if avatar_url:                       # сначала прямо с CDN — без участия доноров
+        try:
+            avatar_bytes = await _download(avatar_url)
+        except Exception:
+            avatar_bytes = None
+    if not avatar_bytes and not stale_ts:   # из кэша (swr / сбой IG) пул ради аватарки не гоняем — зависнем на ретраях
         try:
             avatar_bytes = await get_avatar_bytes(ig_username)
         except Exception:
             pass
-    if not avatar_bytes:
-        avatar_url = info.get("avatar_url", "")
-        if avatar_url:
-            try:
-                avatar_bytes = await _download(avatar_url)
-            except Exception:
-                avatar_bytes = None
 
     await anim.step("✨ Формирую карточку...")
     await anim.done()
@@ -977,6 +1013,21 @@ async def _swr_refresh_card(sent, ig_username: str, old: dict, kb) -> None:
 # ── ПОИСК ПО ИМЕНИ / ПОВТОР ───────────────────────────────────────────────────
 
 _RETRY_TS: dict[int, float] = {}
+_CB_TS: dict[tuple[int, str], float] = {}
+
+
+def _cb_ok(callback: types.CallbackQuery, seconds: float = 5.0) -> bool:
+    """Отсечка повторного нажатия ТОЙ ЖЕ кнопки тем же пользователем (двойной тап, спам в группе).
+    Разные кнопки и страницы друг друга не блокируют."""
+    now = time.time()
+    key = (callback.from_user.id, callback.data or "")
+    if now - _CB_TS.get(key, 0) < seconds:
+        return False
+    _CB_TS[key] = now
+    if len(_CB_TS) > 2000:
+        for k in [k for k, t in _CB_TS.items() if now - t > 60]:
+            _CB_TS.pop(k, None)
+    return True
 
 
 async def callback_ig_retry(callback: types.CallbackQuery):
@@ -1059,6 +1110,9 @@ async def callback_ig_profile(callback: types.CallbackQuery):
 # ── КОЛБЭК: ИСТОРИИ ───────────────────────────────────────────────────────────
 
 async def callback_ig_stories(callback: types.CallbackQuery):
+    if not _cb_ok(callback):
+        await callback.answer("подожди пару секунд", show_alert=False)
+        return
     ig_username = callback.data.split(":", 1)[1]
     await callback.answer("⏳ Загружаю истории...")
 
@@ -1159,6 +1213,9 @@ async def callback_ig_stories_all(callback: types.CallbackQuery):
 
 async def callback_ig_highlights(callback: types.CallbackQuery):
     """Список закреплённых коллекций историй (хайлайтов)."""
+    if not _cb_ok(callback):
+        await callback.answer("подожди пару секунд", show_alert=False)
+        return
     import html as _html
     ig_username = callback.data.split(":", 1)[1]
     await callback.answer("🌟 Ищу хайлайты...")
@@ -1196,17 +1253,24 @@ async def callback_ig_highlight_view(callback: types.CallbackQuery):
     import html as _html
     _, pk, ig_username = callback.data.split(":", 2)
     await callback.answer("⏳ Загружаю хайлайт...")
-    data = await get_highlight_items(pk)
-    if not data:
-        await callback.message.answer("❌ Не удалось получить этот хайлайт.")
-        return
+    cached = await _send_hl_cached(callback.message, pk)       # по file_id — Instagram не трогаем
+    if cached:
+        sent, total, title, user = cached
+        user = user or ig_username
+        stories = [None] * total
+    else:
+        data = await get_highlight_items(pk)
+        if not data:
+            await callback.message.answer("❌ Не удалось получить этот хайлайт.")
+            return
 
-    user = data.get("username") or ig_username
-    title = data.get("title") or "хайлайт"
-    stories = data["stories"]
-    sent = await _send_story_albums(
-        callback.message, stories, f"🌟 {_html.escape(title)} · @{user}"
-    )
+        user = data.get("username") or ig_username
+        title = data.get("title") or "хайлайт"
+        stories = data["stories"]
+        sent = await _send_story_albums(
+            callback.message, stories, f"🌟 {_html.escape(title)} · @{user}",
+            cache=(f"hl:{pk}", user, title),
+        )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ К хайлайтам", callback_data=f"ig_hl:{user}")],
         [InlineKeyboardButton(text="◀️ Профиль", callback_data=f"ig_profile:{user}")],
@@ -1221,6 +1285,9 @@ async def callback_ig_highlight_view(callback: types.CallbackQuery):
 # ── КОЛБЭК: ПОСТЫ ─────────────────────────────────────────────────────────────
 
 async def callback_ig_posts(callback: types.CallbackQuery):
+    if not _cb_ok(callback):
+        await callback.answer("подожди пару секунд", show_alert=False)
+        return
     parts = callback.data.split(":", 2)
     ig_username = parts[1]
     cursor_key = parts[2] if len(parts) > 2 else ""
@@ -1366,9 +1433,7 @@ async def callback_ig_sub(callback: types.CallbackQuery):
         await callback.answer(f"🔔 Подписался на {labels.get(sub_type, sub_type)} @{ig_username}!")
         # Запоминаем текущее состояние (и pk аккаунта — чтобы пережить смену ника),
         # чтобы не завалить уведомлениями о старом
-        _spawn(_seed_subscription(uid, ig_username, sub_type))
-        if sub_type in ("posts", "stories"):
-            _spawn(_private_hint(callback.message, ig_username))
+        _spawn(_after_subscribe(callback.message, uid, ig_username, sub_type))
 
     try:
         await callback.message.edit_reply_markup(
@@ -1476,14 +1541,28 @@ async def callback_ig_last_post(callback: types.CallbackQuery):
 # ── ФОНОВЫЙ ОПРОС ПОДПИСОК ────────────────────────────────────────────────────
 
 
-async def _seed_subscription(user_id: str, ig_username: str, sub_type: str) -> None:
+async def _after_subscribe(message: types.Message, user_id: str, ig_username: str, sub_type: str) -> None:
+    """Одна корутина вместо двух фоновых: профиль запрашиваем один раз и отдаём и сидингу, и подсказке."""
+    info = None
+    try:
+        info = await get_user_info(ig_username)
+    except Exception as e:
+        logger.debug(f"after_subscribe @{ig_username}: {e}")
+    await _seed_subscription(user_id, ig_username, sub_type, info=info, info_loaded=True)
+    if sub_type in ("posts", "stories"):
+        await _private_hint(message, ig_username, info=info, info_loaded=True)
+
+
+async def _seed_subscription(user_id: str, ig_username: str, sub_type: str,
+                             info: dict | None = None, info_loaded: bool = False) -> None:
     """
     Пункты 1/3: сразу после подписки запоминаем текущее состояние, чтобы
     не слать «новыми» посты, которые уже были, и не ловить ложную смену аватарки.
     Заодно запоминаем pk аккаунта — по нему бот переживёт смену ника.
     """
     try:
-        info = await get_user_info(ig_username)
+        if not info_loaded:
+            info = await get_user_info(ig_username)
         if info and info.get("id"):
             st = ig_get_user_state(ig_username) or {}
             upd = {}
@@ -1495,8 +1574,12 @@ async def _seed_subscription(user_id: str, ig_username: str, sub_type: str) -> N
                 ig_set_user_state(ig_username, **upd)
 
         if sub_type == "posts":
-            data = await get_posts(ig_username)
-            ids = [f"post_{p['id']}" for p in data.get("posts", []) if p.get("id")]
+            # Для стартового запоминания хватает последних постов (как в проверке), а не полной
+            # выгрузки с пагинацией. Не вышло (приватный без доступа, сбой) — прежний путь.
+            seeded = await get_latest_posts(ig_username)
+            if seeded is None:
+                seeded = (await get_posts(ig_username)).get("posts", [])
+            ids = [f"post_{p['id']}" for p in seeded if p.get("id")]
             ig_mark_sent_many(user_id, ids)
             ig_update_last_seen(user_id, ig_username, "posts", "seeded")
             if info and info.get("posts_count") is not None:
@@ -1610,10 +1693,12 @@ async def _run_ig_check(bot: Bot):
     except Exception as e:
         logger.info(f"[ig-check] пачка историй не вышла: {type(e).__name__}: {e}")
 
+    from instagram_viewer import ig_affinity
     for _, uname, user_subs in due:
         found = False
         try:
-            found = await _check_user(bot, uname, user_subs)
+            with ig_affinity(uname):          # ник всегда проверяет «свой» донор, не хоровод аккаунтов
+                found = await _check_user(bot, uname, user_subs)
         except Exception as e:
             logger.error(f"ig check {uname}: {e}")
         t = time.time()
@@ -1684,12 +1769,13 @@ async def _handle_missing_or_renamed(bot: Bot, old: str, subs: list[dict], st: d
 
 async def _check_user(bot: Bot, ig_username: str, subs: list[dict]) -> bool:
     """Проверка аватарки / историй / постов для одного ника. True — было что-то новое."""
-    status, info = await get_user_status(ig_username, force=True)
-    if status == "error":
-        return False                       # сбой IG/сети — не путаем с «аккаунта нет»
-
+    from instagram_viewer import get_user_status_for_check
     st = ig_get_user_state(ig_username) or {}
     stored_pk = st.get("pk", "")
+    # pk известен → профиль одним запросом по pk (а не каскадом по нику); смена ника/«нет аккаунта» — прежним путём
+    status, info = await get_user_status_for_check(ig_username, "" if st.get("is_gone") else stored_pk)
+    if status == "error":
+        return False                       # сбой IG/сети — не путаем с «аккаунта нет»
     cur_pk = (info or {}).get("id", "")
 
     # ник исчез, либо его занял другой человек (pk не совпал)
@@ -1738,6 +1824,11 @@ async def _check_user(bot: Bot, ig_username: str, subs: list[dict]) -> bool:
         else:
             latest = await get_latest_posts(ig_username)
 
+    # Истории — один запрос на ник, а не на каждого подписчика (get_stories ещё и кэширует).
+    stories_pre = None
+    if has_access and any(x["sub_type"] == "stories" for x in subs):
+        stories_pre = await get_stories(ig_username)
+
     found = False
     posts_ok = latest is not None
     for sub in subs:
@@ -1748,7 +1839,7 @@ async def _check_user(bot: Bot, ig_username: str, subs: list[dict]) -> bool:
             if sub_type == "avatar":
                 found |= await _check_avatar(bot, user_id, ig_username, info, last_seen)
             elif sub_type == "stories":
-                found |= await _check_stories(bot, user_id, ig_username)
+                found |= await _check_stories(bot, user_id, ig_username, stories=stories_pre)
             elif sub_type == "posts" and latest is not None:
                 found |= await _check_posts(bot, user_id, ig_username, last_seen, latest)
         except Exception as e:
@@ -1860,8 +1951,11 @@ def _story_fail(user_id: str, story_id: str) -> bool:
     return False
 
 
-async def _check_stories(bot: Bot, user_id: str, ig_username: str) -> bool:
-    stories = await get_stories(ig_username)
+async def _check_stories(bot: Bot, user_id: str, ig_username: str, stories: list | None = None) -> bool:
+    if stories is None:
+        stories = await get_stories(ig_username)
+    else:
+        stories = [dict(x) for x in stories]          # у каждого подписчика своя копия
     if not stories:
         return False
     new_stories = [
@@ -2318,15 +2412,41 @@ async def _to_mp3(data: bytes) -> bytes | None:
     return out if len(out) > 500 else None
 
 
+def _music_db_get(sc: str) -> dict | None:
+    """Метаданные звука из ig_file_cache (ключ mu:<sc>): артист/название стабильны, ссылки на видео
+    могли протухнуть — _reel_audio_mp3 при неудаче сама перечитает пост (refresh=True)."""
+    try:
+        row = ig_cache_get(f"mu:{sc}")
+        m = ((row or {}).get("items") or [{}])[0].get("m")
+        return m if isinstance(m, dict) and m else None
+    except Exception:
+        return None
+
+
+def _music_db_put(sc: str, meta: dict) -> None:
+    try:
+        ig_cache_put(f"mu:{sc}", meta.get("username", ""), (meta.get("title") or "")[:100],
+                     [{"kind": "music", "m": meta}], 1)
+    except Exception as e:
+        logger.debug(f"music cache {sc}: {e}")
+
+
 async def _music_meta(sc: str, refresh: bool = False) -> dict | None:
-    if not refresh and sc in _MUSIC_MEM:
-        return _MUSIC_MEM[sc]
+    if not refresh:
+        if sc in _MUSIC_MEM:
+            return _MUSIC_MEM[sc]
+        saved = _music_db_get(sc)               # после редеплоя доноров ради названия трека не дёргаем
+        if saved:
+            _MUSIC_MEM[sc] = saved
+            return saved
     post = await get_media_by_url(f"https://www.instagram.com/reel/{sc}/")
     if post:
         if not post.get("music"):
             post["music"] = {"kind": "original", "artist": post.get("username", ""),
                              "title": "Оригинальный звук", "audio_url": ""}
         _remember_music(sc, post)
+        if _MUSIC_MEM.get(sc):
+            _music_db_put(sc, _MUSIC_MEM[sc])
     return _MUSIC_MEM.get(sc)
 
 
@@ -2388,7 +2508,7 @@ async def _send_story_link(message: types.Message, user: str, sid: str, url: str
     stories = await get_stories(user)
     story = next((x for x in stories if str(x.get("id", "")).split("_")[0] == sid), None)
     if not story:                        # уже не в активных / запрос по прямой ссылке
-        story = await get_story_by_url(url)
+        story = await get_story_by_url(url, sid)
         if story and story.get("username"):
             user = story["username"].lower()
     if not story:
@@ -2417,13 +2537,17 @@ async def _send_user_stories_link(message: types.Message, user: str) -> bool:
 async def _send_highlight_link(message: types.Message, pk: str) -> bool:
     """instagram.com/stories/highlights/<pk> → хайлайт альбомами."""
     import html as _html
+    cached = await _send_hl_cached(message, pk, reply=True)
+    if cached:
+        return cached[0] > 0
     data = await get_highlight_items(pk)
     if not data:
         return False
-    title = _html.escape(data.get("title") or "хайлайт")
+    title_raw = data.get("title") or "хайлайт"
     user = data.get("username") or ""
-    head = f"🌟 {title}" + (f" · @{user}" if user else "")
-    return (await _send_story_albums(message, data["stories"], head, reply=True)) > 0
+    head = f"🌟 {_html.escape(title_raw)}" + (f" · @{user}" if user else "")
+    return (await _send_story_albums(message, data["stories"], head, reply=True,
+                                     cache=(f"hl:{pk}", user, title_raw))) > 0
 
 
 async def _dispatch_ig_link(message: types.Message, parsed) -> bool:
@@ -4461,6 +4585,9 @@ async def _inline_media(iq: types.InlineQuery, link: str) -> None:
         logger.warning(f"inline ig media answer: {e}")
 
 
+IG_INLINE_CACHE_ONLY = int(os.getenv("IG_INLINE_CACHE_ONLY", "4"))     # ≤ столько символов — только кэш
+
+
 async def inline_instagram(iq: types.InlineQuery):
     """Inline: `ig` → мои подписки; `ig natgeo` / ссылка на профиль → карточка; ссылка на пост/рилс → видео."""
     uname = parse_ig_inline(iq.query)
@@ -4473,10 +4600,17 @@ async def inline_instagram(iq: types.InlineQuery):
         await _inline_media(iq, uname)
         return
 
-    try:
-        status, info = await asyncio.wait_for(get_user_status(uname), timeout=IG_INLINE_TIMEOUT)
-    except asyncio.TimeoutError:
-        status, info = "timeout", None
+    if len(uname) <= IG_INLINE_CACHE_ONLY:
+        # Telegram шлёт запрос на каждую набранную букву (n, na, nat…). Пока ник короткий —
+        # отвечаем только из локального кэша, пул Instagram не трогаем.
+        from instagram_viewer import _ucache_get, _ucache_stale
+        cached = _ucache_get(uname) or (lambda st: st[0] if st else None)(_ucache_stale(uname))
+        status, info = ("ok", dict(cached)) if cached else ("short", None)
+    else:
+        try:
+            status, info = await asyncio.wait_for(get_user_status(uname), timeout=IG_INLINE_TIMEOUT)
+        except asyncio.TimeoutError:
+            status, info = "timeout", None
 
     link = f"https://instagram.com/{uname}"
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -4497,6 +4631,11 @@ async def inline_instagram(iq: types.InlineQuery):
                 caption=text, parse_mode="HTML", reply_markup=kb))
         results.append(_ig_article(
             _iq_id("txt", uname), title, desc, text, kb, thumb=info.get("avatar_url") or None))
+    elif status == "short":
+        cache_time = 1
+        results.append(_ig_article(
+            _iq_id("sh", uname), f"✏️ @{uname}…", f"допиши ник — поиск в Instagram начнётся с {IG_INLINE_CACHE_ONLY + 1} символов",
+            f'📸 <a href="{link}">@{uname}</a> в Instagram', kb))
     elif status == "notfound":
         results.append(_ig_article(
             _iq_id("nf", uname), f"❌ @{uname} не найден", "проверь написание ника",
@@ -4664,10 +4803,12 @@ def _patch_act_buttons(markup, sc: str, user: str, uid):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _private_hint(message: types.Message, ig_username: str) -> None:
+async def _private_hint(message: types.Message, ig_username: str,
+                        info: dict | None = None, info_loaded: bool = False) -> None:
     """Подписался на уведомления приватного аккаунта, к которому у бота нет доступа — объясняем."""
     try:
-        info = await get_user_info(ig_username)
+        if not info_loaded:
+            info = await get_user_info(ig_username)
         if info and info.get("is_private") and ig_follow_state(ig_username) == "none":
             await message.answer(
                 f"🔒 @{ig_username} приватный — уведомления придут, только когда бот подпишется на него "

@@ -13,8 +13,10 @@
 """
 import asyncio
 import html as _html
+import json
 import logging
 import os
+import random
 import re
 import sqlite3
 import tempfile
@@ -29,7 +31,7 @@ from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarku
 from instagram_viewer import (
     IG_DB, _POOL, _access, _norm_u, _pk_for, get_posts, get_user_info,
     ig_get_subscriptions, set_background_priority,
-    _REST_UNTIL, _acc_login, _is_action_block, bulk_scope, page_pause,
+    _REST_UNTIL, _acc_login, _is_action_block, _is_429, bulk_scope, human_delay,
 )
 from instagram_handlers import (
     _act_row, _download, _fetch_media_files, _get_admin_ids, _out_chat,
@@ -45,6 +47,7 @@ IG_DUMP_FILE_MB = int(os.getenv("IG_DUMP_FILE_MB", "60"))            # файл 
 IG_DUMP_COOLDOWN = int(os.getenv("IG_DUMP_COOLDOWN", "600"))         # сек между архивами одного пользователя
 IG_DUMP_PART_MB = float(os.getenv("IG_DUMP_PART_MB", "45"))          # часть архива для Telegram (лимит 50 МБ)
 IG_TOPICS_PER_USER = int(os.getenv("IG_TOPICS_PER_USER", "10"))
+IG_TOPIC_MAX_MULT = int(os.getenv("IG_TOPIC_MAX_MULT", "6"))
 IG_TOPIC_EVERY = int(os.getenv("IG_TOPIC_EVERY", str(3 * 3600)))     # как часто проверять одну тему, сек
 IG_TOPIC_TICK = int(os.getenv("IG_TOPIC_TICK", "600"))               # как часто просыпается задача, сек
 IG_TOPIC_PER_TICK = int(os.getenv("IG_TOPIC_PER_TICK", "2"))         # сколько тем за раз (бережём доноров)
@@ -67,6 +70,9 @@ def init_extras_db() -> None:
             PRIMARY KEY (user_id, kind, key)
         )""")
         # общее состояние темы: один опрос Instagram на всех подписчиков
+        conn.execute("""CREATE TABLE IF NOT EXISTS ig_chain_cache (
+            username TEXT PRIMARY KEY, ts REAL NOT NULL, data TEXT NOT NULL
+        )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS ig_topic_state (
             kind TEXT NOT NULL, key TEXT NOT NULL,
             last_ts INTEGER DEFAULT 0, last_check REAL DEFAULT 0, fails INTEGER DEFAULT 0,
@@ -172,12 +178,43 @@ def cosub_suggestions(user_id: str, username: str, limit: int = 8) -> list[tuple
     return [(r[0], r[1]) for r in rs]
 
 
+def _chain_db_get(username: str):
+    try:
+        conn = _dbx()
+        try:
+            r = conn.execute("SELECT ts, data FROM ig_chain_cache WHERE username=?", (username,)).fetchone()
+        finally:
+            conn.close()
+        if r and time.time() - r[0] < _CHAIN_TTL:
+            return float(r[0]), json.loads(r[1])
+    except Exception as e:
+        logger.debug(f"chain cache get {username}: {e}")
+    return None
+
+
+def _chain_db_put(username: str, res: list) -> None:
+    try:
+        conn = _dbx()
+        try:
+            conn.execute("INSERT OR REPLACE INTO ig_chain_cache (username, ts, data) VALUES (?,?,?)",
+                         (username, time.time(), json.dumps(res)))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"chain cache put {username}: {e}")
+
+
 async def instagram_related(username: str) -> list[dict]:
     """«Похожие профили» от самого Instagram (discover/chaining). Любой сбой → пустой список."""
     username = _norm_u(username)
     hit = _CHAIN_CACHE.get(username)
     if hit and time.time() - hit[0] < _CHAIN_TTL:
         return hit[1]
+    saved = _chain_db_get(username)                 # переживает редеплой бота
+    if saved is not None:
+        _CHAIN_CACHE[username] = (saved[0], saved[1])
+        return saved[1]
     info = await get_user_info(username)
     if not info:
         return []
@@ -203,6 +240,7 @@ async def instagram_related(username: str) -> list[dict]:
         return []
     res = res or []
     _CHAIN_CACHE[username] = (time.time(), res)
+    _chain_db_put(username, res)
     return res
 
 
@@ -276,8 +314,8 @@ async def _collect_posts(username: str, n: int) -> tuple[list[dict], str]:
     page_no = 0
     with bulk_scope():          # выгрузка до 60 постов идёт на расходных доноров (если назначены)
         while len(posts) < n:
-            if page_no:         # каждая следующая страница медленнее — как живой скролл
-                await asyncio.sleep(page_pause(page_no))
+            if page_no:         # 4–8 с между страницами + ещё 3–4 с за каждую следующую — архив не «выстреливает»
+                await asyncio.sleep(min(human_delay(4, 8) + (page_no - 1) * random.uniform(3, 4), 40))
             page_no += 1
             r = await get_posts(username, str(offset) if offset else "")
             if r.get("private"):
@@ -619,7 +657,10 @@ def _due_topics(limit: int) -> list[dict]:
         conn.close()
     out = []
     for kind, key, last_ts, last_check, fails in rs:
-        wait = IG_TOPIC_EVERY * (1 + min(fails, 3))       # при сбоях — реже, до ×4
+        # при сбоях реже (до ×4); и когда в теме давно ничего нового (newest-пост старый) — тоже, до ×IG_TOPIC_MAX_MULT
+        age = now - (last_ts or now)
+        quiet = 1 if age < 86400 else 2 if age < 3 * 86400 else 3 if age < 7 * 86400 else 4
+        wait = IG_TOPIC_EVERY * min(max(quiet, 1 + min(fails, 3)), IG_TOPIC_MAX_MULT)
         if now - (last_check or 0) >= wait:
             out.append({"kind": kind, "key": key, "last_ts": int(last_ts or 0), "fails": fails})
         if len(out) >= limit:
@@ -646,7 +687,9 @@ async def _fetch_topic_posts(kind: str, key: str, amount: int = 12) -> list[dict
                 try:
                     medias = cl.hashtag_medias_recent(key, amount=amount)
                 except Exception as e:
-                    if _is_action_block(e):
+                    # feedback_required, 429 и слетевшая сессия тем же донором через «top» не лечатся — только ещё
+                    # один запрос в тот же лимит. Фоллбэк на top — лишь при «обычной» ошибке эндпоинта.
+                    if _is_action_block(e) or _is_429(e) or type(e).__name__ in ("LoginRequired", "ClientLoginRequired"):
                         raise
                     medias = cl.hashtag_medias_top(key, amount=amount)
             else:
